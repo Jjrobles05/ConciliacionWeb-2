@@ -5,7 +5,6 @@ import pandas as pd
 import streamlit as st
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
 
 
 # =========================================================
@@ -143,7 +142,6 @@ def escribir_tabla(ws, fila, titulo, df):
         numero_columnas
     )
 
-    # Encabezados
     for columna, nombre in enumerate(
         df.columns,
         start=1
@@ -157,7 +155,6 @@ def escribir_tabla(ws, fila, titulo, df):
 
     fila += 1
 
-    # Datos
     for _, registro in df.iterrows():
 
         for columna, nombre in enumerate(
@@ -178,23 +175,11 @@ def escribir_tabla(ws, fila, titulo, df):
             if nombre == "Valor":
                 celda.number_format = '#,##0.00'
 
-            if nombre in [
-                "4 x 1000",
-                "Cuota de manejo",
-                "IVA",
-                "Rte. fuente",
-                "Comisión",
-                "Ing. x intereses"
-            ]:
-                celda.number_format = '#,##0.00'
-
         fila += 1
 
-    # Si no hay registros, dejar una fila visual
     if df.empty:
         fila += 1
 
-    # Total
     columna_valor = None
 
     for columna, nombre in enumerate(
@@ -304,7 +289,6 @@ def escribir_gastos_bancarios(ws, fila, df):
     if df.empty:
         fila += 1
 
-    # Totales de gastos
     fila_total = fila
 
     ws.cell(
@@ -364,7 +348,8 @@ def preparar_excel(
     saldo_extracto,
     saldo_libros,
     diferencia_inicial,
-    diferencia_final,
+    diferencia_conciliada,
+    resultado_final,
     salidas_extracto,
     salidas_libros,
     entradas_libros,
@@ -374,34 +359,31 @@ def preparar_excel(
     revisado_por
 ):
     """
-    Genera UN SOLO archivo Excel con UNA SOLA HOJA,
-    siguiendo la estructura del formato suministrado.
+    Genera UN SOLO archivo Excel con UNA SOLA HOJA.
+
+    La lógica de conciliación sigue el modelo del Excel de referencia:
+
+    H15 = saldo extracto - saldo libros
+
+    H18 = + salidas no registradas en extracto
+    H19 = - salidas bancarias no contabilizadas en libros
+    H20 = + entradas bancarias no contabilizadas en libros
+    H21 = - entradas no evidenciadas en extractos
+
+    H22 = suma de H18:H21
+    H23 = H15 - H22
     """
 
-    salidas_extracto = limpiar_dataframe(
-        salidas_extracto
-    )
-    salidas_libros = limpiar_dataframe(
-        salidas_libros
-    )
-    entradas_libros = limpiar_dataframe(
-        entradas_libros
-    )
-    entradas_extracto = limpiar_dataframe(
-        entradas_extracto
-    )
-    gastos_bancarios = limpiar_dataframe(
-        gastos_bancarios
-    )
+    salidas_extracto = limpiar_dataframe(salidas_extracto)
+    salidas_libros = limpiar_dataframe(salidas_libros)
+    entradas_libros = limpiar_dataframe(entradas_libros)
+    entradas_extracto = limpiar_dataframe(entradas_extracto)
+    gastos_bancarios = limpiar_dataframe(gastos_bancarios)
 
     workbook = Workbook()
 
     ws = workbook.active
     ws.title = "Conciliación Bancaria"
-
-    # -----------------------------------------------------
-    # CONFIGURACIÓN DE PÁGINA
-    # -----------------------------------------------------
 
     ws.page_setup.orientation = "landscape"
     ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
@@ -414,10 +396,6 @@ def preparar_excel(
     ws.page_margins.right = 0.25
     ws.page_margins.top = 0.40
     ws.page_margins.bottom = 0.40
-
-    # -----------------------------------------------------
-    # ANCHOS
-    # -----------------------------------------------------
 
     anchos = {
         "A": 15,
@@ -432,19 +410,9 @@ def preparar_excel(
     for letra, ancho in anchos.items():
         ws.column_dimensions[letra].width = ancho
 
-    # -----------------------------------------------------
-    # TÍTULO
-    # -----------------------------------------------------
-
     ws.merge_cells("A1:G1")
-
     ws["A1"] = "CONCILIACIÓN BANCARIA"
-
-    estilo_titulo(
-        ws["A1"],
-        16
-    )
-
+    estilo_titulo(ws["A1"], 16)
     ws.row_dimensions[1].height = 28
 
     # -----------------------------------------------------
@@ -555,7 +523,7 @@ def preparar_excel(
     fila += 1
 
     # -----------------------------------------------------
-    # JUSTIFICACIÓN - RESUMEN
+    # JUSTIFICACIÓN
     # -----------------------------------------------------
 
     fila = escribir_seccion(
@@ -568,31 +536,77 @@ def preparar_excel(
     justificaciones = [
         (
             "SALIDAS NO REGISTRADAS EN EXTRACTO",
-            total_columna(
-                salidas_extracto
-            )
+            total_columna(salidas_extracto)
         ),
         (
             "SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
-            total_columna(
-                salidas_libros
-            )
+            total_columna(salidas_libros)
         ),
         (
             "ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
-            total_columna(
-                entradas_libros
-            )
+            total_columna(entradas_libros)
         ),
         (
             "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS",
-            total_columna(
-                entradas_extracto
-            )
+            total_columna(entradas_extracto)
         ),
     ]
 
     for nombre, valor in justificaciones:
+
+        ws.cell(
+            row=fila,
+            column=1
+        ).value = nombre
+
+        ws.cell(
+            row=fila,
+            column=1
+        ).font = Font(
+            bold=True
+        )
+
+        ws.cell(
+            row=fila,
+            column=2
+        ).value = valor
+
+        ws.cell(
+            row=fila,
+            column=2
+        ).number_format = '#,##0.00'
+
+        fila += 1
+
+    # -----------------------------------------------------
+    # RESUMEN DE CÁLCULO
+    # -----------------------------------------------------
+
+    fila += 1
+
+    fila = escribir_seccion(
+        ws,
+        fila,
+        "CÁLCULO DE LA CONCILIACIÓN",
+        4
+    )
+
+    calculo = [
+        (
+            "DIFERENCIA A JUSTIFICAR",
+            diferencia_inicial
+        ),
+        (
+            "DIFERENCIA CONCILIADA",
+            diferencia_conciliada
+        ),
+        (
+            "RESULTADO FINAL",
+            resultado_final
+        ),
+    ]
+
+    for nombre, valor in calculo:
 
         ws.cell(
             row=fila,
@@ -676,20 +690,12 @@ def preparar_excel(
     ws.cell(
         row=fila,
         column=1
-    ).value = "DIFERENCIA CONCILIADA"
-
-    ws.cell(
-        row=fila,
-        column=1
-    ).font = Font(
-        bold=True
-    )
+    ).value = "DIFERENCIA A JUSTIFICAR"
 
     ws.cell(
         row=fila,
         column=2
-    ).value = diferencia_final
-
+    ).value = diferencia_inicial
     ws.cell(
         row=fila,
         column=2
@@ -697,9 +703,51 @@ def preparar_excel(
 
     fila += 1
 
+    ws.cell(
+        row=fila,
+        column=1
+    ).value = "DIFERENCIA CONCILIADA"
+
+    ws.cell(
+        row=fila,
+        column=2
+    ).value = diferencia_conciliada
+    ws.cell(
+        row=fila,
+        column=2
+    ).number_format = '#,##0.00'
+
+    fila += 1
+
+    ws.cell(
+        row=fila,
+        column=1
+    ).value = "RESULTADO FINAL"
+
+    ws.cell(
+        row=fila,
+        column=2
+    ).value = resultado_final
+    ws.cell(
+        row=fila,
+        column=2
+    ).number_format = '#,##0.00'
+
+    for r in range(fila - 2, fila + 1):
+        ws.cell(
+            row=r,
+            column=1
+        ).font = Font(bold=True)
+        ws.cell(
+            row=r,
+            column=2
+        ).font = Font(bold=True)
+
+    fila += 1
+
     estado = (
         "CONCILIACIÓN BANCARIA CORRECTA"
-        if abs(diferencia_final) < 0.005
+        if abs(resultado_final) < 0.005
         else "CONCILIACIÓN CON DIFERENCIA"
     )
 
@@ -788,28 +836,14 @@ def preparar_excel(
     # -----------------------------------------------------
 
     borde = Border(
-        left=Side(
-            style="thin",
-            color="D9D9D9"
-        ),
-        right=Side(
-            style="thin",
-            color="D9D9D9"
-        ),
-        top=Side(
-            style="thin",
-            color="D9D9D9"
-        ),
-        bottom=Side(
-            style="thin",
-            color="D9D9D9"
-        )
+        left=Side(style="thin", color="D9D9D9"),
+        right=Side(style="thin", color="D9D9D9"),
+        top=Side(style="thin", color="D9D9D9"),
+        bottom=Side(style="thin", color="D9D9D9")
     )
 
     for fila_excel in ws.iter_rows():
-
         for celda in fila_excel:
-
             if celda.value is not None:
                 celda.border = borde
                 celda.alignment = Alignment(
@@ -817,18 +851,13 @@ def preparar_excel(
                     wrap_text=True
                 )
 
-    # Volver a centrar títulos después del borde general
     for fila_excel in ws.iter_rows():
-
         for celda in fila_excel:
-
             if (
                 celda.fill
                 and celda.fill.fill_type == "solid"
                 and celda.fill.fgColor.rgb
-                and "1F4E78" in str(
-                    celda.fill.fgColor.rgb
-                )
+                and "1F4E78" in str(celda.fill.fgColor.rgb)
             ):
                 celda.alignment = Alignment(
                     horizontal="center",
@@ -837,14 +866,8 @@ def preparar_excel(
 
     ws.freeze_panes = "A3"
 
-    # -----------------------------------------------------
-    # EXPORTAR A MEMORIA
-    # -----------------------------------------------------
-
     output = io.BytesIO()
-
     workbook.save(output)
-
     output.seek(0)
 
     nombre_archivo = (
@@ -853,14 +876,11 @@ def preparar_excel(
         f"{limpiar_nombre_archivo(mes)}.xlsx"
     )
 
-    return (
-        output.getvalue(),
-        nombre_archivo
-    )
+    return output.getvalue(), nombre_archivo
 
 
 # =========================================================
-# INFORMACIÓN GENERAL - APLICACIÓN
+# INFORMACIÓN GENERAL
 # =========================================================
 
 st.subheader("Información General")
@@ -868,33 +888,14 @@ st.subheader("Información General")
 col1, col2 = st.columns(2)
 
 with col1:
-
-    empresa = st.text_input(
-        "Nombre de la Empresa"
-    )
-
-    nit = st.text_input(
-        "NIT"
-    )
-
-    mes = st.text_input(
-        "Mes y Año"
-    )
-
-    fecha_elaboracion = st.date_input(
-        "Fecha de elaboración"
-    )
+    empresa = st.text_input("Nombre de la Empresa")
+    nit = st.text_input("NIT")
+    mes = st.text_input("Mes y Año")
+    fecha_elaboracion = st.date_input("Fecha de elaboración")
 
 with col2:
-
-    banco = st.text_input(
-        "Nombre del Banco"
-    )
-
-    cuenta = st.text_input(
-        "Número de Cuenta"
-    )
-
+    banco = st.text_input("Nombre del Banco")
+    cuenta = st.text_input("Número de Cuenta")
     tipo = st.selectbox(
         "Tipo de Cuenta",
         ["Ahorros", "Corriente"]
@@ -906,13 +907,11 @@ with col2:
 # =========================================================
 
 st.divider()
-
 st.subheader("Saldos")
 
 col1, col2 = st.columns(2)
 
 with col1:
-
     saldo_extracto = st.number_input(
         "Saldo según Extracto Bancario",
         value=0.0,
@@ -920,16 +919,13 @@ with col1:
     )
 
 with col2:
-
     saldo_libros = st.number_input(
         "Saldo según Libros",
         value=0.0,
         format="%.2f"
     )
 
-diferencia_inicial = (
-    saldo_extracto - saldo_libros
-)
+diferencia_inicial = saldo_extracto - saldo_libros
 
 st.metric(
     "Diferencia a Justificar",
@@ -942,10 +938,7 @@ st.metric(
 # =========================================================
 
 st.divider()
-
-st.subheader(
-    "Salidas no Registradas en Extracto"
-)
+st.subheader("Salidas no Registradas en Extracto")
 
 salidas_extracto = st.data_editor(
     pd.DataFrame(
@@ -979,10 +972,7 @@ salidas_extracto = st.data_editor(
 
 
 st.divider()
-
-st.subheader(
-    "Salidas Bancarias no Contabilizadas en Libros"
-)
+st.subheader("Salidas Bancarias no Contabilizadas en Libros")
 
 salidas_libros = st.data_editor(
     pd.DataFrame(
@@ -1012,10 +1002,7 @@ salidas_libros = st.data_editor(
 
 
 st.divider()
-
-st.subheader(
-    "Entradas Bancarias no Contabilizadas en Libros"
-)
+st.subheader("Entradas Bancarias no Contabilizadas en Libros")
 
 entradas_libros = st.data_editor(
     pd.DataFrame(
@@ -1045,10 +1032,7 @@ entradas_libros = st.data_editor(
 
 
 st.divider()
-
-st.subheader(
-    "Entradas no Evidenciadas en Extractos"
-)
+st.subheader("Entradas no Evidenciadas en Extractos")
 
 entradas_extracto = st.data_editor(
     pd.DataFrame(
@@ -1082,15 +1066,11 @@ entradas_extracto = st.data_editor(
 # =========================================================
 
 st.divider()
-
-st.subheader(
-    "Gastos Bancarios"
-)
+st.subheader("Gastos Bancarios")
 
 st.caption(
-    "Esta sección permite registrar los conceptos "
-    "que aparecen en el formato de conciliación "
-    "suministrado."
+    "Esta sección se mantiene separada de las cuatro partidas "
+    "de conciliación, como en el formato de referencia."
 )
 
 gastos_bancarios = st.data_editor(
@@ -1142,7 +1122,7 @@ gastos_bancarios = st.data_editor(
 
 
 # =========================================================
-# TOTALES
+# TOTALES DE LAS CUATRO PARTIDAS
 # =========================================================
 
 total_salidas_extracto = total_columna(
@@ -1162,15 +1142,11 @@ total_entradas_extracto = total_columna(
 )
 
 st.divider()
-
-st.subheader(
-    "Resumen de Justificaciones"
-)
+st.subheader("Resumen de Justificaciones")
 
 c1, c2 = st.columns(2)
 
 with c1:
-
     st.metric(
         "Salidas no registradas",
         f"${total_salidas_extracto:,.2f}"
@@ -1182,7 +1158,6 @@ with c1:
     )
 
 with c2:
-
     st.metric(
         "Entradas no contabilizadas",
         f"${total_entradas_libros:,.2f}"
@@ -1195,40 +1170,77 @@ with c2:
 
 
 # =========================================================
-# DIFERENCIA FINAL
+# FÓRMULA SEGÚN EL EXCEL DE REFERENCIA
 # =========================================================
 
-diferencia_final = (
-    diferencia_inicial
-    - total_salidas_extracto
+# H15:
+# Diferencia a justificar = Extracto - Libros
+#
+# H18:
+# + Salidas no registradas en extracto
+#
+# H19:
+# - Salidas bancarias no contabilizadas en libros
+#
+# H20:
+# + Entradas bancarias no contabilizadas en libros
+#
+# H21:
+# - Entradas no evidenciadas en extractos
+#
+# H22:
+# Diferencia conciliada = H18 + H19 + H20 + H21
+#
+# H23:
+# Resultado final = H15 - H22
+
+diferencia_conciliada = (
+    total_salidas_extracto
     - total_salidas_libros
     + total_entradas_libros
-    + total_entradas_extracto
+    - total_entradas_extracto
 )
+
+resultado_final = (
+    diferencia_inicial
+    - diferencia_conciliada
+)
+
+
+# =========================================================
+# RESULTADO
+# =========================================================
 
 st.divider()
+st.subheader("Resultado de la Conciliación")
 
-st.subheader(
-    "Resultado de la Conciliación"
-)
+r1, r2, r3 = st.columns(3)
 
-st.metric(
-    "Diferencia Conciliada",
-    f"${diferencia_final:,.2f}"
-)
+with r1:
+    st.metric(
+        "Diferencia a Justificar",
+        f"${diferencia_inicial:,.2f}"
+    )
 
-conciliada = (
-    abs(diferencia_final) < 0.005
-)
+with r2:
+    st.metric(
+        "Diferencia Conciliada",
+        f"${diferencia_conciliada:,.2f}"
+    )
+
+with r3:
+    st.metric(
+        "Resultado Final",
+        f"${resultado_final:,.2f}"
+    )
+
+conciliada = abs(resultado_final) < 0.005
 
 if conciliada:
-
     st.success(
         "✅ CONCILIACIÓN BANCARIA CORRECTA"
     )
-
 else:
-
     st.warning(
         "⚠️ La conciliación presenta diferencias."
     )
@@ -1239,24 +1251,15 @@ else:
 # =========================================================
 
 st.divider()
-
-st.subheader(
-    "Responsables"
-)
+st.subheader("Responsables")
 
 col1, col2 = st.columns(2)
 
 with col1:
-
-    preparado_por = st.text_input(
-        "Preparado por"
-    )
+    preparado_por = st.text_input("Preparado por")
 
 with col2:
-
-    revisado_por = st.text_input(
-        "Revisado por"
-    )
+    revisado_por = st.text_input("Revisado por")
 
 
 # =========================================================
@@ -1264,10 +1267,7 @@ with col2:
 # =========================================================
 
 st.divider()
-
-st.subheader(
-    "Exportar Conciliación"
-)
+st.subheader("Exportar Conciliación")
 
 excel_data, nombre_archivo = preparar_excel(
     empresa=empresa,
@@ -1280,7 +1280,8 @@ excel_data, nombre_archivo = preparar_excel(
     saldo_extracto=saldo_extracto,
     saldo_libros=saldo_libros,
     diferencia_inicial=diferencia_inicial,
-    diferencia_final=diferencia_final,
+    diferencia_conciliada=diferencia_conciliada,
+    resultado_final=resultado_final,
     salidas_extracto=salidas_extracto,
     salidas_libros=salidas_libros,
     entradas_libros=entradas_libros,
@@ -1302,7 +1303,6 @@ st.download_button(
 )
 
 st.caption(
-    "El Excel se genera en una sola hoja, "
-    "siguiendo la estructura del formato suministrado. "
-    "Las fechas y valores se controlan desde la aplicación."
+    "El Excel se genera en una sola hoja y utiliza "
+    "la lógica de conciliación del formato de referencia."
 )
