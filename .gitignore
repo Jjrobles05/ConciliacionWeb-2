@@ -1,0 +1,10 @@
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.log
+*.tmp
+~$*
+.DS_Store
+conciliacion_guardada.xlsx
