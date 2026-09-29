@@ -958,7 +958,23 @@ salidas_extracto = st.data_editor(
     ),
     num_rows="dynamic",
     width="stretch",
-    key="tabla1"
+    key="tabla1",
+    column_config={
+        "Fecha": st.column_config.DateColumn(
+            "Fecha",
+            format="DD/MM/YYYY"
+        ),
+        "Beneficiario": st.column_config.TextColumn(
+            "Beneficiario"
+        ),
+        "Documento": st.column_config.TextColumn(
+            "Documento"
+        ),
+        "Valor": st.column_config.NumberColumn(
+            "Valor",
+            format="$ %.2f"
+        )
+    }
 )
 
 
@@ -978,7 +994,20 @@ salidas_libros = st.data_editor(
     ),
     num_rows="dynamic",
     width="stretch",
-    key="tabla2"
+    key="tabla2",
+    column_config={
+        "Fecha": st.column_config.DateColumn(
+            "Fecha",
+            format="DD/MM/YYYY"
+        ),
+        "Concepto": st.column_config.TextColumn(
+            "Concepto"
+        ),
+        "Valor": st.column_config.NumberColumn(
+            "Valor",
+            format="$ %.2f"
+        )
+    }
 )
 
 
@@ -998,7 +1027,20 @@ entradas_libros = st.data_editor(
     ),
     num_rows="dynamic",
     width="stretch",
-    key="tabla3"
+    key="tabla3",
+    column_config={
+        "Fecha": st.column_config.DateColumn(
+            "Fecha",
+            format="DD/MM/YYYY"
+        ),
+        "Concepto": st.column_config.TextColumn(
+            "Concepto"
+        ),
+        "Valor": st.column_config.NumberColumn(
+            "Valor",
+            format="$ %.2f"
+        )
+    }
 )
 
 
@@ -1018,7 +1060,20 @@ entradas_extracto = st.data_editor(
     ),
     num_rows="dynamic",
     width="stretch",
-    key="tabla4"
+    key="tabla4",
+    column_config={
+        "Fecha": st.column_config.DateColumn(
+            "Fecha",
+            format="DD/MM/YYYY"
+        ),
+        "Concepto": st.column_config.TextColumn(
+            "Concepto"
+        ),
+        "Valor": st.column_config.NumberColumn(
+            "Valor",
+            format="$ %.2f"
+        )
+    }
 )
 
 
@@ -1052,7 +1107,37 @@ gastos_bancarios = st.data_editor(
     ),
     num_rows="dynamic",
     width="stretch",
-    key="tabla5"
+    key="tabla5",
+    column_config={
+        "Fecha": st.column_config.DateColumn(
+            "Fecha",
+            format="DD/MM/YYYY"
+        ),
+        "4 x 1000": st.column_config.NumberColumn(
+            "4 x 1000",
+            format="$ %.2f"
+        ),
+        "Cuota de manejo": st.column_config.NumberColumn(
+            "Cuota de manejo",
+            format="$ %.2f"
+        ),
+        "IVA": st.column_config.NumberColumn(
+            "IVA",
+            format="$ %.2f"
+        ),
+        "Rte. fuente": st.column_config.NumberColumn(
+            "Rte. fuente",
+            format="$ %.2f"
+        ),
+        "Comisión": st.column_config.NumberColumn(
+            "Comisión",
+            format="$ %.2f"
+        ),
+        "Ing. x intereses": st.column_config.NumberColumn(
+            "Ing. x intereses",
+            format="$ %.2f"
+        )
+    }
 )
 
 
@@ -1218,5 +1303,6 @@ st.download_button(
 
 st.caption(
     "El Excel se genera en una sola hoja, "
-    "siguiendo la estructura del formato suministrado."
+    "siguiendo la estructura del formato suministrado. "
+    "Las fechas y valores se controlan desde la aplicación."
 )
