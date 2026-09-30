@@ -1507,17 +1507,17 @@ if tiene_permiso(rol_actual, "editar"):
     
     
     # =========================================================
-    # MOVIMIENTOS (AQUÍ SE APLICÓ EL CAMBIO .copy())
+    # MOVIMIENTOS
     # =========================================================
     
     st.divider()
     st.subheader("Salidas no Registradas en Extracto")
     
     salidas_extracto = st.data_editor(
-        st.session_state.tabla1.copy(),
+        st.session_state.tabla1,
         num_rows="dynamic",
         width="stretch",
-        key="tabla1",
+        key="editor_tabla1",
         column_config={
             "Fecha": st.column_config.DateColumn(
                 "Fecha",
@@ -1535,16 +1535,17 @@ if tiene_permiso(rol_actual, "editar"):
             )
         }
     )
+    st.session_state.tabla1 = salidas_extracto
     
     
     st.divider()
     st.subheader("Salidas Bancarias no Contabilizadas en Libros")
     
     salidas_libros = st.data_editor(
-        st.session_state.tabla2.copy(),
+        st.session_state.tabla2,
         num_rows="dynamic",
         width="stretch",
-        key="tabla2",
+        key="editor_tabla2",
         column_config={
             "Fecha": st.column_config.DateColumn(
                 "Fecha",
@@ -1559,16 +1560,17 @@ if tiene_permiso(rol_actual, "editar"):
             )
         }
     )
+    st.session_state.tabla2 = salidas_libros
     
     
     st.divider()
     st.subheader("Entradas Bancarias no Contabilizadas en Libros")
     
     entradas_libros = st.data_editor(
-        st.session_state.tabla3.copy(),
+        st.session_state.tabla3,
         num_rows="dynamic",
         width="stretch",
-        key="tabla3",
+        key="editor_tabla3",
         column_config={
             "Fecha": st.column_config.DateColumn(
                 "Fecha",
@@ -1583,16 +1585,17 @@ if tiene_permiso(rol_actual, "editar"):
             )
         }
     )
+    st.session_state.tabla3 = entradas_libros
     
     
     st.divider()
     st.subheader("Entradas no Evidenciadas en Extractos")
     
     entradas_extracto = st.data_editor(
-        st.session_state.tabla4.copy(),
+        st.session_state.tabla4,
         num_rows="dynamic",
         width="stretch",
-        key="tabla4",
+        key="editor_tabla4",
         column_config={
             "Fecha": st.column_config.DateColumn(
                 "Fecha",
@@ -1607,6 +1610,7 @@ if tiene_permiso(rol_actual, "editar"):
             )
         }
     )
+    st.session_state.tabla4 = entradas_extracto
     
     
     # =========================================================
@@ -1622,10 +1626,10 @@ if tiene_permiso(rol_actual, "editar"):
     )
     
     gastos_bancarios = st.data_editor(
-        st.session_state.tabla5.copy(),
+        st.session_state.tabla5,
         num_rows="dynamic",
         width="stretch",
-        key="tabla5",
+        key="editor_tabla5",
         column_config={
             "Fecha": st.column_config.DateColumn(
                 "Fecha",
@@ -1657,6 +1661,7 @@ if tiene_permiso(rol_actual, "editar"):
             )
         }
     )
+    st.session_state.tabla5 = gastos_bancarios
     
     
     # =========================================================
@@ -1689,7 +1694,7 @@ if tiene_permiso(rol_actual, "editar"):
             "Salidas no registradas",
             f"${total_salidas_extracto:,.2f}"
         )
-    
+        
         st.metric(
             "Salidas no contabilizadas",
             f"${total_salidas_libros:,.2f}"
@@ -1700,7 +1705,7 @@ if tiene_permiso(rol_actual, "editar"):
             "Entradas no contabilizadas",
             f"${total_entradas_libros:,.2f}"
         )
-    
+        
         st.metric(
             "Entradas no evidenciadas",
             f"${total_entradas_extracto:,.2f}"
