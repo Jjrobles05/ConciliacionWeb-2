@@ -1,5 +1,8 @@
 import io
 import re
+import json
+import sqlite3
+from datetime import datetime
 
 import pandas as pd
 import streamlit as st
@@ -17,6 +20,144 @@ st.set_page_config(
 )
 
 st.title("📑 Conciliación Bancaria")
+
+
+# =========================================================
+# BASE DE DATOS - ETAPA 2: HISTORIAL
+# =========================================================
+
+DB_FILE = "conciliaciones.db"
+
+
+def conectar_db():
+    """Abre la base SQLite del historial."""
+    return sqlite3.connect(DB_FILE)
+
+
+def inicializar_db():
+    """Crea la tabla de historial si todavía no existe."""
+    with conectar_db() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conciliaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                fecha_guardado TEXT NOT NULL,
+                empresa TEXT,
+                nit TEXT,
+                mes TEXT,
+                fecha_elaboracion TEXT,
+                banco TEXT,
+                cuenta TEXT,
+                tipo TEXT,
+                saldo_extracto REAL NOT NULL,
+                saldo_libros REAL NOT NULL,
+                diferencia_inicial REAL NOT NULL,
+                diferencia_conciliada REAL NOT NULL,
+                resultado_final REAL NOT NULL,
+                estado TEXT NOT NULL,
+                datos_json TEXT NOT NULL,
+                excel BLOB NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+
+def guardar_conciliacion_historial(
+    empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
+    saldo_extracto, saldo_libros, diferencia_inicial,
+    diferencia_conciliada, resultado_final, salidas_extracto,
+    salidas_libros, entradas_libros, entradas_extracto,
+    gastos_bancarios, preparado_por, revisado_por, excel_data
+):
+    """Guarda una conciliación completa en SQLite."""
+    estado = (
+        "CONCILIACIÓN BANCARIA CORRECTA"
+        if abs(resultado_final) < 0.005
+        else "CONCILIACIÓN CON DIFERENCIA"
+    )
+
+    def dataframe_a_registros(df):
+        limpio = limpiar_dataframe(df)
+        if limpio is None or limpio.empty:
+            return []
+        return json.loads(limpio.to_json(orient="records", date_format="iso"))
+
+    datos = {
+        "salidas_extracto": dataframe_a_registros(salidas_extracto),
+        "salidas_libros": dataframe_a_registros(salidas_libros),
+        "entradas_libros": dataframe_a_registros(entradas_libros),
+        "entradas_extracto": dataframe_a_registros(entradas_extracto),
+        "gastos_bancarios": dataframe_a_registros(gastos_bancarios),
+        "preparado_por": preparado_por,
+        "revisado_por": revisado_por,
+    }
+
+    fecha_guardado = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fecha_elaboracion_texto = (
+        fecha_elaboracion.isoformat()
+        if hasattr(fecha_elaboracion, "isoformat")
+        else str(fecha_elaboracion)
+    )
+
+    with conectar_db() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO conciliaciones (
+                fecha_guardado, empresa, nit, mes, fecha_elaboracion,
+                banco, cuenta, tipo, saldo_extracto, saldo_libros,
+                diferencia_inicial, diferencia_conciliada, resultado_final,
+                estado, datos_json, excel
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                fecha_guardado, empresa, nit, mes, fecha_elaboracion_texto,
+                banco, cuenta, tipo, float(saldo_extracto), float(saldo_libros),
+                float(diferencia_inicial), float(diferencia_conciliada),
+                float(resultado_final), estado,
+                json.dumps(datos, ensure_ascii=False),
+                sqlite3.Binary(excel_data),
+            )
+        )
+        conn.commit()
+        return cursor.lastrowid
+
+
+def obtener_historial():
+    """Obtiene el historial más reciente primero."""
+    with conectar_db() as conn:
+        return pd.read_sql_query(
+            """
+            SELECT id, fecha_guardado, empresa, nit, mes, banco, cuenta,
+                   resultado_final, estado
+            FROM conciliaciones
+            ORDER BY id DESC
+            """, conn
+        )
+
+
+def obtener_conciliacion(id_conciliacion):
+    """Obtiene una conciliación individual por ID."""
+    with conectar_db() as conn:
+        return conn.execute(
+            """
+            SELECT id, fecha_guardado, empresa, nit, mes, fecha_elaboracion,
+                   banco, cuenta, tipo, saldo_extracto, saldo_libros,
+                   diferencia_inicial, diferencia_conciliada, resultado_final,
+                   estado, datos_json, excel
+            FROM conciliaciones WHERE id = ?
+            """, (int(id_conciliacion),)
+        ).fetchone()
+
+
+def eliminar_conciliacion(id_conciliacion):
+    """Elimina una conciliación del historial."""
+    with conectar_db() as conn:
+        conn.execute("DELETE FROM conciliaciones WHERE id = ?", (int(id_conciliacion),))
+        conn.commit()
+
+
+inicializar_db()
 
 
 # =========================================================
@@ -1302,7 +1443,154 @@ st.download_button(
     width="stretch"
 )
 
+# =========================================================
+# GUARDAR EN HISTORIAL
+# =========================================================
+
+st.divider()
+st.subheader("🗂️ Guardar en Historial")
+
 st.caption(
-    "El Excel se genera en una sola hoja y utiliza "
-    "la lógica de conciliación del formato de referencia."
+    "La conciliación se guarda en SQLite junto con sus movimientos "
+    "y una copia del Excel generado."
+)
+
+if st.button(
+    "💾 Guardar esta conciliación en el historial",
+    type="primary",
+    width="stretch"
+):
+    id_guardado = guardar_conciliacion_historial(
+        empresa=empresa, nit=nit, mes=mes, fecha_elaboracion=fecha_elaboracion,
+        banco=banco, cuenta=cuenta, tipo=tipo, saldo_extracto=saldo_extracto,
+        saldo_libros=saldo_libros, diferencia_inicial=diferencia_inicial,
+        diferencia_conciliada=diferencia_conciliada, resultado_final=resultado_final,
+        salidas_extracto=salidas_extracto, salidas_libros=salidas_libros,
+        entradas_libros=entradas_libros, entradas_extracto=entradas_extracto,
+        gastos_bancarios=gastos_bancarios, preparado_por=preparado_por,
+        revisado_por=revisado_por, excel_data=excel_data
+    )
+    st.success(
+        f"✅ Conciliación guardada correctamente. Número de historial: {id_guardado}"
+    )
+
+# =========================================================
+# ETAPA 2 - HISTORIAL
+# =========================================================
+
+st.divider()
+st.subheader("📚 Historial de Conciliaciones")
+
+historial = obtener_historial()
+
+if historial.empty:
+    st.info("Todavía no hay conciliaciones guardadas en el historial.")
+else:
+    h1, h2, h3 = st.columns(3)
+    with h1:
+        filtro_empresa = st.text_input("Filtrar por empresa", key="hist_filtro_empresa")
+    with h2:
+        filtro_mes = st.text_input("Filtrar por mes/año", key="hist_filtro_mes")
+    with h3:
+        filtro_estado = st.selectbox(
+            "Filtrar por estado",
+            ["Todos", "CONCILIACIÓN BANCARIA CORRECTA", "CONCILIACIÓN CON DIFERENCIA"],
+            key="hist_filtro_estado"
+        )
+
+    historial_filtrado = historial.copy()
+    if filtro_empresa.strip():
+        historial_filtrado = historial_filtrado[
+            historial_filtrado["empresa"].fillna("").str.contains(
+                filtro_empresa.strip(), case=False, na=False
+            )
+        ]
+    if filtro_mes.strip():
+        historial_filtrado = historial_filtrado[
+            historial_filtrado["mes"].fillna("").str.contains(
+                filtro_mes.strip(), case=False, na=False
+            )
+        ]
+    if filtro_estado != "Todos":
+        historial_filtrado = historial_filtrado[
+            historial_filtrado["estado"] == filtro_estado
+        ]
+
+    mostrar_historial = historial_filtrado.rename(columns={
+        "id": "ID", "fecha_guardado": "Guardado", "empresa": "Empresa",
+        "nit": "NIT", "mes": "Mes/Año", "banco": "Banco", "cuenta": "Cuenta",
+        "resultado_final": "Resultado final", "estado": "Estado"
+    })
+    st.dataframe(mostrar_historial, width="stretch", hide_index=True)
+
+    if not historial_filtrado.empty:
+        ids_disponibles = historial_filtrado["id"].astype(int).tolist()
+        id_seleccionado = st.selectbox(
+            "Selecciona una conciliación del historial",
+            ids_disponibles,
+            format_func=lambda x: (
+                f"#{x} — "
+                f"{historial.loc[historial['id'] == x, 'empresa'].iloc[0] or 'Sin empresa'} — "
+                f"{historial.loc[historial['id'] == x, 'mes'].iloc[0] or 'Sin período'}"
+            ),
+            key="hist_id_seleccionado"
+        )
+
+        registro = obtener_conciliacion(id_seleccionado)
+        if registro:
+            (
+                rid, fecha_guardado, empresa_h, nit_h, mes_h, fecha_elaboracion_h,
+                banco_h, cuenta_h, tipo_h, saldo_extracto_h, saldo_libros_h,
+                diferencia_inicial_h, diferencia_conciliada_h, resultado_final_h,
+                estado_h, datos_json_h, excel_h
+            ) = registro
+
+            st.markdown(
+                f"**Conciliación #{rid}** — {empresa_h or 'Sin empresa'} — {mes_h or 'Sin período'}"
+            )
+
+            r1, r2, r3 = st.columns(3)
+            with r1:
+                st.metric("Diferencia a justificar", f"${diferencia_inicial_h:,.2f}")
+            with r2:
+                st.metric("Diferencia conciliada", f"${diferencia_conciliada_h:,.2f}")
+            with r3:
+                st.metric("Resultado final", f"${resultado_final_h:,.2f}")
+
+            if estado_h == "CONCILIACIÓN BANCARIA CORRECTA":
+                st.success(f"✅ {estado_h}")
+            else:
+                st.warning(f"⚠️ {estado_h}")
+
+            nombre_h = (
+                f"CONCILIACION_{limpiar_nombre_archivo(empresa_h)}_"
+                f"{limpiar_nombre_archivo(mes_h)}.xlsx"
+            )
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.download_button(
+                    "📥 Descargar Excel guardado",
+                    data=excel_h,
+                    file_name=nombre_h,
+                    mime=(
+                        "application/vnd.openxmlformats-officedocument."
+                        "spreadsheetml.sheet"
+                    ),
+                    key=f"descargar_historial_{rid}",
+                    width="stretch"
+                )
+            with c2:
+                if st.button(
+                    "🗑️ Eliminar esta conciliación",
+                    key=f"eliminar_historial_{rid}",
+                    width="stretch"
+                ):
+                    eliminar_conciliacion(rid)
+                    st.success(f"Conciliación #{rid} eliminada.")
+                    st.rerun()
+
+st.caption(
+    "El Excel se genera en una sola hoja y utiliza la lógica de conciliación "
+    "del formato de referencia. El historial de esta etapa se almacena en SQLite."
 )
