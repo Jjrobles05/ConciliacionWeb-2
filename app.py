@@ -185,15 +185,10 @@ def eliminar_cuenta(id_cuenta):
 # =========================================================
 
 def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
-    """
-    Divide las cuentas de una empresa entre los usuarios asignados a ella
-    y las rota mensualmente usando la fórmula del módulo del mes.
-    """
     if not empresa_id:
         return pd.DataFrame()
 
     with conectar_db() as conn:
-        # Obtener usuarios activos asignados a esa empresa
         usuarios = pd.read_sql_query(
             "SELECT id, nombre FROM usuarios WHERE empresa_id = ? AND activo = 1 ORDER BY id",
             conn, params=(int(empresa_id),)
@@ -203,18 +198,17 @@ def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
             conn, params=(int(empresa_id),)
         )
 
-    if cuentas.empty or usuarios.empty:
+    if cuentas.empty:
+        return pd.DataFrame()
+
+    if usuarios.empty or usuario_id not in usuarios["id"].tolist():
         return cuentas
 
     num_usuarios = len(usuarios)
     ids_usuarios = usuarios["id"].tolist()
 
-    if usuario_id not in ids_usuarios:
-        return cuentas
-
     cuentas_asignadas = []
     for idx_cuenta, fila_cuenta in cuentas.iterrows():
-        # Índice rotado mes a mes
         idx_usuario_asignado = (idx_cuenta + mes_num) % num_usuarios
         usuario_asignado_id = ids_usuarios[idx_usuario_asignado]
 
@@ -291,17 +285,29 @@ def guardar_conciliacion_historial(
         return cursor.lastrowid
 
 
-def obtener_historial():
+def obtener_historial(empresa_nombre=None):
     with conectar_db() as conn:
-        return pd.read_sql_query(
-            """
-            SELECT id, fecha_guardado, empresa, nit, mes, banco, cuenta,
-                   resultado_final, estado, workflow_status, revisado_por_usuario,
-                   fecha_revision, motivo_correccion
-            FROM conciliaciones
-            ORDER BY id DESC
-            """, conn
-        )
+        if empresa_nombre and empresa_nombre != "Todas las empresas":
+            return pd.read_sql_query(
+                """
+                SELECT id, fecha_guardado, empresa, nit, mes, banco, cuenta,
+                       resultado_final, estado, workflow_status, revisado_por_usuario,
+                       fecha_revision, motivo_correccion
+                FROM conciliaciones
+                WHERE empresa = ?
+                ORDER BY id DESC
+                """, conn, params=(empresa_nombre,)
+            )
+        else:
+            return pd.read_sql_query(
+                """
+                SELECT id, fecha_guardado, empresa, nit, mes, banco, cuenta,
+                       resultado_final, estado, workflow_status, revisado_por_usuario,
+                       fecha_revision, motivo_correccion
+                FROM conciliaciones
+                ORDER BY id DESC
+                """, conn
+            )
 
 
 inicializar_db()
@@ -446,18 +452,37 @@ rol_actual = usuario_actual["rol"]
 
 
 # =========================================================
-# MENÚ LATERAL Y NAVEGACIÓN
+# MENÚ LATERAL Y SELECCIÓN DE EMPRESA
 # =========================================================
+
+empresas_df = obtener_empresas()
 
 with st.sidebar:
     st.image("https://img.icons8.com/color/96/bank-building.png", width=70)
     st.title("Conciliación Web")
     st.markdown(f"👤 **{usuario_actual['nombre']}**")
-    st.caption(f"Rol: {rol_actual}")
-    if usuario_actual.get("empresa_nombre"):
-        st.caption(f"🏢 Empresa: **{usuario_actual['empresa_nombre']}**")
+    st.caption(f"Rol: **{rol_actual}**")
+    st.divider()
+
+    # MULTI-EMPRESA PARA ADMINISTRADOR Y REVISOR / AUDITOR
+    if rol_actual in ["Administrador", "Revisor"]:
+        st.subheader("🏢 Selección de Empresa")
+        opciones_emp = ["Todas las empresas"] + empresas_df["nombre"].tolist() if not empresas_df.empty else ["Todas las empresas"]
+        empresa_activa_nombre = st.selectbox("Empresa a Auditar / Revisar", opciones_emp)
+        
+        if empresa_activa_nombre != "Todas las empresas" and not empresas_df.empty:
+            empresa_activa_id = empresas_df.loc[empresas_df["nombre"] == empresa_activa_nombre, "id"].values[0]
+            empresa_activa_nit = empresas_df.loc[empresas_df["nombre"] == empresa_activa_nombre, "nit"].values[0]
+        else:
+            empresa_activa_id = None
+            empresa_activa_nit = ""
     else:
-        st.caption("🏢 Empresa: *Sin asignar*")
+        # PREPARADORES TIENEN SU EMPRESA FIJA ASIGNADA
+        empresa_activa_id = usuario_actual.get("empresa_id")
+        empresa_activa_nombre = usuario_actual.get("empresa_nombre") or "Sin asignar"
+        empresa_activa_nit = usuario_actual.get("empresa_nit") or ""
+        st.info(f"🏢 **Empresa:** {empresa_activa_nombre}")
+
     st.divider()
 
     opciones_menu = ["📊 Dashboard"]
@@ -755,16 +780,19 @@ def preparar_excel(
 
 if menu_seleccionado == "📊 Dashboard":
     st.title("📊 Dashboard de Conciliaciones")
-    historial = obtener_historial()
+    if empresa_activa_nombre != "Todas las empresas":
+        st.caption(f"Filtrado por empresa: **{empresa_activa_nombre}**")
+    
+    historial = obtener_historial(empresa_activa_nombre)
     if len(historial) == 0:
-        st.info("Aún no hay conciliaciones registradas.")
+        st.info("Aún no hay conciliaciones registradas para la empresa seleccionada.")
     else:
         kpi1, kpi2, kpi3 = st.columns(3)
         kpi1.metric("Total Conciliaciones", len(historial))
         kpi2.metric("Aprobadas 🔒", len(historial[historial["workflow_status"] == "Aprobada"]))
         kpi3.metric("Pendientes 🕒", len(historial[historial["workflow_status"] == "Pendiente de revisión"]))
         st.divider()
-        st.dataframe(historial[["id", "empresa", "mes", "banco", "resultado_final", "workflow_status"]].head(5), width="stretch", hide_index=True)
+        st.dataframe(historial[["id", "empresa", "mes", "banco", "resultado_final", "workflow_status"]].head(10), width="stretch", hide_index=True)
 
 
 elif menu_seleccionado == "🏢 Empresas":
@@ -782,7 +810,6 @@ elif menu_seleccionado == "🏢 Empresas":
 
 elif menu_seleccionado == "🏦 Bancos y Cuentas":
     st.title("🏦 Maestro de Bancos y Cuentas Bancarias")
-    empresas_df = obtener_empresas()
     if tiene_permiso(rol_actual, "maestros"):
         with st.expander("➕ Registrar nueva cuenta bancaria"):
             with st.form("form_cuenta_maestro"):
@@ -795,7 +822,7 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                 if st.form_submit_button("Guardar Cuenta", type="primary"):
                     guardar_cuenta(banco, num, tipo, emp_id)
                     st.rerun()
-    st.dataframe(obtener_cuentas(), width="stretch", hide_index=True)
+    st.dataframe(obtener_cuentas(empresa_activa_id), width="stretch", hide_index=True)
 
 
 elif menu_seleccionado == "📝 Nueva Conciliación":
@@ -812,28 +839,24 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     if "tabla5" not in st.session_state:
         st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
 
-    empresas_df = obtener_empresas()
-    
     st.subheader("Información General")
     col1, col2 = st.columns(2)
 
     with col1:
-        if usuario_actual.get("empresa_id"):
-            empresa = usuario_actual["empresa_nombre"]
-            nit = usuario_actual["empresa_nit"]
-            st.text_input("Empresa Asignada", value=empresa, disabled=True)
+        if empresa_activa_nombre != "Todas las empresas" and empresa_activa_nombre != "Sin asignar":
+            empresa = empresa_activa_nombre
+            nit = empresa_activa_nit
+            st.text_input("Empresa Seleccionada", value=empresa, disabled=True)
             st.text_input("NIT", value=nit, disabled=True)
-            empresa_id_activa = usuario_actual["empresa_id"]
         elif not empresas_df.empty:
             empresa_obj = st.selectbox("Empresa Registrada", empresas_df["nombre"].tolist())
             empresa = empresa_obj
             nit = empresas_df.loc[empresas_df["nombre"] == empresa_obj, "nit"].values[0]
-            empresa_id_activa = empresas_df.loc[empresas_df["nombre"] == empresa_obj, "id"].values[0]
+            empresa_activa_id = empresas_df.loc[empresas_df["nombre"] == empresa_obj, "id"].values[0]
             st.text_input("NIT", value=nit, disabled=True)
         else:
             empresa = st.text_input("Nombre de la Empresa", key="form_empresa")
             nit = st.text_input("NIT", key="form_nit")
-            empresa_id_activa = None
 
         mes_nombre = st.selectbox("Mes a Conciliar", [
             "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
@@ -847,14 +870,14 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
 
     # ROTACIÓN MENSUAL DE CUENTAS BANCARIAS
     cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(
-        empresa_id_activa, mes_num, usuario_actual["id"]
+        empresa_activa_id, mes_num, usuario_actual["id"]
     )
 
     with col2:
         if not cuentas_asig_df.empty:
-            st.info("🔄 **Cuentas asignadas este mes (Rotación automática):**")
+            st.info("🔄 **Cuentas a conciliar en este período:**")
             cta_sel = st.selectbox(
-                "Cuentas a Conciliar en este Período",
+                "Cuenta / Tarjeta Registrada",
                 cuentas_asig_df["id"].tolist(),
                 format_func=lambda x: f"{cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'banco'].values[0]} - {cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'numero_cuenta'].values[0]} ({cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'tipo_cuenta'].values[0]})"
             )
@@ -862,7 +885,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             cuenta = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "numero_cuenta"].values[0]
             tipo = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "tipo_cuenta"].values[0]
         else:
-            st.warning("No tienes cuentas asignadas este mes o no hay cuentas registradas.")
+            st.warning("No hay cuentas asignadas o registradas para esta empresa.")
             banco = st.text_input("Nombre del Banco", key="form_banco")
             cuenta = st.text_input("Número de Cuenta", key="form_cuenta")
             tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"], key="form_tipo")
@@ -967,7 +990,10 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
 
 elif menu_seleccionado == "📚 Historial":
     st.title("📚 Historial de Conciliaciones")
-    historial = obtener_historial()
+    if empresa_activa_nombre != "Todas las empresas":
+        st.caption(f"Mostrando conciliaciones de: **{empresa_activa_nombre}**")
+    
+    historial = obtener_historial(empresa_activa_nombre)
     if historial.empty:
         st.info("No hay conciliaciones guardadas.")
     else:
@@ -976,24 +1002,22 @@ elif menu_seleccionado == "📚 Historial":
 
 elif menu_seleccionado == "📈 Reportes":
     st.title("📈 Reportes")
-    historial = obtener_historial()
+    historial = obtener_historial(empresa_activa_nombre)
     if not historial.empty:
         csv = historial.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Descargar Todo el Historial (CSV)", data=csv, file_name="historial_conciliaciones.csv", mime="text/csv", width="stretch")
+        st.download_button("📥 Descargar Historial (CSV)", data=csv, file_name=f"historial_{limpiar_nombre_archivo(empresa_activa_nombre)}.csv", mime="text/csv", width="stretch")
 
 
 elif menu_seleccionado == "👥 Usuarios":
     st.title("👥 Gestión de Usuarios y Asignación de Empresas")
 
-    empresas_df = obtener_empresas()
     usuarios_df = obtener_usuarios()
-
     st.subheader("Lista de Usuarios Registrados")
     st.dataframe(usuarios_df, width="stretch", hide_index=True)
 
     if tiene_permiso(rol_actual, "usuarios") and not usuarios_df.empty and not empresas_df.empty:
         st.divider()
-        st.subheader("🏢 Asignar / Cambiar Empresa a Usuario")
+        st.subheader("🏢 Asignar / Cambiar Empresa a Usuario (Preparadores)")
         with st.form("form_asignar_empresa"):
             usr_sel = st.selectbox("Selecciona Usuario", usuarios_df["id"].tolist(), format_func=lambda x: usuarios_df.loc[usuarios_df["id"]==x, "nombre"].values[0])
             emp_sel = st.selectbox("Selecciona Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0])
