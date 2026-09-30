@@ -129,7 +129,7 @@ def inicializar_db():
 
 
 # =========================================================
-# FUNCIONES MAESTRAS (EMPRESAS, BANCOS Y USUARIOS)
+# FUNCIONES MAESTRAS
 # =========================================================
 
 def obtener_empresas():
@@ -357,6 +357,12 @@ def actualizar_empresa_usuario(usuario_id, empresa_id):
         conn.commit()
 
 
+def actualizar_rol_usuario(usuario_id, nuevo_rol):
+    with conectar_db() as conn:
+        conn.execute("UPDATE usuarios SET rol = ? WHERE id = ?", (nuevo_rol, int(usuario_id)))
+        conn.commit()
+
+
 def autenticar_usuario(usuario, password):
     with conectar_db() as conn:
         fila = conn.execute(
@@ -392,20 +398,21 @@ def obtener_usuarios():
         return pd.read_sql_query(query, conn)
 
 
-def tiene_permiso(rol, permiso):
-    permisos = {
-        "Administrador": {"editar", "historial", "eliminar", "usuarios", "maestros"},
-        "Preparador": {"editar", "historial", "maestros"},
-        "Revisor": {"historial"},
-    }
-    return permiso in permisos.get(rol, set())
+# CONTROL DE PERMISOS ESTRICTO
+def obtener_opciones_menu(rol):
+    if rol == "Preparador":
+        return ["📊 Dashboard", "📝 Nueva Conciliación", "📚 Historial"]
+    elif rol == "Revisor":
+        return ["📊 Dashboard", "📚 Historial", "🏢 Empresas", "🏦 Bancos y Cuentas", "📈 Reportes"]
+    elif rol == "Administrador":
+        return ["📊 Dashboard", "📝 Nueva Conciliación", "📚 Historial", "🏢 Empresas", "🏦 Bancos y Cuentas", "📈 Reportes", "👥 Usuarios"]
+    return ["📊 Dashboard"]
 
 
 def iniciar_autenticacion():
     if "usuario_autenticado" not in st.session_state:
         st.session_state.usuario_autenticado = None
 
-    # MODO AUTOREGISTRO MEDIANTE ENLACE DIRECTO
     params = st.query_params
     if "registro" in params and params["registro"] == "true":
         st.title("📝 Registro de Nuevo Usuario")
@@ -521,15 +528,10 @@ with st.sidebar:
 
     st.divider()
 
-    opciones_menu = ["📊 Dashboard"]
-    if tiene_permiso(rol_actual, "editar"):
-        opciones_menu.append("📝 Nueva Conciliación")
-    
-    opciones_menu.extend(["📚 Historial", "🏢 Empresas", "🏦 Bancos y Cuentas", "📈 Reportes"])
-    if tiene_permiso(rol_actual, "usuarios"):
-        opciones_menu.append("👥 Usuarios")
-
+    # OPCIONES DINÁMICAS SEGÚN EL ROL
+    opciones_menu = obtener_opciones_menu(rol_actual)
     menu_seleccionado = st.radio("Navegación principal", opciones_menu)
+    
     st.divider()
     if st.button("🚪 Cerrar sesión", width="stretch"):
         st.session_state.usuario_autenticado = None
@@ -537,7 +539,7 @@ with st.sidebar:
 
 
 # =========================================================
-# FUNCIONES AUXILIARES DE FORMATO
+# FUNCIONES AUXILIARES DE FORMATO Y EXCEL
 # =========================================================
 
 def total_columna(df, columna="Valor"):
@@ -833,7 +835,7 @@ if menu_seleccionado == "📊 Dashboard":
 
 elif menu_seleccionado == "🏢 Empresas":
     st.title("🏢 Maestro de Empresas")
-    if tiene_permiso(rol_actual, "maestros"):
+    if rol_actual == "Administrador":
         with st.expander("➕ Registrar nueva empresa"):
             with st.form("form_empresa_maestro"):
                 nom = st.text_input("Nombre de la empresa")
@@ -846,7 +848,7 @@ elif menu_seleccionado == "🏢 Empresas":
 
 elif menu_seleccionado == "🏦 Bancos y Cuentas":
     st.title("🏦 Maestro de Bancos y Cuentas Bancarias")
-    if tiene_permiso(rol_actual, "maestros"):
+    if rol_actual == "Administrador":
         with st.expander("➕ Registrar nueva cuenta bancaria"):
             with st.form("form_cuenta_maestro"):
                 banco = st.text_input("Banco")
@@ -1041,13 +1043,13 @@ elif menu_seleccionado == "📈 Reportes":
 
 
 elif menu_seleccionado == "👥 Usuarios":
-    st.title("👥 Gestión de Usuarios y Enlaces de Registro")
+    st.title("👥 Gestión de Usuarios y Roles")
 
     usuarios_df = obtener_usuarios()
     st.subheader("Lista de Usuarios Registrados")
     st.dataframe(usuarios_df, width="stretch", hide_index=True)
 
-    if tiene_permiso(rol_actual, "usuarios"):
+    if rol_actual == "Administrador":
         st.divider()
         col_crear, col_link = st.columns(2)
 
@@ -1058,14 +1060,14 @@ elif menu_seleccionado == "👥 Usuarios":
                     nuevo_nombre = st.text_input("Nombre completo")
                     nuevo_usuario = st.text_input("Usuario")
                     nueva_pass = st.text_input("Contraseña", type="password")
-                    nuevo_rol = st.selectbox("Rol", ["Preparador", "Revisor", "Administrador"])
+                    nuevo_rol = st.selectbox("Rol de Acceso", ["Preparador", "Revisor", "Administrador"])
                     
                     emp_id_crear = None
                     if not empresas_df.empty:
                         emp_id_crear = st.selectbox(
                             "Empresa Asignada", 
                             [None] + empresas_df["id"].tolist(), 
-                            format_func=lambda x: "Sin asignar" if x is None else empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0]
+                            format_func=lambda x: "Sin asignar (Todas)" if x is None else empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0]
                         )
                     
                     if st.form_submit_button("Crear Usuario", type="primary", width="stretch"):
@@ -1076,7 +1078,7 @@ elif menu_seleccionado == "👥 Usuarios":
                         else:
                             try:
                                 crear_usuario(nuevo_usuario, nuevo_nombre, nueva_pass, nuevo_rol, emp_id_crear)
-                                st.success(f"Usuario '{nuevo_usuario}' creado con éxito.")
+                                st.success(f"Usuario '{nuevo_usuario}' creado con éxito con rol {nuevo_rol}.")
                                 st.rerun()
                             except sqlite3.IntegrityError:
                                 st.error("Ese nombre de usuario ya está registrado.")
@@ -1084,7 +1086,7 @@ elif menu_seleccionado == "👥 Usuarios":
         # 2. GENERAR ENLACE DE AUTOREGISTRO
         with col_link:
             with st.expander("🔗 Generar Enlace de Autoregistro", expanded=True):
-                st.caption("Crea un link para enviar a un nuevo colaborador para que se registre por sí mismo.")
+                st.caption("Crea un link para enviar a un colaborador para que cree su propia cuenta.")
                 rol_link = st.selectbox("Rol para el nuevo usuario", ["Preparador", "Revisor", "Administrador"], key="link_rol")
                 
                 emp_id_link = None
@@ -1096,22 +1098,35 @@ elif menu_seleccionado == "👥 Usuarios":
                         key="link_empresa"
                     )
 
-                # Construcción del enlace dinámico
                 url_base = st.query_params.get("base_url", "https://conciliacionweb.streamlit.app/")
                 link_generado = f"{url_base}?registro=true&rol={rol_link}"
                 if emp_id_link:
                     link_generado += f"&empresa_id={emp_id_link}"
 
                 st.code(link_generado, language="text")
-                st.info("Copie y comparta este enlace con el usuario para que cree su cuenta directamente.")
+                st.info("Copie este enlace y envíelo al usuario para su registro.")
 
-        if not usuarios_df.empty and not empresas_df.empty:
+        if not usuarios_df.empty:
             st.divider()
-            st.subheader("🏢 Cambiar Empresa Asignada")
-            with st.form("form_asignar_empresa"):
-                usr_sel = st.selectbox("Selecciona Usuario", usuarios_df["id"].tolist(), format_func=lambda x: usuarios_df.loc[usuarios_df["id"]==x, "nombre"].values[0])
-                emp_sel = st.selectbox("Selecciona Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0])
-                if st.form_submit_button("Asignar Empresa", type="primary"):
-                    actualizar_empresa_usuario(usr_sel, emp_sel)
-                    st.success("Empresa asignada correctamente al usuario.")
-                    st.rerun()
+            c_rol, c_emp = st.columns(2)
+            
+            with c_rol:
+                st.subheader("🔄 Cambiar Rol de Usuario")
+                with st.form("form_cambiar_rol"):
+                    usr_sel_r = st.selectbox("Usuario", usuarios_df["id"].tolist(), format_func=lambda x: f"{usuarios_df.loc[usuarios_df['id']==x, 'nombre'].values[0]} ({usuarios_df.loc[usuarios_df['id']==x, 'rol'].values[0]})", key="sel_rol")
+                    nuevo_rol_sel = st.selectbox("Nuevo Rol", ["Preparador", "Revisor", "Administrador"])
+                    if st.form_submit_button("Actualizar Rol", type="primary"):
+                        actualizar_rol_usuario(usr_sel_r, nuevo_rol_sel)
+                        st.success("Rol actualizado con éxito.")
+                        st.rerun()
+
+            with c_emp:
+                if not empresas_df.empty:
+                    st.subheader("🏢 Cambiar Empresa Asignada")
+                    with st.form("form_asignar_empresa"):
+                        usr_sel_e = st.selectbox("Usuario", usuarios_df["id"].tolist(), format_func=lambda x: usuarios_df.loc[usuarios_df["id"]==x, "nombre"].values[0], key="sel_emp")
+                        emp_sel = st.selectbox("Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0])
+                        if st.form_submit_button("Asignar Empresa", type="primary"):
+                            actualizar_empresa_usuario(usr_sel_e, emp_sel)
+                            st.success("Empresa asignada correctamente.")
+                            st.rerun()
