@@ -33,14 +33,11 @@ DB_FILE = "conciliaciones.db"
 
 
 def conectar_db():
-    """Abre la conexión con la base SQLite."""
     return sqlite3.connect(DB_FILE)
 
 
 def inicializar_db():
-    """Crea y actualiza todas las tablas de la base de datos."""
     with conectar_db() as conn:
-        # 1. Tabla de Conciliaciones
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conciliaciones (
@@ -82,7 +79,6 @@ def inicializar_db():
                 conn.execute(sql)
         conn.execute("UPDATE conciliaciones SET workflow_status = 'Pendiente de revisión' WHERE workflow_status IS NULL OR workflow_status = ''")
 
-        # 2. Tabla de Empresas
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS empresas (
@@ -93,7 +89,6 @@ def inicializar_db():
             """
         )
 
-        # 3. Tabla de Cuentas Bancarias
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS cuentas_bancarias (
@@ -106,12 +101,11 @@ def inicializar_db():
             )
             """
         )
-
         conn.commit()
 
 
 # =========================================================
-# FUNCIONES DE MAESTROS (EMPRESAS Y BANCOS)
+# FUNCIONES MAESTRAS
 # =========================================================
 
 def obtener_empresas():
@@ -250,121 +244,11 @@ def eliminar_conciliacion(id_conciliacion):
         conn.commit()
 
 
-def actualizar_conciliacion_historial(
-    id_conciliacion, empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
-    saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
-    resultado_final, salidas_extracto, salidas_libros, entradas_libros,
-    entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
-    excel_data, usuario_actual
-):
-    estado = (
-        "CONCILIACIÓN BANCARIA CORRECTA"
-        if abs(resultado_final) < 0.005
-        else "CONCILIACIÓN CON DIFERENCIA"
-    )
-    def dataframe_a_registros(df):
-        limpio = limpiar_dataframe(df)
-        if limpio is None or limpio.empty:
-            return []
-        return json.loads(limpio.to_json(orient="records", date_format="iso"))
-
-    datos = {
-        "salidas_extracto": dataframe_a_registros(salidas_extracto),
-        "salidas_libros": dataframe_a_registros(salidas_libros),
-        "entradas_libros": dataframe_a_registros(entradas_libros),
-        "entradas_extracto": dataframe_a_registros(entradas_extracto),
-        "gastos_bancarios": dataframe_a_registros(gastos_bancarios),
-        "preparado_por": preparado_por,
-        "revisado_por": revisado_por,
-    }
-
-    fecha_elaboracion_texto = (
-        fecha_elaboracion.isoformat()
-        if hasattr(fecha_elaboracion, "isoformat") else str(fecha_elaboracion)
-    )
-    with conectar_db() as conn:
-        conn.execute(
-            """
-            UPDATE conciliaciones SET
-                fecha_guardado = ?, empresa = ?, nit = ?, mes = ?, fecha_elaboracion = ?,
-                banco = ?, cuenta = ?, tipo = ?, saldo_extracto = ?, saldo_libros = ?,
-                diferencia_inicial = ?, diferencia_conciliada = ?, resultado_final = ?,
-                estado = ?, datos_json = ?, excel = ?,
-                workflow_status = 'Pendiente de revisión',
-                revisado_por_usuario = NULL, fecha_revision = NULL,
-                motivo_correccion = NULL, usuario_ultima_accion = ?
-            WHERE id = ?
-            """,
-            (
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"), empresa, nit, mes,
-                fecha_elaboracion_texto, banco, cuenta, tipo, float(saldo_extracto),
-                float(saldo_libros), float(diferencia_inicial), float(diferencia_conciliada),
-                float(resultado_final), estado, json.dumps(datos, ensure_ascii=False),
-                sqlite3.Binary(excel_data), usuario_actual, int(id_conciliacion)
-            )
-        )
-        conn.commit()
-
-
-def solicitar_correccion(id_conciliacion, usuario_revisor, motivo):
-    with conectar_db() as conn:
-        conn.execute(
-            """UPDATE conciliaciones
-               SET workflow_status = 'Corrección habilitada',
-                   revisado_por_usuario = ?, fecha_revision = ?,
-                   motivo_correccion = ?, usuario_ultima_accion = ?
-             WHERE id = ?""",
-            (usuario_revisor, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-             motivo.strip(), usuario_revisor, int(id_conciliacion))
-        )
-        conn.commit()
-
-
-def aprobar_conciliacion(id_conciliacion, usuario_revisor):
-    with conectar_db() as conn:
-        conn.execute(
-            """UPDATE conciliaciones
-               SET workflow_status = 'Aprobada',
-                   revisado_por_usuario = ?, fecha_revision = ?,
-                   motivo_correccion = NULL, usuario_ultima_accion = ?
-             WHERE id = ?""",
-            (usuario_revisor, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-             usuario_revisor, int(id_conciliacion))
-        )
-        conn.commit()
-
-
-def obtener_datos_para_edicion(id_conciliacion):
-    fila = obtener_conciliacion(id_conciliacion)
-    if not fila:
-        return None
-    datos = json.loads(fila[15] or "{}")
-    def df_desde_registros(registros, columnas):
-        if registros:
-            return pd.DataFrame(registros)
-        return pd.DataFrame(columns=columnas)
-    return {
-        "id": fila[0], "fecha_guardado": fila[1], "empresa": fila[2] or "",
-        "nit": fila[3] or "", "mes": fila[4] or "",
-        "fecha_elaboracion": fila[5], "banco": fila[6] or "", "cuenta": fila[7] or "",
-        "tipo": fila[8] or "Ahorros", "saldo_extracto": fila[9], "saldo_libros": fila[10],
-        "salidas_extracto": df_desde_registros(datos.get("salidas_extracto", []), ["Fecha","Beneficiario","Documento","Valor"]),
-        "salidas_libros": df_desde_registros(datos.get("salidas_libros", []), ["Fecha","Concepto","Valor"]),
-        "entradas_libros": df_desde_registros(datos.get("entradas_libros", []), ["Fecha","Concepto","Valor"]),
-        "entradas_extracto": df_desde_registros(datos.get("entradas_extracto", []), ["Fecha","Concepto","Valor"]),
-        "gastos_bancarios": df_desde_registros(datos.get("gastos_bancarios", []), ["Fecha","4 x 1000","Cuota de manejo","IVA","Rte. fuente","Comisión","Ing. x intereses"]),
-        "preparado_por": datos.get("preparado_por", "") or "",
-        "revisado_por": datos.get("revisado_por", "") or "",
-        "workflow_status": fila[17] or "Pendiente de revisión",
-        "motivo_correccion": fila[20] or "",
-    }
-
-
 inicializar_db()
 
 
 # =========================================================
-# ETAPA 4 - AUTENTICACIÓN Y USUARIOS
+# AUTENTICACIÓN Y USUARIOS
 # =========================================================
 
 def preparar_tabla_usuarios():
@@ -434,55 +318,12 @@ def autenticar_usuario(usuario, password):
     return {"id": fila[0], "usuario": fila[1], "nombre": fila[2], "rol": fila[5]}
 
 
-def recuperar_usuario_por_nombre_y_clave(nombre, password):
-    with conectar_db() as conn:
-        filas = conn.execute(
-            """
-            SELECT id, usuario, nombre, password_hash, salt, rol
-            FROM usuarios
-            WHERE activo = 1 AND lower(trim(nombre)) = lower(trim(?))
-            ORDER BY id
-            """,
-            (nombre.strip(),)
-        ).fetchall()
-
-    coincidencias = []
-    for fila in filas:
-        if verificar_password(password, fila[4], fila[3]):
-            coincidencias.append({
-                "id": fila[0],
-                "usuario": fila[1],
-                "nombre": fila[2],
-                "rol": fila[5],
-            })
-
-    if len(coincidencias) == 1:
-        return coincidencias[0]
-    return None
-
-
 def obtener_usuarios():
     with conectar_db() as conn:
         return pd.read_sql_query(
             "SELECT id, usuario, nombre, rol, activo, fecha_creacion FROM usuarios ORDER BY id",
             conn
         )
-
-
-def cambiar_estado_usuario(id_usuario, activo):
-    with conectar_db() as conn:
-        conn.execute("UPDATE usuarios SET activo = ? WHERE id = ?", (int(activo), int(id_usuario)))
-        conn.commit()
-
-
-def cambiar_password_usuario(id_usuario, nueva_password):
-    salt, password_hash = hash_password(nueva_password)
-    with conectar_db() as conn:
-        conn.execute(
-            "UPDATE usuarios SET password_hash = ?, salt = ? WHERE id = ?",
-            (password_hash, salt, int(id_usuario))
-        )
-        conn.commit()
 
 
 def tiene_permiso(rol, permiso):
@@ -519,7 +360,7 @@ def iniciar_autenticacion():
                 crear_usuario(usuario, nombre, password, "Administrador")
                 datos_admin = autenticar_usuario(usuario, password)
                 st.session_state.usuario_autenticado = datos_admin
-                st.success(f"Administrador creado correctamente. Tu usuario es: {usuario.strip()}")
+                st.success(f"Administrador creado correctamente.")
                 st.rerun()
         st.stop()
 
@@ -536,26 +377,7 @@ def iniciar_autenticacion():
                 st.session_state.usuario_autenticado = datos
                 st.rerun()
             else:
-                st.error("Usuario o contraseña incorrectos, o usuario inactivo.")
-
-        with st.expander("🔎 ¿Olvidaste tu nombre de usuario?"):
-            st.caption("Para recuperar el usuario debes ingresar tu nombre completo y tu contraseña.")
-            with st.form("form_recuperar_usuario"):
-                nombre_recuperacion = st.text_input("Nombre completo", key="recuperacion_nombre")
-                clave_recuperacion = st.text_input("Contraseña", type="password", key="recuperacion_clave")
-                recuperar = st.form_submit_button("Mostrar mi usuario", width="stretch")
-            if recuperar:
-                if not nombre_recuperacion.strip() or not clave_recuperacion:
-                    st.error("Completa el nombre completo y la contraseña.")
-                else:
-                    datos_recuperados = recuperar_usuario_por_nombre_y_clave(
-                        nombre_recuperacion, clave_recuperacion
-                    )
-                    if datos_recuperados:
-                        st.success(f"Tu nombre de usuario es: {datos_recuperados['usuario']}")
-                        st.info(f"Rol: {datos_recuperados['rol']}")
-                    else:
-                        st.error("No se encontró una cuenta activa que coincida con esos datos.")
+                st.error("Usuario o contraseña incorrectos.")
         st.stop()
 
 
@@ -576,17 +398,14 @@ with st.sidebar:
     st.divider()
 
     opciones_menu = ["📊 Dashboard"]
-    
     if tiene_permiso(rol_actual, "editar"):
         opciones_menu.append("📝 Nueva Conciliación")
     
     opciones_menu.extend(["📚 Historial", "🏢 Empresas", "🏦 Bancos y Cuentas", "📈 Reportes"])
-    
     if tiene_permiso(rol_actual, "usuarios"):
         opciones_menu.append("👥 Usuarios")
 
     menu_seleccionado = st.radio("Navegación principal", opciones_menu)
-
     st.divider()
     if st.button("🚪 Cerrar sesión", width="stretch"):
         st.session_state.usuario_autenticado = None
@@ -724,7 +543,8 @@ def preparar_excel(
     empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
     saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
     resultado_final, salidas_extracto, salidas_libros, entradas_libros,
-    entradas_extracto, gastos_bancarios, preparado_por, revisado_por
+    entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
+    nombres_titulos
 ):
     salidas_extracto = limpiar_dataframe(salidas_extracto)
     salidas_libros = limpiar_dataframe(salidas_libros)
@@ -747,7 +567,7 @@ def preparar_excel(
         ws.column_dimensions[letra].width = ancho
 
     ws.merge_cells("A1:G1")
-    ws["A1"] = "CONCILIACIÓN BANCARIA"
+    ws["A1"] = f"CONCILIACIÓN - {tipo.upper()}"
     estilo_titulo(ws["A1"], 16)
     ws.row_dimensions[1].height = 28
 
@@ -782,11 +602,12 @@ def preparar_excel(
 
     fila += 1
     fila = escribir_seccion(ws, fila, "JUSTIFICACIÓN", 4)
+    
     justificaciones = [
-        ("SALIDAS NO REGISTRADAS EN EXTRACTO", total_columna(salidas_extracto)),
-        ("SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS", total_columna(salidas_libros)),
-        ("ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS", total_columna(entradas_libros)),
-        ("ENTRADAS NO EVIDENCIADAS EN EXTRACTOS", total_columna(entradas_extracto)),
+        (nombres_titulos["t1"], total_columna(salidas_extracto)),
+        (nombres_titulos["t2"], total_columna(salidas_libros)),
+        (nombres_titulos["t3"], total_columna(entradas_libros)),
+        (nombres_titulos["t4"], total_columna(entradas_extracto)),
     ]
 
     for nombre, valor in justificaciones:
@@ -812,10 +633,10 @@ def preparar_excel(
         fila += 1
 
     fila += 1
-    fila = escribir_tabla(ws, fila, "SALIDAS NO REGISTRADAS EN EXTRACTO", salidas_extracto)
-    fila = escribir_tabla(ws, fila, "SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS", salidas_libros)
-    fila = escribir_tabla(ws, fila, "ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS", entradas_libros)
-    fila = escribir_tabla(ws, fila, "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS", entradas_extracto)
+    fila = escribir_tabla(ws, fila, nombres_titulos["t1"], salidas_extracto)
+    fila = escribir_tabla(ws, fila, nombres_titulos["t2"], salidas_libros)
+    fila = escribir_tabla(ws, fila, nombres_titulos["t3"], entradas_libros)
+    fila = escribir_tabla(ws, fila, nombres_titulos["t4"], entradas_extracto)
     fila = escribir_gastos_bancarios(ws, fila, gastos_bancarios)
 
     fila = escribir_seccion(ws, fila, "RESULTADO DE LA CONCILIACIÓN", 4)
@@ -867,120 +688,54 @@ def preparar_excel(
 
 
 # =========================================================
-# VISTAS DE LA APLICACIÓN
+# VISTAS
 # =========================================================
 
-# ---------------------------------------------------------
-# 1. DASHBOARD
-# ---------------------------------------------------------
 if menu_seleccionado == "📊 Dashboard":
     st.title("📊 Dashboard de Conciliaciones")
-    st.caption("Resumen ejecutivo del estado de las conciliaciones bancarias.")
-
     historial = obtener_historial()
-    total_registros = len(historial)
-
-    if total_registros == 0:
-        st.info("Aún no hay conciliaciones registradas. Registra una nueva conciliación para ver estadísticas.")
+    if len(historial) == 0:
+        st.info("Aún no hay conciliaciones registradas.")
     else:
-        aprobadas = len(historial[historial["workflow_status"] == "Aprobada"])
-        pendientes = len(historial[historial["workflow_status"] == "Pendiente de revisión"])
-        correccion = len(historial[historial["workflow_status"] == "Corrección habilitada"])
-        correctas = len(historial[historial["estado"] == "CONCILIACIÓN BANCARIA CORRECTA"])
-
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        kpi1.metric("Total Conciliaciones", total_registros)
-        kpi2.metric("Aprobadas 🔒", aprobadas)
-        kpi3.metric("Pendientes 🕒", pendientes)
-        kpi4.metric("Sin Diferencia ✅", correctas)
-
+        kpi1, kpi2, kpi3 = st.columns(3)
+        kpi1.metric("Total Conciliaciones", len(historial))
+        kpi2.metric("Aprobadas 🔒", len(historial[historial["workflow_status"] == "Aprobada"]))
+        kpi3.metric("Pendientes 🕒", len(historial[historial["workflow_status"] == "Pendiente de revisión"]))
         st.divider()
-        st.subheader("Distribución por Estado de Revisión")
-        df_flujo = historial["workflow_status"].value_counts().reset_index()
-        df_flujo.columns = ["Estado de revisión", "Cantidad"]
-        st.bar_chart(data=df_flujo, x="Estado de revisión", y="Cantidad")
-
-        st.divider()
-        st.subheader("Últimas Conciliaciones")
-        st.dataframe(
-            historial[["id", "empresa", "mes", "banco", "resultado_final", "workflow_status"]].head(5),
-            width="stretch",
-            hide_index=True
-        )
+        st.dataframe(historial[["id", "empresa", "mes", "banco", "resultado_final", "workflow_status"]].head(5), width="stretch", hide_index=True)
 
 
-# ---------------------------------------------------------
-# 2. EMPRESAS
-# ---------------------------------------------------------
 elif menu_seleccionado == "🏢 Empresas":
     st.title("🏢 Maestro de Empresas")
-    st.caption("Gestiona las empresas para utilizarlas en las conciliaciones.")
-
     if tiene_permiso(rol_actual, "maestros"):
         with st.expander("➕ Registrar nueva empresa"):
             with st.form("form_empresa_maestro"):
                 nom = st.text_input("Nombre de la empresa")
                 nit = st.text_input("NIT")
-                guardar = st.form_submit_button("Guardar Empresa", type="primary")
-                if guardar:
-                    if not nom.strip() or not nit.strip():
-                        st.error("Ingresa el nombre y el NIT.")
-                    else:
-                        try:
-                            guardar_empresa(nom, nit)
-                            st.success(f"Empresa '{nom}' registrada correctamente.")
-                            st.rerun()
-                        except sqlite3.IntegrityError:
-                            st.error("Esa empresa ya está registrada.")
-
-    empresas_df = obtener_empresas()
-    st.dataframe(empresas_df, width="stretch", hide_index=True)
-
-    if tiene_permiso(rol_actual, "eliminar") and not empresas_df.empty:
-        st.subheader("Eliminar empresa")
-        emp_id = st.selectbox("Selecciona empresa a eliminar", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0])
-        if st.button("Eliminar Empresa"):
-            eliminar_empresa(emp_id)
-            st.success("Empresa eliminada.")
-            st.rerun()
+                if st.form_submit_button("Guardar Empresa", type="primary"):
+                    guardar_empresa(nom, nit)
+                    st.rerun()
+    st.dataframe(obtener_empresas(), width="stretch", hide_index=True)
 
 
-# ---------------------------------------------------------
-# 3. BANCOS Y CUENTAS
-# ---------------------------------------------------------
 elif menu_seleccionado == "🏦 Bancos y Cuentas":
     st.title("🏦 Maestro de Bancos y Cuentas Bancarias")
-    st.caption("Registra Cuentas de Ahorros, Cuentas Corrientes y Tarjetas de Crédito.")
-
     empresas_df = obtener_empresas()
-
     if tiene_permiso(rol_actual, "maestros"):
         with st.expander("➕ Registrar nueva cuenta bancaria"):
             with st.form("form_cuenta_maestro"):
-                banco = st.text_input("Banco (ej. Bancolombia, Davivienda)")
+                banco = st.text_input("Banco")
                 num = st.text_input("Número de Cuenta / Tarjeta")
                 tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"])
                 emp_id = None
                 if not empresas_df.empty:
-                    emp_sel = st.selectbox("Asociar a Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0])
-                    emp_id = emp_sel
-                
-                guardar_cta = st.form_submit_button("Guardar Cuenta", type="primary")
-                if guardar_cta:
-                    if not banco.strip() or not num.strip():
-                        st.error("Ingresa el banco y número de cuenta.")
-                    else:
-                        guardar_cuenta(banco, num, tipo, emp_id)
-                        st.success("Cuenta registrada correctamente.")
-                        st.rerun()
-
-    cuentas_df = obtener_cuentas()
-    st.dataframe(cuentas_df, width="stretch", hide_index=True)
+                    emp_id = st.selectbox("Asociar a Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0])
+                if st.form_submit_button("Guardar Cuenta", type="primary"):
+                    guardar_cuenta(banco, num, tipo, emp_id)
+                    st.rerun()
+    st.dataframe(obtener_cuentas(), width="stretch", hide_index=True)
 
 
-# ---------------------------------------------------------
-# 4. NUEVA CONCILIACIÓN / EDICIÓN
-# ---------------------------------------------------------
 elif menu_seleccionado == "📝 Nueva Conciliación":
     st.title("📝 Captura de Conciliación Bancaria")
 
@@ -1029,35 +784,54 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             cuenta = st.text_input("Número de Cuenta", key="form_cuenta")
             tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"], key="form_tipo")
 
+    # CONFIGURACIÓN DINÁMICA DE TÍTULOS Y FÓRMULAS
+    es_tc = "tarjeta" in tipo.lower() or "crédito" in tipo.lower() or "credito" in tipo.lower()
+
+    if es_tc:
+        st.info("💳 Modo activado: Conciliación de Tarjeta de Crédito.")
+        nombres_titulos = {
+            "t1": "COMPRAS NO EVIDENCIADAS EN EXTRACTOS",
+            "t2": "COMPRAS NO CONTABILIZADAS EN LIBROS",
+            "t3": "DÉBITOS BANCARIOS NO CONTABILIZADOS EN LIBROS",
+            "t4": "ABONOS NO REGISTRADOS EN EXTRACTO"
+        }
+    else:
+        nombres_titulos = {
+            "t1": "SALIDAS NO REGISTRADAS EN EXTRACTO",
+            "t2": "SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
+            "t3": "ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
+            "t4": "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
+        }
+
     st.divider()
     st.subheader("Saldos")
     c1, c2 = st.columns(2)
     with c1:
-        saldo_extracto = st.number_input("Saldo según Extracto Bancario", format="%.2f", key="form_saldo_extracto")
+        saldo_extracto = st.number_input("Saldo según Extracto", format="%.2f", key="form_saldo_extracto")
     with c2:
         saldo_libros = st.number_input("Saldo según Libros", format="%.2f", key="form_saldo_libros")
 
     diferencia_inicial = saldo_extracto - saldo_libros
     st.metric("Diferencia a Justificar", f"${diferencia_inicial:,.2f}")
 
-    # MOVIMIENTOS
+    # TABLAS DE MOVIMIENTOS CON TÍTULOS DINÁMICOS
     st.divider()
-    st.subheader("Salidas no Registradas en Extracto")
+    st.subheader(f"1. {nombres_titulos['t1']}")
     salidas_extracto = st.data_editor(st.session_state.tabla1, num_rows="dynamic", width="stretch", key="editor_tabla1")
     st.session_state.tabla1 = salidas_extracto
 
     st.divider()
-    st.subheader("Salidas Bancarias no Contabilizadas en Libros")
+    st.subheader(f"2. {nombres_titulos['t2']}")
     salidas_libros = st.data_editor(st.session_state.tabla2, num_rows="dynamic", width="stretch", key="editor_tabla2")
     st.session_state.tabla2 = salidas_libros
 
     st.divider()
-    st.subheader("Entradas Bancarias no Contabilizadas en Libros")
+    st.subheader(f"3. {nombres_titulos['t3']}")
     entradas_libros = st.data_editor(st.session_state.tabla3, num_rows="dynamic", width="stretch", key="editor_tabla3")
     st.session_state.tabla3 = entradas_libros
 
     st.divider()
-    st.subheader("Entradas no Evidenciadas en Extractos")
+    st.subheader(f"4. {nombres_titulos['t4']}")
     entradas_extracto = st.data_editor(st.session_state.tabla4, num_rows="dynamic", width="stretch", key="editor_tabla4")
     st.session_state.tabla4 = entradas_extracto
 
@@ -1066,15 +840,23 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     gastos_bancarios = st.data_editor(st.session_state.tabla5, num_rows="dynamic", width="stretch", key="editor_tabla5")
     st.session_state.tabla5 = gastos_bancarios
 
-    # CÁLCULOS Y RESULTADO
-    diferencia_conciliada = (
-        total_columna(salidas_extracto) - total_columna(salidas_libros)
-        + total_columna(entradas_libros) - total_columna(entradas_extracto)
-    )
+    # CÁLCULO DE LA DIFERENCIA SEGÚN TIPO DE CUENTA
+    m1 = total_columna(salidas_extracto)
+    m2 = total_columna(salidas_libros)
+    m3 = total_columna(entradas_libros)
+    m4 = total_columna(entradas_extracto)
+
+    if es_tc:
+        # FÓRMULA TARJETA DE CRÉDITO: - t1 + t2 - t3 + t4
+        diferencia_conciliada = - m1 + m2 - m3 + m4
+    else:
+        # FÓRMULA ESTÁNDAR BANCO: + t1 - t2 + t3 - t4
+        diferencia_conciliada = m1 - m2 + m3 - m4
+
     resultado_final = diferencia_inicial - diferencia_conciliada
 
     st.divider()
-    st.subheader("Resultado")
+    st.subheader("Resultado de la Conciliación")
     r1, r2, r3 = st.columns(3)
     r1.metric("Diferencia Inicial", f"${diferencia_inicial:,.2f}")
     r2.metric("Diferencia Conciliada", f"${diferencia_conciliada:,.2f}")
@@ -1087,7 +869,8 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
         saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
         resultado_final, salidas_extracto, salidas_libros, entradas_libros,
-        entradas_extracto, gastos_bancarios, preparado_por, revisado_por
+        entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
+        nombres_titulos
     )
 
     st.divider()
@@ -1101,9 +884,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         st.success(f"✅ Conciliación #{id_g} guardada con éxito.")
 
 
-# ---------------------------------------------------------
-# 5. HISTORIAL
-# ---------------------------------------------------------
 elif menu_seleccionado == "📚 Historial":
     st.title("📚 Historial de Conciliaciones")
     historial = obtener_historial()
@@ -1113,32 +893,14 @@ elif menu_seleccionado == "📚 Historial":
         st.dataframe(historial, width="stretch", hide_index=True)
 
 
-# ---------------------------------------------------------
-# 6. REPORTES Y EXPORTACIONES
-# ---------------------------------------------------------
 elif menu_seleccionado == "📈 Reportes":
-    st.title("📈 Reportes y Exportación Consolidada")
-    st.caption("Genera informes agrupados por empresa o período.")
-
+    st.title("📈 Reportes")
     historial = obtener_historial()
-    if historial.empty:
-        st.info("No hay datos para generar reportes.")
-    else:
-        st.subheader("Exportación de Datos")
+    if not historial.empty:
         csv = historial.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            "📥 Descargar Todo el Historial (CSV)",
-            data=csv,
-            file_name="historial_conciliaciones.csv",
-            mime="text/csv",
-            width="stretch"
-        )
+        st.download_button("📥 Descargar Todo el Historial (CSV)", data=csv, file_name="historial_conciliaciones.csv", mime="text/csv", width="stretch")
 
 
-# ---------------------------------------------------------
-# 7. USUARIOS
-# ---------------------------------------------------------
 elif menu_seleccionado == "👥 Usuarios":
     st.title("👥 Gestión de Usuarios")
-    usuarios_df = obtener_usuarios()
-    st.dataframe(usuarios_df, width="stretch", hide_index=True)
+    st.dataframe(obtener_usuarios(), width="stretch", hide_index=True)
