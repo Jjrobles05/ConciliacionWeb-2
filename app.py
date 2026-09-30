@@ -38,6 +38,7 @@ def conectar_db():
 
 def inicializar_db():
     with conectar_db() as conn:
+        # Tabla de Conciliaciones
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conciliaciones (
@@ -66,19 +67,19 @@ def inicializar_db():
             )
             """
         )
-        columnas = {fila[1] for fila in conn.execute("PRAGMA table_info(conciliaciones)").fetchall()}
-        migraciones = {
+        columnas_conc = {fila[1] for fila in conn.execute("PRAGMA table_info(conciliaciones)").fetchall()}
+        migraciones_conc = {
             "workflow_status": "ALTER TABLE conciliaciones ADD COLUMN workflow_status TEXT NOT NULL DEFAULT 'Pendiente de revisión'",
             "revisado_por_usuario": "ALTER TABLE conciliaciones ADD COLUMN revisado_por_usuario TEXT",
             "fecha_revision": "ALTER TABLE conciliaciones ADD COLUMN fecha_revision TEXT",
             "motivo_correccion": "ALTER TABLE conciliaciones ADD COLUMN motivo_correccion TEXT",
             "usuario_ultima_accion": "ALTER TABLE conciliaciones ADD COLUMN usuario_ultima_accion TEXT",
         }
-        for nombre, sql in migraciones.items():
-            if nombre not in columnas:
+        for nombre, sql in migraciones_conc.items():
+            if nombre not in columnas_conc:
                 conn.execute(sql)
-        conn.execute("UPDATE conciliaciones SET workflow_status = 'Pendiente de revisión' WHERE workflow_status IS NULL OR workflow_status = ''")
 
+        # Tabla de Empresas
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS empresas (
@@ -89,6 +90,7 @@ def inicializar_db():
             """
         )
 
+        # Tabla de Cuentas Bancarias
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS cuentas_bancarias (
@@ -101,11 +103,33 @@ def inicializar_db():
             )
             """
         )
+
+        # Tabla de Usuarios
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                usuario TEXT NOT NULL UNIQUE,
+                nombre TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                rol TEXT NOT NULL,
+                activo INTEGER NOT NULL DEFAULT 1,
+                fecha_creacion TEXT NOT NULL,
+                empresa_id INTEGER,
+                FOREIGN KEY(empresa_id) REFERENCES empresas(id)
+            )
+            """
+        )
+        cols_usr = {fila[1] for fila in conn.execute("PRAGMA table_info(usuarios)").fetchall()}
+        if "empresa_id" not in cols_usr:
+            conn.execute("ALTER TABLE usuarios ADD COLUMN empresa_id INTEGER")
+
         conn.commit()
 
 
 # =========================================================
-# FUNCIONES MAESTRAS
+# FUNCIONES MAESTRAS (EMPRESAS, BANCOS Y USUARIOS)
 # =========================================================
 
 def obtener_empresas():
@@ -122,15 +146,25 @@ def eliminar_empresa(id_empresa):
         conn.execute("DELETE FROM empresas WHERE id = ?", (int(id_empresa),))
         conn.commit()
 
-def obtener_cuentas():
+def obtener_cuentas(empresa_id=None):
     with conectar_db() as conn:
-        query = """
-        SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta, e.nombre as empresa_nombre
-        FROM cuentas_bancarias c
-        LEFT JOIN empresas e ON c.empresa_id = e.id
-        ORDER BY c.banco, c.numero_cuenta
-        """
-        return pd.read_sql_query(query, conn)
+        if empresa_id:
+            query = """
+            SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta, c.empresa_id, e.nombre as empresa_nombre
+            FROM cuentas_bancarias c
+            LEFT JOIN empresas e ON c.empresa_id = e.id
+            WHERE c.empresa_id = ?
+            ORDER BY c.banco, c.numero_cuenta
+            """
+            return pd.read_sql_query(query, conn, params=(int(empresa_id),))
+        else:
+            query = """
+            SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta, c.empresa_id, e.nombre as empresa_nombre
+            FROM cuentas_bancarias c
+            LEFT JOIN empresas e ON c.empresa_id = e.id
+            ORDER BY c.banco, c.numero_cuenta
+            """
+            return pd.read_sql_query(query, conn)
 
 def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
     with conectar_db() as conn:
@@ -144,6 +178,52 @@ def eliminar_cuenta(id_cuenta):
     with conectar_db() as conn:
         conn.execute("DELETE FROM cuentas_bancarias WHERE id = ?", (int(id_cuenta),))
         conn.commit()
+
+
+# =========================================================
+# ROTACIÓN AUTOMÁTICA MENSUAL DE CUENTAS
+# =========================================================
+
+def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
+    """
+    Divide las cuentas de una empresa entre los usuarios asignados a ella
+    y las rota mensualmente usando la fórmula del módulo del mes.
+    """
+    if not empresa_id:
+        return pd.DataFrame()
+
+    with conectar_db() as conn:
+        # Obtener usuarios activos asignados a esa empresa
+        usuarios = pd.read_sql_query(
+            "SELECT id, nombre FROM usuarios WHERE empresa_id = ? AND activo = 1 ORDER BY id",
+            conn, params=(int(empresa_id),)
+        )
+        cuentas = pd.read_sql_query(
+            "SELECT id, banco, numero_cuenta, tipo_cuenta FROM cuentas_bancarias WHERE empresa_id = ? ORDER BY id",
+            conn, params=(int(empresa_id),)
+        )
+
+    if cuentas.empty or usuarios.empty:
+        return cuentas
+
+    num_usuarios = len(usuarios)
+    ids_usuarios = usuarios["id"].tolist()
+
+    if usuario_id not in ids_usuarios:
+        return cuentas
+
+    cuentas_asignadas = []
+    for idx_cuenta, fila_cuenta in cuentas.iterrows():
+        # Índice rotado mes a mes
+        idx_usuario_asignado = (idx_cuenta + mes_num) % num_usuarios
+        usuario_asignado_id = ids_usuarios[idx_usuario_asignado]
+
+        if usuario_asignado_id == usuario_id:
+            cuentas_asignadas.append(fila_cuenta)
+
+    if cuentas_asignadas:
+        return pd.DataFrame(cuentas_asignadas)
+    return pd.DataFrame(columns=cuentas.columns)
 
 
 # =========================================================
@@ -224,51 +304,12 @@ def obtener_historial():
         )
 
 
-def obtener_conciliacion(id_conciliacion):
-    with conectar_db() as conn:
-        return conn.execute(
-            """
-            SELECT id, fecha_guardado, empresa, nit, mes, fecha_elaboracion,
-                   banco, cuenta, tipo, saldo_extracto, saldo_libros,
-                   diferencia_inicial, diferencia_conciliada, resultado_final,
-                   estado, datos_json, excel, workflow_status, revisado_por_usuario,
-                   fecha_revision, motivo_correccion, usuario_ultima_accion
-            FROM conciliaciones WHERE id = ?
-            """, (int(id_conciliacion),)
-        ).fetchone()
-
-
-def eliminar_conciliacion(id_conciliacion):
-    with conectar_db() as conn:
-        conn.execute("DELETE FROM conciliaciones WHERE id = ?", (int(id_conciliacion),))
-        conn.commit()
-
-
 inicializar_db()
 
 
 # =========================================================
 # AUTENTICACIÓN Y USUARIOS
 # =========================================================
-
-def preparar_tabla_usuarios():
-    with conectar_db() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS usuarios (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                usuario TEXT NOT NULL UNIQUE,
-                nombre TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                salt TEXT NOT NULL,
-                rol TEXT NOT NULL,
-                activo INTEGER NOT NULL DEFAULT 1,
-                fecha_creacion TEXT NOT NULL
-            )
-            """
-        )
-        conn.commit()
-
 
 def hash_password(password, salt=None):
     salt = salt or secrets.token_hex(16)
@@ -288,42 +329,61 @@ def contar_usuarios():
         return conn.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0]
 
 
-def crear_usuario(usuario, nombre, password, rol):
+def crear_usuario(usuario, nombre, password, rol, empresa_id=None):
     salt, password_hash = hash_password(password)
     with conectar_db() as conn:
         cursor = conn.execute(
             """
             INSERT INTO usuarios
-            (usuario, nombre, password_hash, salt, rol, activo, fecha_creacion)
-            VALUES (?, ?, ?, ?, ?, 1, ?)
+            (usuario, nombre, password_hash, salt, rol, activo, fecha_creacion, empresa_id)
+            VALUES (?, ?, ?, ?, ?, 1, ?, ?)
             """,
             (usuario.strip(), nombre.strip(), password_hash, salt, rol,
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), empresa_id)
         )
         conn.commit()
         return cursor.lastrowid
+
+
+def actualizar_empresa_usuario(usuario_id, empresa_id):
+    with conectar_db() as conn:
+        conn.execute("UPDATE usuarios SET empresa_id = ? WHERE id = ?", (empresa_id, int(usuario_id)))
+        conn.commit()
 
 
 def autenticar_usuario(usuario, password):
     with conectar_db() as conn:
         fila = conn.execute(
             """
-            SELECT id, usuario, nombre, password_hash, salt, rol
-            FROM usuarios WHERE usuario = ? AND activo = 1
+            SELECT u.id, u.usuario, u.nombre, u.password_hash, u.salt, u.rol, u.empresa_id, e.nombre as empresa_nombre, e.nit as empresa_nit
+            FROM usuarios u
+            LEFT JOIN empresas e ON u.empresa_id = e.id
+            WHERE u.usuario = ? AND u.activo = 1
             """,
             (usuario.strip(),)
         ).fetchone()
     if not fila or not verificar_password(password, fila[4], fila[3]):
         return None
-    return {"id": fila[0], "usuario": fila[1], "nombre": fila[2], "rol": fila[5]}
+    return {
+        "id": fila[0],
+        "usuario": fila[1],
+        "nombre": fila[2],
+        "rol": fila[5],
+        "empresa_id": fila[6],
+        "empresa_nombre": fila[7],
+        "empresa_nit": fila[8]
+    }
 
 
 def obtener_usuarios():
     with conectar_db() as conn:
-        return pd.read_sql_query(
-            "SELECT id, usuario, nombre, rol, activo, fecha_creacion FROM usuarios ORDER BY id",
-            conn
-        )
+        query = """
+        SELECT u.id, u.usuario, u.nombre, u.rol, u.activo, u.fecha_creacion, e.nombre as empresa_nombre
+        FROM usuarios u
+        LEFT JOIN empresas e ON u.empresa_id = e.id
+        ORDER BY u.id
+        """
+        return pd.read_sql_query(query, conn)
 
 
 def tiene_permiso(rol, permiso):
@@ -336,7 +396,6 @@ def tiene_permiso(rol, permiso):
 
 
 def iniciar_autenticacion():
-    preparar_tabla_usuarios()
     if "usuario_autenticado" not in st.session_state:
         st.session_state.usuario_autenticado = None
 
@@ -360,7 +419,7 @@ def iniciar_autenticacion():
                 crear_usuario(usuario, nombre, password, "Administrador")
                 datos_admin = autenticar_usuario(usuario, password)
                 st.session_state.usuario_autenticado = datos_admin
-                st.success(f"Administrador creado correctamente.")
+                st.success("Administrador creado correctamente.")
                 st.rerun()
         st.stop()
 
@@ -395,6 +454,10 @@ with st.sidebar:
     st.title("Conciliación Web")
     st.markdown(f"👤 **{usuario_actual['nombre']}**")
     st.caption(f"Rol: {rol_actual}")
+    if usuario_actual.get("empresa_nombre"):
+        st.caption(f"🏢 Empresa: **{usuario_actual['empresa_nombre']}**")
+    else:
+        st.caption("🏢 Empresa: *Sin asignar*")
     st.divider()
 
     opciones_menu = ["📊 Dashboard"]
@@ -413,7 +476,7 @@ with st.sidebar:
 
 
 # =========================================================
-# FUNCIONES AUXILIARES PARA EXCEL Y FORMATO
+# FUNCIONES AUXILIARES DE FORMATO
 # =========================================================
 
 def total_columna(df, columna="Valor"):
@@ -602,7 +665,6 @@ def preparar_excel(
 
     fila += 1
     fila = escribir_seccion(ws, fila, "JUSTIFICACIÓN", 4)
-    
     justificaciones = [
         (nombres_titulos["t1"], total_columna(salidas_extracto)),
         (nombres_titulos["t2"], total_columna(salidas_libros)),
@@ -751,35 +813,56 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
 
     empresas_df = obtener_empresas()
-    cuentas_df = obtener_cuentas()
-
+    
     st.subheader("Información General")
     col1, col2 = st.columns(2)
 
     with col1:
-        if not empresas_df.empty:
+        if usuario_actual.get("empresa_id"):
+            empresa = usuario_actual["empresa_nombre"]
+            nit = usuario_actual["empresa_nit"]
+            st.text_input("Empresa Asignada", value=empresa, disabled=True)
+            st.text_input("NIT", value=nit, disabled=True)
+            empresa_id_activa = usuario_actual["empresa_id"]
+        elif not empresas_df.empty:
             empresa_obj = st.selectbox("Empresa Registrada", empresas_df["nombre"].tolist())
             empresa = empresa_obj
             nit = empresas_df.loc[empresas_df["nombre"] == empresa_obj, "nit"].values[0]
+            empresa_id_activa = empresas_df.loc[empresas_df["nombre"] == empresa_obj, "id"].values[0]
             st.text_input("NIT", value=nit, disabled=True)
         else:
             empresa = st.text_input("Nombre de la Empresa", key="form_empresa")
             nit = st.text_input("NIT", key="form_nit")
+            empresa_id_activa = None
 
-        mes = st.text_input("Mes y Año (ej. SEPTIEMBRE 2026)", key="form_mes")
+        mes_nombre = st.selectbox("Mes a Conciliar", [
+            "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+            "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+        ], index=datetime.now().month - 1)
+        
+        mes_num = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"].index(mes_nombre) + 1
+        anio = st.number_input("Año", value=datetime.now().year, step=1)
+        mes = f"{mes_nombre.upper()} {anio}"
         fecha_elaboracion = st.date_input("Fecha de elaboración", key="form_fecha_elaboracion")
 
+    # ROTACIÓN MENSUAL DE CUENTAS BANCARIAS
+    cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(
+        empresa_id_activa, mes_num, usuario_actual["id"]
+    )
+
     with col2:
-        if not cuentas_df.empty:
+        if not cuentas_asig_df.empty:
+            st.info("🔄 **Cuentas asignadas este mes (Rotación automática):**")
             cta_sel = st.selectbox(
-                "Cuenta Bancaria Registrada",
-                cuentas_df["id"].tolist(),
-                format_func=lambda x: f"{cuentas_df.loc[cuentas_df['id']==x, 'banco'].values[0]} - {cuentas_df.loc[cuentas_df['id']==x, 'numero_cuenta'].values[0]} ({cuentas_df.loc[cuentas_df['id']==x, 'tipo_cuenta'].values[0]})"
+                "Cuentas a Conciliar en este Período",
+                cuentas_asig_df["id"].tolist(),
+                format_func=lambda x: f"{cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'banco'].values[0]} - {cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'numero_cuenta'].values[0]} ({cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'tipo_cuenta'].values[0]})"
             )
-            banco = cuentas_df.loc[cuentas_df["id"] == cta_sel, "banco"].values[0]
-            cuenta = cuentas_df.loc[cuentas_df["id"] == cta_sel, "numero_cuenta"].values[0]
-            tipo = cuentas_df.loc[cuentas_df["id"] == cta_sel, "tipo_cuenta"].values[0]
+            banco = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "banco"].values[0]
+            cuenta = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "numero_cuenta"].values[0]
+            tipo = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "tipo_cuenta"].values[0]
         else:
+            st.warning("No tienes cuentas asignadas este mes o no hay cuentas registradas.")
             banco = st.text_input("Nombre del Banco", key="form_banco")
             cuenta = st.text_input("Número de Cuenta", key="form_cuenta")
             tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"], key="form_tipo")
@@ -814,7 +897,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     diferencia_inicial = saldo_extracto - saldo_libros
     st.metric("Diferencia a Justificar", f"${diferencia_inicial:,.2f}")
 
-    # TABLAS DE MOVIMIENTOS CON TÍTULOS DINÁMICOS
+    # TABLAS DE MOVIMIENTOS
     st.divider()
     st.subheader(f"1. {nombres_titulos['t1']}")
     salidas_extracto = st.data_editor(st.session_state.tabla1, num_rows="dynamic", width="stretch", key="editor_tabla1")
@@ -840,17 +923,15 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     gastos_bancarios = st.data_editor(st.session_state.tabla5, num_rows="dynamic", width="stretch", key="editor_tabla5")
     st.session_state.tabla5 = gastos_bancarios
 
-    # CÁLCULO DE LA DIFERENCIA SEGÚN TIPO DE CUENTA
+    # CÁLCULO
     m1 = total_columna(salidas_extracto)
     m2 = total_columna(salidas_libros)
     m3 = total_columna(entradas_libros)
     m4 = total_columna(entradas_extracto)
 
     if es_tc:
-        # FÓRMULA TARJETA DE CRÉDITO: - t1 + t2 - t3 + t4
         diferencia_conciliada = - m1 + m2 - m3 + m4
     else:
-        # FÓRMULA ESTÁNDAR BANCO: + t1 - t2 + t3 - t4
         diferencia_conciliada = m1 - m2 + m3 - m4
 
     resultado_final = diferencia_inicial - diferencia_conciliada
@@ -902,5 +983,21 @@ elif menu_seleccionado == "📈 Reportes":
 
 
 elif menu_seleccionado == "👥 Usuarios":
-    st.title("👥 Gestión de Usuarios")
-    st.dataframe(obtener_usuarios(), width="stretch", hide_index=True)
+    st.title("👥 Gestión de Usuarios y Asignación de Empresas")
+
+    empresas_df = obtener_empresas()
+    usuarios_df = obtener_usuarios()
+
+    st.subheader("Lista de Usuarios Registrados")
+    st.dataframe(usuarios_df, width="stretch", hide_index=True)
+
+    if tiene_permiso(rol_actual, "usuarios") and not usuarios_df.empty and not empresas_df.empty:
+        st.divider()
+        st.subheader("🏢 Asignar / Cambiar Empresa a Usuario")
+        with st.form("form_asignar_empresa"):
+            usr_sel = st.selectbox("Selecciona Usuario", usuarios_df["id"].tolist(), format_func=lambda x: usuarios_df.loc[usuarios_df["id"]==x, "nombre"].values[0])
+            emp_sel = st.selectbox("Selecciona Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0])
+            if st.form_submit_button("Asignar Empresa", type="primary"):
+                actualizar_empresa_usuario(usr_sel, emp_sel)
+                st.success("Empresa asignada correctamente al usuario.")
+                st.rerun()
