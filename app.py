@@ -371,6 +371,38 @@ def autenticar_usuario(usuario, password):
     return {"id": fila[0], "usuario": fila[1], "nombre": fila[2], "rol": fila[5]}
 
 
+def recuperar_usuario_por_nombre_y_clave(nombre, password):
+    """Recupera el nombre de usuario sin exponerlo solo con el nombre.
+
+    Se exige nombre completo + contraseña para evitar revelar usuarios
+    a cualquier persona que simplemente conozca el nombre de otra persona.
+    """
+    with conectar_db() as conn:
+        filas = conn.execute(
+            """
+            SELECT id, usuario, nombre, password_hash, salt, rol
+            FROM usuarios
+            WHERE activo = 1 AND lower(trim(nombre)) = lower(trim(?))
+            ORDER BY id
+            """,
+            (nombre.strip(),)
+        ).fetchall()
+
+    coincidencias = []
+    for fila in filas:
+        if verificar_password(password, fila[4], fila[3]):
+            coincidencias.append({
+                "id": fila[0],
+                "usuario": fila[1],
+                "nombre": fila[2],
+                "rol": fila[5],
+            })
+
+    if len(coincidencias) == 1:
+        return coincidencias[0]
+    return None
+
+
 def obtener_usuarios():
     with conectar_db() as conn:
         return pd.read_sql_query(
@@ -427,7 +459,9 @@ def iniciar_autenticacion():
                 st.error("Las contraseñas no coinciden.")
             else:
                 crear_usuario(usuario, nombre, password, "Administrador")
-                st.success("Administrador creado correctamente.")
+                datos_admin = autenticar_usuario(usuario, password)
+                st.session_state.usuario_autenticado = datos_admin
+                st.success(f"Administrador creado correctamente. Tu usuario es: {usuario.strip()}")
                 st.rerun()
         st.stop()
 
@@ -445,6 +479,25 @@ def iniciar_autenticacion():
                 st.rerun()
             else:
                 st.error("Usuario o contraseña incorrectos, o usuario inactivo.")
+
+        with st.expander("🔎 ¿Olvidaste tu nombre de usuario?"):
+            st.caption("Para recuperar el usuario debes ingresar tu nombre completo y tu contraseña. La contraseña no se muestra ni se guarda en este formulario.")
+            with st.form("form_recuperar_usuario"):
+                nombre_recuperacion = st.text_input("Nombre completo", key="recuperacion_nombre")
+                clave_recuperacion = st.text_input("Contraseña", type="password", key="recuperacion_clave")
+                recuperar = st.form_submit_button("Mostrar mi usuario", width="stretch")
+            if recuperar:
+                if not nombre_recuperacion.strip() or not clave_recuperacion:
+                    st.error("Completa el nombre completo y la contraseña.")
+                else:
+                    datos_recuperados = recuperar_usuario_por_nombre_y_clave(
+                        nombre_recuperacion, clave_recuperacion
+                    )
+                    if datos_recuperados:
+                        st.success(f"Tu nombre de usuario es: {datos_recuperados['usuario']}")
+                        st.info(f"Rol: {datos_recuperados['rol']}")
+                    else:
+                        st.error("No se encontró una cuenta activa que coincida con esos datos.")
         st.stop()
 
 
