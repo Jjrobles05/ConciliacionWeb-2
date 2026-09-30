@@ -38,7 +38,6 @@ def conectar_db():
 
 def inicializar_db():
     with conectar_db() as conn:
-        # Tabla de Conciliaciones
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS conciliaciones (
@@ -79,7 +78,6 @@ def inicializar_db():
             if nombre not in columnas_conc:
                 conn.execute(sql)
 
-        # Tabla de Empresas
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS empresas (
@@ -90,7 +88,6 @@ def inicializar_db():
             """
         )
 
-        # Tabla de Cuentas Bancarias
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS cuentas_bancarias (
@@ -104,7 +101,6 @@ def inicializar_db():
             """
         )
 
-        # Tabla de Usuarios
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS usuarios (
@@ -129,7 +125,7 @@ def inicializar_db():
 
 
 # =========================================================
-# FUNCIONES MAESTRAS (EMPRESAS, BANCOS Y USUARIOS)
+# FUNCIONES MAESTRAS
 # =========================================================
 
 def obtener_empresas():
@@ -139,11 +135,6 @@ def obtener_empresas():
 def guardar_empresa(nombre, nit):
     with conectar_db() as conn:
         conn.execute("INSERT INTO empresas (nombre, nit) VALUES (?, ?)", (nombre.strip(), nit.strip()))
-        conn.commit()
-
-def eliminar_empresa(id_empresa):
-    with conectar_db() as conn:
-        conn.execute("DELETE FROM empresas WHERE id = ?", (int(id_empresa),))
         conn.commit()
 
 def obtener_cuentas(empresa_id=None):
@@ -172,11 +163,6 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
             "INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id) VALUES (?, ?, ?, ?)",
             (banco.strip(), numero_cuenta.strip(), tipo_cuenta, empresa_id)
         )
-        conn.commit()
-
-def eliminar_cuenta(id_cuenta):
-    with conectar_db() as conn:
-        conn.execute("DELETE FROM cuentas_bancarias WHERE id = ?", (int(id_cuenta),))
         conn.commit()
 
 
@@ -221,7 +207,7 @@ def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
 
 
 # =========================================================
-# OPERACIONES CON CONCILIACIONES
+# OPERACIONES DE CONCILIACIÓN Y AUDITORÍA
 # =========================================================
 
 def guardar_conciliacion_historial(
@@ -290,9 +276,10 @@ def obtener_historial(empresa_nombre=None):
         if empresa_nombre and empresa_nombre != "Todas las empresas":
             return pd.read_sql_query(
                 """
-                SELECT id, fecha_guardado, empresa, nit, mes, banco, cuenta,
+                SELECT id, fecha_guardado, empresa, nit, mes, banco, cuenta, tipo,
+                       saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
                        resultado_final, estado, workflow_status, revisado_por_usuario,
-                       fecha_revision, motivo_correccion
+                       fecha_revision, motivo_correccion, datos_json
                 FROM conciliaciones
                 WHERE empresa = ?
                 ORDER BY id DESC
@@ -301,13 +288,39 @@ def obtener_historial(empresa_nombre=None):
         else:
             return pd.read_sql_query(
                 """
-                SELECT id, fecha_guardado, empresa, nit, mes, banco, cuenta,
+                SELECT id, fecha_guardado, empresa, nit, mes, banco, cuenta, tipo,
+                       saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
                        resultado_final, estado, workflow_status, revisado_por_usuario,
-                       fecha_revision, motivo_correccion
+                       fecha_revision, motivo_correccion, datos_json
                 FROM conciliaciones
                 ORDER BY id DESC
                 """, conn
             )
+
+
+def obtener_conciliacion_por_id(id_conciliacion):
+    with conectar_db() as conn:
+        fila = conn.execute(
+            "SELECT * FROM conciliaciones WHERE id = ?", (int(id_conciliacion),)
+        ).fetchone()
+        if not fila:
+            return None
+        cols = [col[0] for col in conn.execute("PRAGMA table_info(conciliaciones)").fetchall()]
+        return dict(zip(cols, fila))
+
+
+def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, motivo_correccion=None):
+    fecha_rev = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with conectar_db() as conn:
+        conn.execute(
+            """
+            UPDATE conciliaciones
+            SET workflow_status = ?, revisado_por_usuario = ?, fecha_revision = ?, motivo_correccion = ?
+            WHERE id = ?
+            """,
+            (nuevo_estado, revisado_por, fecha_rev, motivo_correccion, int(id_conciliacion))
+        )
+        conn.commit()
 
 
 inicializar_db()
@@ -357,6 +370,12 @@ def actualizar_empresa_usuario(usuario_id, empresa_id):
         conn.commit()
 
 
+def actualizar_rol_usuario(usuario_id, nuevo_rol):
+    with conectar_db() as conn:
+        conn.execute("UPDATE usuarios SET rol = ? WHERE id = ?", (nuevo_rol, int(usuario_id)))
+        conn.commit()
+
+
 def autenticar_usuario(usuario, password):
     with conectar_db() as conn:
         fila = conn.execute(
@@ -392,18 +411,57 @@ def obtener_usuarios():
         return pd.read_sql_query(query, conn)
 
 
-def tiene_permiso(rol, permiso):
-    permisos = {
-        "Administrador": {"editar", "historial", "eliminar", "usuarios", "maestros"},
-        "Preparador": {"editar", "historial", "maestros"},
-        "Revisor": {"historial"},
-    }
-    return permiso in permisos.get(rol, set())
+# CONTROL DE PERMISOS ESTRICTO
+def obtener_opciones_menu(rol):
+    if rol == "Preparador":
+        return ["📊 Dashboard", "📝 Nueva Conciliación", "📚 Historial"]
+    elif rol == "Revisor":
+        return ["🔍 Auditoría y Revisiones", "📊 Dashboard", "📚 Historial", "🏢 Empresas", "🏦 Bancos y Cuentas", "📈 Reportes"]
+    elif rol == "Administrador":
+        return ["📊 Dashboard", "🔍 Auditoría y Revisiones", "📝 Nueva Conciliación", "📚 Historial", "🏢 Empresas", "🏦 Bancos y Cuentas", "📈 Reportes", "👥 Usuarios"]
+    return ["📊 Dashboard"]
 
 
 def iniciar_autenticacion():
     if "usuario_autenticado" not in st.session_state:
         st.session_state.usuario_autenticado = None
+
+    params = st.query_params
+    if "registro" in params and params["registro"] == "true":
+        st.title("📝 Registro de Nuevo Usuario")
+        st.caption("Completa tus datos para crear tu cuenta de acceso.")
+        
+        rol_invitado = params.get("rol", "Preparador")
+        empresa_id_invitada = params.get("empresa_id", None)
+        if empresa_id_invitada:
+            try:
+                empresa_id_invitada = int(empresa_id_invitada)
+            except ValueError:
+                empresa_id_invitada = None
+
+        with st.form("form_autoregistro"):
+            nombre = st.text_input("Nombre completo")
+            usuario = st.text_input("Nombre de usuario")
+            password = st.text_input("Contraseña", type="password")
+            confirmar = st.text_input("Confirmar contraseña", type="password")
+            registro_btn = st.form_submit_button("Crear mi cuenta", type="primary", width="stretch")
+
+        if registro_btn:
+            if not usuario.strip() or not nombre.strip() or not password:
+                st.error("Completa todos los campos.")
+            elif len(password) < 8:
+                st.error("La contraseña debe tener al menos 8 caracteres.")
+            elif password != confirmar:
+                st.error("Las contraseñas no coinciden.")
+            else:
+                try:
+                    crear_usuario(usuario, nombre, password, rol_invitado, empresa_id_invitada)
+                    st.success("¡Cuenta creada con éxito! Ya puedes iniciar sesión.")
+                    st.query_params.clear()
+                    st.rerun()
+                except sqlite3.IntegrityError:
+                    st.error("El nombre de usuario ya existe. Por favor elige otro.")
+        st.stop()
 
     if contar_usuarios() == 0:
         st.title("🔐 Configuración inicial")
@@ -464,7 +522,6 @@ with st.sidebar:
     st.caption(f"Rol: **{rol_actual}**")
     st.divider()
 
-    # MULTI-EMPRESA PARA ADMINISTRADOR Y REVISOR / AUDITOR
     if rol_actual in ["Administrador", "Revisor"]:
         st.subheader("🏢 Selección de Empresa")
         opciones_emp = ["Todas las empresas"] + empresas_df["nombre"].tolist() if not empresas_df.empty else ["Todas las empresas"]
@@ -477,7 +534,6 @@ with st.sidebar:
             empresa_activa_id = None
             empresa_activa_nit = ""
     else:
-        # PREPARADORES TIENEN SU EMPRESA FIJA ASIGNADA
         empresa_activa_id = usuario_actual.get("empresa_id")
         empresa_activa_nombre = usuario_actual.get("empresa_nombre") or "Sin asignar"
         empresa_activa_nit = usuario_actual.get("empresa_nit") or ""
@@ -485,15 +541,9 @@ with st.sidebar:
 
     st.divider()
 
-    opciones_menu = ["📊 Dashboard"]
-    if tiene_permiso(rol_actual, "editar"):
-        opciones_menu.append("📝 Nueva Conciliación")
-    
-    opciones_menu.extend(["📚 Historial", "🏢 Empresas", "🏦 Bancos y Cuentas", "📈 Reportes"])
-    if tiene_permiso(rol_actual, "usuarios"):
-        opciones_menu.append("👥 Usuarios")
-
+    opciones_menu = obtener_opciones_menu(rol_actual)
     menu_seleccionado = st.radio("Navegación principal", opciones_menu)
+    
     st.divider()
     if st.button("🚪 Cerrar sesión", width="stretch"):
         st.session_state.usuario_autenticado = None
@@ -501,7 +551,7 @@ with st.sidebar:
 
 
 # =========================================================
-# FUNCIONES AUXILIARES DE FORMATO
+# FUNCIONES AUXILIARES DE FORMATO Y EXCEL
 # =========================================================
 
 def total_columna(df, columna="Valor"):
@@ -775,10 +825,123 @@ def preparar_excel(
 
 
 # =========================================================
-# VISTAS
+# VISTAS DE LA APLICACIÓN
 # =========================================================
 
-if menu_seleccionado == "📊 Dashboard":
+if menu_seleccionado == "🔍 Auditoría y Revisiones":
+    st.title("🔍 BANDEJA DE AUDITORÍA Y REVISIONES")
+    st.caption("Modulo exclusivo para la revisión técnica y aprobación de Conciliaciones Bancarias.")
+
+    historial = obtener_historial(empresa_activa_nombre)
+    pendientes = historial[historial["workflow_status"] == "Pendiente de revisión"]
+
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Pendientes de Revisar 🕒", len(pendientes))
+    k2.metric("Aprobadas 🔒", len(historial[historial["workflow_status"] == "Aprobada"]))
+    k3.metric("Devueltas ❌", len(historial[historial["workflow_status"] == "Requiere corrección"]))
+
+    st.divider()
+
+    if pendientes.empty:
+        st.success("🎉 ¡Excelente! No hay conciliaciones pendientes por auditar.")
+    else:
+        st.subheader("📋 Conciliaciones Pendientes de Revisión")
+        
+        for idx, fila in pendientes.iterrows():
+            with st.expander(f"📌 #{fila['id']} | {fila['empresa']} - {fila['banco']} ({fila['cuenta']}) | Mes: {fila['mes']} | Resultado: ${fila['resultado_final']:,.2f}"):
+                
+                # CARGAR DATOS EN FORMATO EXCEL COMPLETO
+                c_data = obtener_conciliacion_por_id(fila["id"])
+                datos = json.loads(c_data["datos_json"])
+                tipo_cta = c_data.get("tipo", "Cuenta de ahorros")
+                es_tc = "tarjeta" in tipo_cta.lower() or "crédito" in tipo_cta.lower() or "credito" in tipo_cta.lower()
+
+                if es_tc:
+                    t1_nombre, t2_nombre, t3_nombre, t4_nombre = (
+                        "COMPRAS NO EVIDENCIADAS EN EXTRACTOS",
+                        "COMPRAS NO CONTABILIZADAS EN LIBROS",
+                        "DÉBITOS BANCARIOS NO CONTABILIZADOS EN LIBROS",
+                        "ABONOS NO REGISTRADOS EN EXTRACTO"
+                    )
+                else:
+                    t1_nombre, t2_nombre, t3_nombre, t4_nombre = (
+                        "SALIDAS NO REGISTRADAS EN EXTRACTO",
+                        "SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
+                        "ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
+                        "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
+                    )
+
+                # FORMATO DE MUESTRA IDÉNTICO AL EXCEL
+                st.markdown(
+                    f"""
+                    <div style="background-color: #1F4E78; color: white; padding: 12px; text-align: center; border-radius: 5px; font-weight: bold; font-size: 18px;">
+                        CONCILIACIÓN - {tipo_cta.upper()}
+                    </div>
+                    """, unsafe_allow_html=True
+                )
+
+                col_inf1, col_inf2 = st.columns(2)
+                with col_inf1:
+                    st.write(f"🏢 **Empresa:** {c_data['empresa']} | **NIT:** {c_data['nit']}")
+                    st.write(f"📅 **Mes/Año:** {c_data['mes']} | **Elaboración:** {c_data['fecha_elaboracion']}")
+                with col_inf2:
+                    st.write(f"🏦 **Banco:** {c_data['banco']} | **Cuenta No:** {c_data['cuenta']}")
+                    st.write(f"👤 **Preparado por:** {datos.get('preparado_por', 'N/A')}")
+
+                st.divider()
+
+                # SALDOS
+                st.markdown("**💰 SALDOS Y CÁLCULO DE LA CONCILIACIÓN**")
+                df_saldos = pd.DataFrame([
+                    {"Concepto": "SALDO SEGÚN EXTRACTO BANCARIO", "Valor": f"${c_data['saldo_extracto']:,.2f}"},
+                    {"Concepto": "SALDO SEGÚN LIBROS", "Valor": f"${c_data['saldo_libros']:,.2f}"},
+                    {"Concepto": "DIFERENCIA A JUSTIFICAR", "Valor": f"${c_data['diferencia_inicial']:,.2f}"},
+                    {"Concepto": "DIFERENCIA CONCILIADA", "Valor": f"${c_data['diferencia_conciliada']:,.2f}"},
+                    {"Concepto": "RESULTADO FINAL", "Valor": f"${c_data['resultado_final']:,.2f}"},
+                    {"Concepto": "ESTADO", "Valor": c_data['estado']}
+                ])
+                st.table(df_saldos)
+
+                # MOVIMIENTOS DETALLADOS DE JUSTIFICACIÓN
+                st.markdown(f"**1. {t1_nombre}**")
+                st.dataframe(pd.DataFrame(datos.get("salidas_extracto", [])), width="stretch", hide_index=True)
+
+                st.markdown(f"**2. {t2_nombre}**")
+                st.dataframe(pd.DataFrame(datos.get("salidas_libros", [])), width="stretch", hide_index=True)
+
+                st.markdown(f"**3. {t3_nombre}**")
+                st.dataframe(pd.DataFrame(datos.get("entradas_libros", [])), width="stretch", hide_index=True)
+
+                st.markdown(f"**4. {t4_nombre}**")
+                st.dataframe(pd.DataFrame(datos.get("entradas_extracto", [])), width="stretch", hide_index=True)
+
+                st.markdown("**GASTOS BANCARIOS**")
+                st.dataframe(pd.DataFrame(datos.get("gastos_bancarios", [])), width="stretch", hide_index=True)
+
+                st.divider()
+
+                # ACCIONES DE APROBACIÓN O RECHAZO
+                st.subheader("⚡ Decisión del Auditor")
+                btn_col1, btn_col2 = st.columns(2)
+
+                with btn_col1:
+                    if st.button("🔒 APROBAR CONCILIACIÓN", key=f"aprob_{fila['id']}", type="primary", width="stretch"):
+                        actualizar_estado_auditoria(fila["id"], "Aprobada", usuario_actual["nombre"])
+                        st.success("✅ Conciliación aprobada con éxito.")
+                        st.rerun()
+
+                with btn_col2:
+                    motivo = st.text_input("Observaciones / Motivo de Corrección (Obligatorio si se devuelve)", key=f"mot_{fila['id']}")
+                    if st.button("❌ DEVOLVER PARA CORRECCIÓN", key=f"dev_{fila['id']}", width="stretch"):
+                        if not motivo.strip():
+                            st.error("Debes ingresar el motivo de devolución.")
+                        else:
+                            actualizar_estado_auditoria(fila["id"], "Requiere corrección", usuario_actual["nombre"], motivo)
+                            st.warning("⚠️ Conciliación devuelta al preparador.")
+                            st.rerun()
+
+
+elif menu_seleccionado == "📊 Dashboard":
     st.title("📊 Dashboard de Conciliaciones")
     if empresa_activa_nombre != "Todas las empresas":
         st.caption(f"Filtrado por empresa: **{empresa_activa_nombre}**")
@@ -797,7 +960,7 @@ if menu_seleccionado == "📊 Dashboard":
 
 elif menu_seleccionado == "🏢 Empresas":
     st.title("🏢 Maestro de Empresas")
-    if tiene_permiso(rol_actual, "maestros"):
+    if rol_actual == "Administrador":
         with st.expander("➕ Registrar nueva empresa"):
             with st.form("form_empresa_maestro"):
                 nom = st.text_input("Nombre de la empresa")
@@ -810,7 +973,7 @@ elif menu_seleccionado == "🏢 Empresas":
 
 elif menu_seleccionado == "🏦 Bancos y Cuentas":
     st.title("🏦 Maestro de Bancos y Cuentas Bancarias")
-    if tiene_permiso(rol_actual, "maestros"):
+    if rol_actual == "Administrador":
         with st.expander("➕ Registrar nueva cuenta bancaria"):
             with st.form("form_cuenta_maestro"):
                 banco = st.text_input("Banco")
@@ -868,7 +1031,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         mes = f"{mes_nombre.upper()} {anio}"
         fecha_elaboracion = st.date_input("Fecha de elaboración", key="form_fecha_elaboracion")
 
-    # ROTACIÓN MENSUAL DE CUENTAS BANCARIAS
     cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(
         empresa_activa_id, mes_num, usuario_actual["id"]
     )
@@ -890,7 +1052,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             cuenta = st.text_input("Número de Cuenta", key="form_cuenta")
             tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"], key="form_tipo")
 
-    # CONFIGURACIÓN DINÁMICA DE TÍTULOS Y FÓRMULAS
     es_tc = "tarjeta" in tipo.lower() or "crédito" in tipo.lower() or "credito" in tipo.lower()
 
     if es_tc:
@@ -920,7 +1081,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     diferencia_inicial = saldo_extracto - saldo_libros
     st.metric("Diferencia a Justificar", f"${diferencia_inicial:,.2f}")
 
-    # TABLAS DE MOVIMIENTOS
     st.divider()
     st.subheader(f"1. {nombres_titulos['t1']}")
     salidas_extracto = st.data_editor(st.session_state.tabla1, num_rows="dynamic", width="stretch", key="editor_tabla1")
@@ -946,7 +1106,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     gastos_bancarios = st.data_editor(st.session_state.tabla5, num_rows="dynamic", width="stretch", key="editor_tabla5")
     st.session_state.tabla5 = gastos_bancarios
 
-    # CÁLCULO
     m1 = total_columna(salidas_extracto)
     m2 = total_columna(salidas_libros)
     m3 = total_columna(entradas_libros)
@@ -997,7 +1156,7 @@ elif menu_seleccionado == "📚 Historial":
     if historial.empty:
         st.info("No hay conciliaciones guardadas.")
     else:
-        st.dataframe(historial, width="stretch", hide_index=True)
+        st.dataframe(historial[["id", "fecha_guardado", "empresa", "mes", "banco", "cuenta", "resultado_final", "workflow_status"]], width="stretch", hide_index=True)
 
 
 elif menu_seleccionado == "📈 Reportes":
@@ -1009,19 +1168,88 @@ elif menu_seleccionado == "📈 Reportes":
 
 
 elif menu_seleccionado == "👥 Usuarios":
-    st.title("👥 Gestión de Usuarios y Asignación de Empresas")
+    st.title("👥 Gestión de Usuarios y Roles")
 
     usuarios_df = obtener_usuarios()
     st.subheader("Lista de Usuarios Registrados")
     st.dataframe(usuarios_df, width="stretch", hide_index=True)
 
-    if tiene_permiso(rol_actual, "usuarios") and not usuarios_df.empty and not empresas_df.empty:
+    if rol_actual == "Administrador":
         st.divider()
-        st.subheader("🏢 Asignar / Cambiar Empresa a Usuario (Preparadores)")
-        with st.form("form_asignar_empresa"):
-            usr_sel = st.selectbox("Selecciona Usuario", usuarios_df["id"].tolist(), format_func=lambda x: usuarios_df.loc[usuarios_df["id"]==x, "nombre"].values[0])
-            emp_sel = st.selectbox("Selecciona Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0])
-            if st.form_submit_button("Asignar Empresa", type="primary"):
-                actualizar_empresa_usuario(usr_sel, emp_sel)
-                st.success("Empresa asignada correctamente al usuario.")
-                st.rerun()
+        col_crear, col_link = st.columns(2)
+
+        with col_crear:
+            with st.expander("➕ Crear Nuevo Usuario Manualmente", expanded=True):
+                with st.form("form_crear_usuario_manual"):
+                    nuevo_nombre = st.text_input("Nombre completo")
+                    nuevo_usuario = st.text_input("Usuario")
+                    nueva_pass = st.text_input("Contraseña", type="password")
+                    nuevo_rol = st.selectbox("Rol de Acceso", ["Preparador", "Revisor", "Administrador"])
+                    
+                    emp_id_crear = None
+                    if not empresas_df.empty:
+                        emp_id_crear = st.selectbox(
+                            "Empresa Asignada", 
+                            [None] + empresas_df["id"].tolist(), 
+                            format_func=lambda x: "Sin asignar (Todas)" if x is None else empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0]
+                        )
+                    
+                    if st.form_submit_button("Crear Usuario", type="primary", width="stretch"):
+                        if not nuevo_nombre.strip() or not nuevo_usuario.strip() or not nueva_pass:
+                            st.error("Completa todos los campos obligatorios.")
+                        elif len(nueva_pass) < 8:
+                            st.error("La contraseña debe tener al menos 8 caracteres.")
+                        else:
+                            try:
+                                crear_usuario(nuevo_usuario, nuevo_nombre, nueva_pass, nuevo_rol, emp_id_crear)
+                                st.success(f"Usuario '{nuevo_usuario}' creado con éxito con rol {nuevo_rol}.")
+                                st.rerun()
+                            except sqlite3.IntegrityError:
+                                st.error("Ese nombre de usuario ya está registrado.")
+
+        with col_link:
+            with st.expander("🔗 Generar Enlace de Autoregistro", expanded=True):
+                st.caption("Crea un link para enviar a un colaborador para que cree su propia cuenta.")
+                rol_link = st.selectbox("Rol para el nuevo usuario", ["Preparador", "Revisor", "Administrador"], key="link_rol")
+                
+                emp_id_link = None
+                if not empresas_df.empty:
+                    emp_id_link = st.selectbox(
+                        "Empresa predeterminada", 
+                        [None] + empresas_df["id"].tolist(), 
+                        format_func=lambda x: "Sin asignar" if x is None else empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0],
+                        key="link_empresa"
+                    )
+
+                url_base = st.query_params.get("base_url", "https://conciliacionweb.streamlit.app/")
+                link_generado = f"{url_base}?registro=true&rol={rol_link}"
+                if emp_id_link:
+                    link_generado += f"&empresa_id={emp_id_link}"
+
+                st.code(link_generado, language="text")
+                st.info("Copie este enlace y envíelo al usuario para su registro.")
+
+        if not usuarios_df.empty:
+            st.divider()
+            c_rol, c_emp = st.columns(2)
+            
+            with c_rol:
+                st.subheader("🔄 Cambiar Rol de Usuario")
+                with st.form("form_cambiar_rol"):
+                    usr_sel_r = st.selectbox("Usuario", usuarios_df["id"].tolist(), format_func=lambda x: f"{usuarios_df.loc[usuarios_df['id']==x, 'nombre'].values[0]} ({usuarios_df.loc[usuarios_df['id']==x, 'rol'].values[0]})", key="sel_rol")
+                    nuevo_rol_sel = st.selectbox("Nuevo Rol", ["Preparador", "Revisor", "Administrador"])
+                    if st.form_submit_button("Actualizar Rol", type="primary"):
+                        actualizar_rol_usuario(usr_sel_r, nuevo_rol_sel)
+                        st.success("Rol actualizado con éxito.")
+                        st.rerun()
+
+            with c_emp:
+                if not empresas_df.empty:
+                    st.subheader("🏢 Cambiar Empresa Asignada")
+                    with st.form("form_asignar_empresa"):
+                        usr_sel_e = st.selectbox("Usuario", usuarios_df["id"].tolist(), format_func=lambda x: usuarios_df.loc[usuarios_df["id"]==x, "nombre"].values[0], key="sel_emp")
+                        emp_sel = st.selectbox("Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"]==x, "nombre"].values[0])
+                        if st.form_submit_button("Asignar Empresa", type="primary"):
+                            actualizar_empresa_usuario(usr_sel_e, emp_sel)
+                            st.success("Empresa asignada correctamente.")
+                            st.rerun()
