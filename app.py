@@ -1475,7 +1475,7 @@ if st.button(
     )
 
 # =========================================================
-# ETAPA 2 - HISTORIAL
+# ETAPA 2 - HISTORIAL AVANZADO
 # =========================================================
 
 st.divider()
@@ -1486,89 +1486,304 @@ historial = obtener_historial()
 if historial.empty:
     st.info("Todavía no hay conciliaciones guardadas en el historial.")
 else:
+    st.caption(
+        "Consulta las conciliaciones guardadas y utiliza los filtros para localizar "
+        "rápidamente una empresa, período, banco o cuenta."
+    )
+
+    # -----------------------------------------------------
+    # FILTROS
+    # -----------------------------------------------------
+
     h1, h2, h3 = st.columns(3)
+
     with h1:
-        filtro_empresa = st.text_input("Filtrar por empresa", key="hist_filtro_empresa")
+        filtro_empresa = st.text_input(
+            "Empresa",
+            placeholder="Ej. EMPRESA PRUEBA",
+            key="hist_filtro_empresa"
+        )
+
+        filtro_nit = st.text_input(
+            "NIT",
+            placeholder="Número de identificación",
+            key="hist_filtro_nit"
+        )
+
     with h2:
-        filtro_mes = st.text_input("Filtrar por mes/año", key="hist_filtro_mes")
+        filtro_mes = st.text_input(
+            "Mes / Año",
+            placeholder="Ej. SEPTIEMBRE 2026",
+            key="hist_filtro_mes"
+        )
+
+        filtro_banco = st.text_input(
+            "Banco",
+            placeholder="Ej. Bancolombia",
+            key="hist_filtro_banco"
+        )
+
     with h3:
+        filtro_cuenta = st.text_input(
+            "Cuenta",
+            placeholder="Número de cuenta",
+            key="hist_filtro_cuenta"
+        )
+
         filtro_estado = st.selectbox(
-            "Filtrar por estado",
-            ["Todos", "CONCILIACIÓN BANCARIA CORRECTA", "CONCILIACIÓN CON DIFERENCIA"],
+            "Estado",
+            [
+                "Todos",
+                "CONCILIACIÓN BANCARIA CORRECTA",
+                "CONCILIACIÓN CON DIFERENCIA"
+            ],
             key="hist_filtro_estado"
         )
 
     historial_filtrado = historial.copy()
-    if filtro_empresa.strip():
-        historial_filtrado = historial_filtrado[
-            historial_filtrado["empresa"].fillna("").str.contains(
-                filtro_empresa.strip(), case=False, na=False
-            )
-        ]
-    if filtro_mes.strip():
-        historial_filtrado = historial_filtrado[
-            historial_filtrado["mes"].fillna("").str.contains(
-                filtro_mes.strip(), case=False, na=False
-            )
-        ]
+
+    filtros_texto = [
+        ("empresa", filtro_empresa),
+        ("nit", filtro_nit),
+        ("mes", filtro_mes),
+        ("banco", filtro_banco),
+        ("cuenta", filtro_cuenta),
+    ]
+
+    for columna, filtro in filtros_texto:
+        if filtro.strip():
+            historial_filtrado = historial_filtrado[
+                historial_filtrado[columna]
+                .fillna("")
+                .astype(str)
+                .str.contains(
+                    filtro.strip(),
+                    case=False,
+                    na=False
+                )
+            ]
+
     if filtro_estado != "Todos":
         historial_filtrado = historial_filtrado[
             historial_filtrado["estado"] == filtro_estado
         ]
 
-    mostrar_historial = historial_filtrado.rename(columns={
-        "id": "ID", "fecha_guardado": "Guardado", "empresa": "Empresa",
-        "nit": "NIT", "mes": "Mes/Año", "banco": "Banco", "cuenta": "Cuenta",
-        "resultado_final": "Resultado final", "estado": "Estado"
-    })
-    st.dataframe(mostrar_historial, width="stretch", hide_index=True)
+    st.caption(
+        f"Registros encontrados: {len(historial_filtrado)} de {len(historial)}"
+    )
 
-    if not historial_filtrado.empty:
-        ids_disponibles = historial_filtrado["id"].astype(int).tolist()
-        id_seleccionado = st.selectbox(
-            "Selecciona una conciliación del historial",
-            ids_disponibles,
-            format_func=lambda x: (
-                f"#{x} — "
-                f"{historial.loc[historial['id'] == x, 'empresa'].iloc[0] or 'Sin empresa'} — "
-                f"{historial.loc[historial['id'] == x, 'mes'].iloc[0] or 'Sin período'}"
+    # -----------------------------------------------------
+    # TABLA DE HISTORIAL
+    # -----------------------------------------------------
+
+    mostrar_historial = historial_filtrado.rename(
+        columns={
+            "id": "ID",
+            "fecha_guardado": "Guardado",
+            "empresa": "Empresa",
+            "nit": "NIT",
+            "mes": "Mes/Año",
+            "banco": "Banco",
+            "cuenta": "Cuenta",
+            "resultado_final": "Resultado final",
+            "estado": "Estado"
+        }
+    )
+
+    st.dataframe(
+        mostrar_historial,
+        width="stretch",
+        hide_index=True,
+        column_config={
+            "ID": st.column_config.NumberColumn("ID", width="small"),
+            "Resultado final": st.column_config.NumberColumn(
+                "Resultado final",
+                format="$ %.2f"
             ),
+            "Estado": st.column_config.TextColumn(
+                "Estado",
+                width="large"
+            )
+        }
+    )
+
+    if historial_filtrado.empty:
+        st.warning(
+            "No se encontraron conciliaciones con los filtros seleccionados."
+        )
+    else:
+        # -------------------------------------------------
+        # SELECCIÓN DEL REGISTRO
+        # -------------------------------------------------
+
+        ids_disponibles = (
+            historial_filtrado["id"]
+            .astype(int)
+            .tolist()
+        )
+
+        def texto_registro(id_registro):
+            fila = historial.loc[
+                historial["id"] == id_registro
+            ].iloc[0]
+
+            empresa_texto = fila["empresa"] or "Sin empresa"
+            mes_texto = fila["mes"] or "Sin período"
+            banco_texto = fila["banco"] or "Sin banco"
+
+            return (
+                f"#{id_registro} — {empresa_texto} — "
+                f"{mes_texto} — {banco_texto}"
+            )
+
+        id_seleccionado = st.selectbox(
+            "Selecciona una conciliación",
+            ids_disponibles,
+            format_func=texto_registro,
             key="hist_id_seleccionado"
         )
 
         registro = obtener_conciliacion(id_seleccionado)
+
         if registro:
             (
-                rid, fecha_guardado, empresa_h, nit_h, mes_h, fecha_elaboracion_h,
-                banco_h, cuenta_h, tipo_h, saldo_extracto_h, saldo_libros_h,
-                diferencia_inicial_h, diferencia_conciliada_h, resultado_final_h,
-                estado_h, datos_json_h, excel_h
+                rid,
+                fecha_guardado,
+                empresa_h,
+                nit_h,
+                mes_h,
+                fecha_elaboracion_h,
+                banco_h,
+                cuenta_h,
+                tipo_h,
+                saldo_extracto_h,
+                saldo_libros_h,
+                diferencia_inicial_h,
+                diferencia_conciliada_h,
+                resultado_final_h,
+                estado_h,
+                datos_json_h,
+                excel_h
             ) = registro
 
+            # ---------------------------------------------
+            # FICHA DE LA CONCILIACIÓN
+            # ---------------------------------------------
+
             st.markdown(
-                f"**Conciliación #{rid}** — {empresa_h or 'Sin empresa'} — {mes_h or 'Sin período'}"
+                f"### Conciliación #{rid}"
             )
 
-            r1, r2, r3 = st.columns(3)
-            with r1:
-                st.metric("Diferencia a justificar", f"${diferencia_inicial_h:,.2f}")
-            with r2:
-                st.metric("Diferencia conciliada", f"${diferencia_conciliada_h:,.2f}")
-            with r3:
-                st.metric("Resultado final", f"${resultado_final_h:,.2f}")
+            info1, info2, info3 = st.columns(3)
+
+            with info1:
+                st.write(f"**Empresa:** {empresa_h or 'Sin empresa'}")
+                st.write(f"**NIT:** {nit_h or 'Sin NIT'}")
+                st.write(f"**Mes / Año:** {mes_h or 'Sin período'}")
+                st.write(
+                    f"**Fecha elaboración:** "
+                    f"{fecha_elaboracion_h or 'Sin fecha'}"
+                )
+
+            with info2:
+                st.write(f"**Banco:** {banco_h or 'Sin banco'}")
+                st.write(f"**Cuenta:** {cuenta_h or 'Sin cuenta'}")
+                st.write(f"**Tipo:** {tipo_h or 'Sin tipo'}")
+                st.write(f"**Guardado:** {fecha_guardado}")
+
+            with info3:
+                st.metric(
+                    "Saldo extracto",
+                    f"${saldo_extracto_h:,.2f}"
+                )
+                st.metric(
+                    "Saldo libros",
+                    f"${saldo_libros_h:,.2f}"
+                )
+
+            st.divider()
+
+            m1, m2, m3 = st.columns(3)
+
+            with m1:
+                st.metric(
+                    "Diferencia a justificar",
+                    f"${diferencia_inicial_h:,.2f}"
+                )
+
+            with m2:
+                st.metric(
+                    "Diferencia conciliada",
+                    f"${diferencia_conciliada_h:,.2f}"
+                )
+
+            with m3:
+                st.metric(
+                    "Resultado final",
+                    f"${resultado_final_h:,.2f}"
+                )
 
             if estado_h == "CONCILIACIÓN BANCARIA CORRECTA":
                 st.success(f"✅ {estado_h}")
             else:
                 st.warning(f"⚠️ {estado_h}")
 
+            # ---------------------------------------------
+            # DETALLE DE MOVIMIENTOS GUARDADOS
+            # ---------------------------------------------
+
+            try:
+                datos_guardados = json.loads(datos_json_h or "{}")
+            except (TypeError, json.JSONDecodeError):
+                datos_guardados = {}
+
+            with st.expander(
+                "👁️ Ver detalle de movimientos guardados",
+                expanded=False
+            ):
+                nombres_detalle = [
+                    ("salidas_extracto", "Salidas no registradas en extracto"),
+                    ("salidas_libros", "Salidas bancarias no contabilizadas en libros"),
+                    ("entradas_libros", "Entradas bancarias no contabilizadas en libros"),
+                    ("entradas_extracto", "Entradas no evidenciadas en extractos"),
+                    ("gastos_bancarios", "Gastos bancarios"),
+                ]
+
+                for clave, titulo in nombres_detalle:
+                    registros = datos_guardados.get(clave, [])
+                    st.markdown(f"**{titulo}**")
+
+                    if registros:
+                        st.dataframe(
+                            pd.DataFrame(registros),
+                            width="stretch",
+                            hide_index=True
+                        )
+                    else:
+                        st.caption("Sin movimientos registrados.")
+
+                st.write(
+                    f"**Preparado por:** "
+                    f"{datos_guardados.get('preparado_por') or 'Sin registrar'}"
+                )
+                st.write(
+                    f"**Revisado por:** "
+                    f"{datos_guardados.get('revisado_por') or 'Sin registrar'}"
+                )
+
+            # ---------------------------------------------
+            # ACCIONES
+            # ---------------------------------------------
+
             nombre_h = (
-                f"CONCILIACION_{limpiar_nombre_archivo(empresa_h)}_"
+                f"CONCILIACION_"
+                f"{limpiar_nombre_archivo(empresa_h)}_"
                 f"{limpiar_nombre_archivo(mes_h)}.xlsx"
             )
 
-            c1, c2 = st.columns(2)
-            with c1:
+            a1, a2 = st.columns(2)
+
+            with a1:
                 st.download_button(
                     "📥 Descargar Excel guardado",
                     data=excel_h,
@@ -1580,17 +1795,61 @@ else:
                     key=f"descargar_historial_{rid}",
                     width="stretch"
                 )
-            with c2:
+
+            with a2:
                 if st.button(
                     "🗑️ Eliminar esta conciliación",
                     key=f"eliminar_historial_{rid}",
                     width="stretch"
                 ):
-                    eliminar_conciliacion(rid)
-                    st.success(f"Conciliación #{rid} eliminada.")
-                    st.rerun()
+                    st.session_state[
+                        "confirmar_eliminacion_historial"
+                    ] = rid
+
+            # ---------------------------------------------
+            # CONFIRMACIÓN DE ELIMINACIÓN
+            # ---------------------------------------------
+
+            if st.session_state.get(
+                "confirmar_eliminacion_historial"
+            ) == rid:
+                st.warning(
+                    f"Vas a eliminar la conciliación #{rid}. "
+                    "Esta acción no se puede deshacer."
+                )
+
+                e1, e2 = st.columns(2)
+
+                with e1:
+                    if st.button(
+                        "Sí, eliminar definitivamente",
+                        key=f"confirmar_eliminar_{rid}",
+                        type="primary",
+                        width="stretch"
+                    ):
+                        eliminar_conciliacion(rid)
+                        st.session_state.pop(
+                            "confirmar_eliminacion_historial",
+                            None
+                        )
+                        st.success(
+                            f"Conciliación #{rid} eliminada correctamente."
+                        )
+                        st.rerun()
+
+                with e2:
+                    if st.button(
+                        "Cancelar",
+                        key=f"cancelar_eliminar_{rid}",
+                        width="stretch"
+                    ):
+                        st.session_state.pop(
+                            "confirmar_eliminacion_historial",
+                            None
+                        )
+                        st.rerun()
 
 st.caption(
     "El Excel se genera en una sola hoja y utiliza la lógica de conciliación "
-    "del formato de referencia. El historial de esta etapa se almacena en SQLite."
+    "del formato de referencia. El historial se almacena en SQLite."
 )
