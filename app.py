@@ -372,11 +372,6 @@ def autenticar_usuario(usuario, password):
 
 
 def recuperar_usuario_por_nombre_y_clave(nombre, password):
-    """Recupera el nombre de usuario sin exponerlo solo con el nombre.
-
-    Se exige nombre completo + contraseña para evitar revelar usuarios
-    a cualquier persona que simplemente conozca el nombre de otra persona.
-    """
     with conectar_db() as conn:
         filas = conn.execute(
             """
@@ -854,22 +849,6 @@ def preparar_excel(
     preparado_por,
     revisado_por
 ):
-    """
-    Genera UN SOLO archivo Excel con UNA SOLA HOJA.
-
-    La lógica de conciliación sigue el modelo del Excel de referencia:
-
-    H15 = saldo extracto - saldo libros
-
-    H18 = + salidas no registradas en extracto
-    H19 = - salidas bancarias no contabilizadas en libros
-    H20 = + entradas bancarias no contabilizadas en libros
-    H21 = - entradas no evidenciadas en extractos
-
-    H22 = suma de H18:H21
-    H23 = H15 - H22
-    """
-
     salidas_extracto = limpiar_dataframe(salidas_extracto)
     salidas_libros = limpiar_dataframe(salidas_libros)
     entradas_libros = limpiar_dataframe(entradas_libros)
@@ -1442,7 +1421,6 @@ if "edicion_cargada" not in st.session_state:
     st.session_state.edicion_cargada = None
 
 # Inicializar las tablas de movimientos antes de mostrarlas.
-# Esto evita errores al abrir una conciliación nueva.
 if "tabla1" not in st.session_state:
     st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
 if "tabla2" not in st.session_state:
@@ -1529,14 +1507,14 @@ if tiene_permiso(rol_actual, "editar"):
     
     
     # =========================================================
-    # MOVIMIENTOS
+    # MOVIMIENTOS (AQUÍ SE APLICÓ EL CAMBIO .copy())
     # =========================================================
     
     st.divider()
     st.subheader("Salidas no Registradas en Extracto")
     
     salidas_extracto = st.data_editor(
-        st.session_state.tabla1,
+        st.session_state.tabla1.copy(),
         num_rows="dynamic",
         width="stretch",
         key="tabla1",
@@ -1563,7 +1541,7 @@ if tiene_permiso(rol_actual, "editar"):
     st.subheader("Salidas Bancarias no Contabilizadas en Libros")
     
     salidas_libros = st.data_editor(
-        st.session_state.tabla2,
+        st.session_state.tabla2.copy(),
         num_rows="dynamic",
         width="stretch",
         key="tabla2",
@@ -1587,7 +1565,7 @@ if tiene_permiso(rol_actual, "editar"):
     st.subheader("Entradas Bancarias no Contabilizadas en Libros")
     
     entradas_libros = st.data_editor(
-        st.session_state.tabla3,
+        st.session_state.tabla3.copy(),
         num_rows="dynamic",
         width="stretch",
         key="tabla3",
@@ -1611,7 +1589,7 @@ if tiene_permiso(rol_actual, "editar"):
     st.subheader("Entradas no Evidenciadas en Extractos")
     
     entradas_extracto = st.data_editor(
-        st.session_state.tabla4,
+        st.session_state.tabla4.copy(),
         num_rows="dynamic",
         width="stretch",
         key="tabla4",
@@ -1644,7 +1622,7 @@ if tiene_permiso(rol_actual, "editar"):
     )
     
     gastos_bancarios = st.data_editor(
-        st.session_state.tabla5,
+        st.session_state.tabla5.copy(),
         num_rows="dynamic",
         width="stretch",
         key="tabla5",
@@ -1732,27 +1710,6 @@ if tiene_permiso(rol_actual, "editar"):
     # =========================================================
     # FÓRMULA SEGÚN EL EXCEL DE REFERENCIA
     # =========================================================
-    
-    # H15:
-    # Diferencia a justificar = Extracto - Libros
-    #
-    # H18:
-    # + Salidas no registradas en extracto
-    #
-    # H19:
-    # - Salidas bancarias no contabilizadas en libros
-    #
-    # H20:
-    # + Entradas bancarias no contabilizadas en libros
-    #
-    # H21:
-    # - Entradas no evidenciadas en extractos
-    #
-    # H22:
-    # Diferencia conciliada = H18 + H19 + H20 + H21
-    #
-    # H23:
-    # Resultado final = H15 - H22
     
     diferencia_conciliada = (
         total_salidas_extracto
