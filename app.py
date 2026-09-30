@@ -305,7 +305,8 @@ def obtener_conciliacion_por_id(id_conciliacion):
         ).fetchone()
         if not fila:
             return None
-        cols = [col[0] for col in conn.execute("PRAGMA table_info(conciliaciones)").fetchall()]
+        # col[1] obtiene el NOMBRE real de la columna de la tabla
+        cols = [col[1] for col in conn.execute("PRAGMA table_info(conciliaciones)").fetchall()]
         return dict(zip(cols, fila))
 
 
@@ -411,7 +412,6 @@ def obtener_usuarios():
         return pd.read_sql_query(query, conn)
 
 
-# CONTROL DE PERMISOS ESTRICTO
 def obtener_opciones_menu(rol):
     if rol == "Preparador":
         return ["📊 Dashboard", "📝 Nueva Conciliación", "📚 Historial"]
@@ -830,7 +830,7 @@ def preparar_excel(
 
 if menu_seleccionado == "🔍 Auditoría y Revisiones":
     st.title("🔍 BANDEJA DE AUDITORÍA Y REVISIONES")
-    st.caption("Modulo exclusivo para la revisión técnica y aprobación de Conciliaciones Bancarias.")
+    st.caption("Módulo exclusivo para la revisión técnica y aprobación de Conciliaciones Bancarias.")
 
     historial = obtener_historial(empresa_activa_nombre)
     pendientes = historial[historial["workflow_status"] == "Pendiente de revisión"]
@@ -848,12 +848,20 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
         st.subheader("📋 Conciliaciones Pendientes de Revisión")
         
         for idx, fila in pendientes.iterrows():
-            with st.expander(f"📌 #{fila['id']} | {fila['empresa']} - {fila['banco']} ({fila['cuenta']}) | Mes: {fila['mes']} | Resultado: ${fila['resultado_final']:,.2f}"):
+            cuenta_txt = fila.get("cuenta") or "N/A"
+            banco_txt = fila.get("banco") or "N/A"
+            res_fin = fila.get("resultado_final", 0.0)
+            
+            with st.expander(f"📌 #{fila['id']} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']} | Resultado: ${res_fin:,.2f}"):
                 
-                # CARGAR DATOS EN FORMATO EXCEL COMPLETO
                 c_data = obtener_conciliacion_por_id(fila["id"])
-                datos = json.loads(c_data["datos_json"])
-                tipo_cta = c_data.get("tipo", "Cuenta de ahorros")
+                
+                try:
+                    datos = json.loads(c_data.get("datos_json", "{}"))
+                except Exception:
+                    datos = {}
+
+                tipo_cta = c_data.get("tipo") or "Cuenta de ahorros"
                 es_tc = "tarjeta" in tipo_cta.lower() or "crédito" in tipo_cta.lower() or "credito" in tipo_cta.lower()
 
                 if es_tc:
@@ -871,7 +879,6 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                         "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
                     )
 
-                # FORMATO DE MUESTRA IDÉNTICO AL EXCEL
                 st.markdown(
                     f"""
                     <div style="background-color: #1F4E78; color: white; padding: 12px; text-align: center; border-radius: 5px; font-weight: bold; font-size: 18px;">
@@ -882,27 +889,25 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
 
                 col_inf1, col_inf2 = st.columns(2)
                 with col_inf1:
-                    st.write(f"🏢 **Empresa:** {c_data['empresa']} | **NIT:** {c_data['nit']}")
-                    st.write(f"📅 **Mes/Año:** {c_data['mes']} | **Elaboración:** {c_data['fecha_elaboracion']}")
+                    st.write(f"🏢 **Empresa:** {c_data.get('empresa', 'N/A')} | **NIT:** {c_data.get('nit', 'N/A')}")
+                    st.write(f"📅 **Mes/Año:** {c_data.get('mes', 'N/A')} | **Elaboración:** {c_data.get('fecha_elaboracion', 'N/A')}")
                 with col_inf2:
-                    st.write(f"🏦 **Banco:** {c_data['banco']} | **Cuenta No:** {c_data['cuenta']}")
+                    st.write(f"🏦 **Banco:** {c_data.get('banco', 'N/A')} | **Cuenta No:** {c_data.get('cuenta', 'N/A')}")
                     st.write(f"👤 **Preparado por:** {datos.get('preparado_por', 'N/A')}")
 
                 st.divider()
 
-                # SALDOS
                 st.markdown("**💰 SALDOS Y CÁLCULO DE LA CONCILIACIÓN**")
                 df_saldos = pd.DataFrame([
-                    {"Concepto": "SALDO SEGÚN EXTRACTO BANCARIO", "Valor": f"${c_data['saldo_extracto']:,.2f}"},
-                    {"Concepto": "SALDO SEGÚN LIBROS", "Valor": f"${c_data['saldo_libros']:,.2f}"},
-                    {"Concepto": "DIFERENCIA A JUSTIFICAR", "Valor": f"${c_data['diferencia_inicial']:,.2f}"},
-                    {"Concepto": "DIFERENCIA CONCILIADA", "Valor": f"${c_data['diferencia_conciliada']:,.2f}"},
-                    {"Concepto": "RESULTADO FINAL", "Valor": f"${c_data['resultado_final']:,.2f}"},
-                    {"Concepto": "ESTADO", "Valor": c_data['estado']}
+                    {"Concepto": "SALDO SEGÚN EXTRACTO BANCARIO", "Valor": f"${c_data.get('saldo_extracto', 0):,.2f}"},
+                    {"Concepto": "SALDO SEGÚN LIBROS", "Valor": f"${c_data.get('saldo_libros', 0):,.2f}"},
+                    {"Concepto": "DIFERENCIA A JUSTIFICAR", "Valor": f"${c_data.get('diferencia_inicial', 0):,.2f}"},
+                    {"Concepto": "DIFERENCIA CONCILIADA", "Valor": f"${c_data.get('diferencia_conciliada', 0):,.2f}"},
+                    {"Concepto": "RESULTADO FINAL", "Valor": f"${c_data.get('resultado_final', 0):,.2f}"},
+                    {"Concepto": "ESTADO", "Valor": c_data.get('estado', 'N/A')}
                 ])
                 st.table(df_saldos)
 
-                # MOVIMIENTOS DETALLADOS DE JUSTIFICACIÓN
                 st.markdown(f"**1. {t1_nombre}**")
                 st.dataframe(pd.DataFrame(datos.get("salidas_extracto", [])), width="stretch", hide_index=True)
 
@@ -920,7 +925,6 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
 
                 st.divider()
 
-                # ACCIONES DE APROBACIÓN O RECHAZO
                 st.subheader("⚡ Decisión del Auditor")
                 btn_col1, btn_col2 = st.columns(2)
 
