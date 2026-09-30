@@ -1441,6 +1441,21 @@ def limpiar_formulario_edicion():
 if "edicion_cargada" not in st.session_state:
     st.session_state.edicion_cargada = None
 
+# Inicializar las tablas de movimientos antes de mostrarlas.
+# Esto evita errores al abrir una conciliación nueva.
+if "tabla1" not in st.session_state:
+    st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
+if "tabla2" not in st.session_state:
+    st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
+if "tabla3" not in st.session_state:
+    st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
+if "tabla4" not in st.session_state:
+    st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
+if "tabla5" not in st.session_state:
+    st.session_state.tabla5 = pd.DataFrame(
+        columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
+    )
+
 if st.session_state.edicion_conciliacion_id and st.session_state.edicion_cargada != st.session_state.edicion_conciliacion_id:
     if not cargar_formulario_desde_historial(st.session_state.edicion_conciliacion_id):
         limpiar_formulario_edicion()
