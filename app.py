@@ -25,250 +25,312 @@ st.set_page_config(
 # ==========================================
 def conectar_db():
     """
-    Intenta conectar a la base de datos persistente de Turso en la nube
-    utilizando los Secrets de Streamlit. Si falla o se ejecuta localmente,
-    hace respaldo a SQLite local.
+    Intenta conectar a la base de datos persistente en la nube (Turso).
+    Soporta múltiples conectores (libsql_client, libsql_experimental).
+    Si ocurre cualquier error o se ejecuta localmente, utiliza SQLite local como respaldo.
     """
     if "TURSO_DATABASE_URL" in st.secrets and "TURSO_AUTH_TOKEN" in st.secrets:
+        url = st.secrets["TURSO_DATABASE_URL"]
+        token = st.secrets["TURSO_AUTH_TOKEN"]
+        
+        # Intentar conectar con libsql_client (Conector HTTP ultraligero)
+        try:
+            import libsql_client
+            return libsql_client.create_client_sync(url=url, auth_token=token)
+        except Exception:
+            pass
+            
+        # Intentar conectar con libsql_experimental
         try:
             import libsql_experimental as libsql
-            return libsql.connect(
-                database=st.secrets["TURSO_DATABASE_URL"],
-                auth_token=st.secrets["TURSO_AUTH_TOKEN"]
-            )
-        except Exception as e:
-            st.warning(f"⚠️ No se pudo conectar a Turso: {e}. Usando SQLite local.")
+            return libsql.connect(database=url, auth_token=token)
+        except Exception:
+            pass
+
+    # Respaldo a SQLite local
     return sqlite3.connect("conciliaciones.db")
 
 def inicializar_bd():
-    conn = conectar_db()
-    c = conn.cursor()
-    
-    # Tabla Usuarios
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS usuarios (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            nombre TEXT NOT NULL,
-            password TEXT NOT NULL,
-            rol TEXT NOT NULL,
-            empresa_id INTEGER
-        )
-    ''')
-    
-    # Tabla Empresas
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS empresas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nit TEXT UNIQUE NOT NULL,
-            razon_social TEXT NOT NULL
-        )
-    ''')
-    
-    # Tabla Cuentas Bancarias
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS cuentas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            empresa_id INTEGER NOT NULL,
-            banco TEXT NOT NULL,
-            numero_cuenta TEXT NOT NULL,
-            tipo_cuenta TEXT NOT NULL,
-            FOREIGN KEY (empresa_id) REFERENCES empresas (id)
-        )
-    ''')
-    
-    # Tabla Conciliaciones
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS conciliaciones (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            empresa_id INTEGER NOT NULL,
-            cuenta_id INTEGER NOT NULL,
-            periodo TEXT NOT NULL,
-            saldo_libro REAL NOT NULL,
-            saldo_banco REAL NOT NULL,
-            estado TEXT NOT NULL,
-            preparado_por TEXT,
-            revisado_por TEXT,
-            fecha_creacion TEXT,
-            dictamen TEXT,
-            observaciones TEXT,
-            FOREIGN KEY (empresa_id) REFERENCES empresas (id),
-            FOREIGN KEY (cuenta_id) REFERENCES cuentas (id)
-        )
-    ''')
-    
-    # Tabla Partidas Conciliatorias
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS partidas_conciliatorias (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conciliacion_id INTEGER NOT NULL,
-            tipo TEXT NOT NULL, -- 'ND_LIBROS', 'NC_LIBROS', 'ND_BANCO', 'NC_BANCO'
-            fecha TEXT,
-            concepto TEXT,
-            monto REAL NOT NULL,
-            clasificacion TEXT,
-            antiguedad_dias INTEGER,
-            FOREIGN KEY (conciliacion_id) REFERENCES conciliaciones (id)
-        )
-    ''')
-    
-    # Tabla Bitácora de Auditoría
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS bitacora_auditoria (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            conciliacion_id INTEGER NOT NULL,
-            usuario TEXT NOT NULL,
-            accion TEXT NOT NULL,
-            fecha_hora TEXT NOT NULL,
-            comentario TEXT,
-            FOREIGN KEY (conciliacion_id) REFERENCES conciliaciones (id)
-        )
-    ''')
-    
-    conn.commit()
-    conn.close()
+    try:
+        conn = conectar_db()
+        c = conn.cursor()
+        
+        # Tabla Usuarios
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS usuarios (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                nombre TEXT NOT NULL,
+                password TEXT NOT NULL,
+                rol TEXT NOT NULL,
+                empresa_id INTEGER
+            )
+        ''')
+        
+        # Tabla Empresas
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS empresas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nit TEXT UNIQUE NOT NULL,
+                razon_social TEXT NOT NULL
+            )
+        ''')
+        
+        # Tabla Cuentas Bancarias
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS cuentas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                empresa_id INTEGER NOT NULL,
+                banco TEXT NOT NULL,
+                numero_cuenta TEXT NOT NULL,
+                tipo_cuenta TEXT NOT NULL,
+                FOREIGN KEY (empresa_id) REFERENCES empresas (id)
+            )
+        ''')
+        
+        # Tabla Conciliaciones
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS conciliaciones (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                empresa_id INTEGER NOT NULL,
+                cuenta_id INTEGER NOT NULL,
+                periodo TEXT NOT NULL,
+                saldo_libro REAL NOT NULL,
+                saldo_banco REAL NOT NULL,
+                estado TEXT NOT NULL,
+                preparado_por TEXT,
+                revisado_por TEXT,
+                fecha_creacion TEXT,
+                dictamen TEXT,
+                observaciones TEXT,
+                FOREIGN KEY (empresa_id) REFERENCES empresas (id),
+                FOREIGN KEY (cuenta_id) REFERENCES cuentas (id)
+            )
+        ''')
+        
+        # Tabla Partidas Conciliatorias
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS partidas_conciliatorias (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conciliacion_id INTEGER NOT NULL,
+                tipo TEXT NOT NULL,
+                fecha TEXT,
+                concepto TEXT,
+                monto REAL NOT NULL,
+                clasificacion TEXT,
+                antiguedad_dias INTEGER,
+                FOREIGN KEY (conciliacion_id) REFERENCES conciliaciones (id)
+            )
+        ''')
+        
+        # Tabla Bitácora de Auditoría
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS bitacora_auditoria (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conciliacion_id INTEGER NOT NULL,
+                usuario TEXT NOT NULL,
+                accion TEXT NOT NULL,
+                fecha_hora TEXT NOT NULL,
+                comentario TEXT,
+                FOREIGN KEY (conciliacion_id) REFERENCES conciliaciones (id)
+            )
+        ''')
+        
+        if hasattr(conn, 'commit'):
+            conn.commit()
+        if hasattr(conn, 'close'):
+            conn.close()
+    except Exception as e:
+        st.error(f"Error al inicializar la base de datos: {e}")
 
-# Inicializar tablas si no existen
+# Inicializar tablas al cargar la aplicación
 inicializar_bd()
 
 # ==========================================
 # FUNCIONES DE CONSULTA
 # ==========================================
 def contar_usuarios():
-    conn = conectar_db()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM usuarios")
-    total = c.fetchone()[0]
-    conn.close()
-    return total
+    try:
+        conn = conectar_db()
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM usuarios")
+        res = c.fetchone()
+        total = res[0] if res else 0
+        if hasattr(conn, 'close'):
+            conn.close()
+        return total
+    except Exception:
+        return 0
 
 def verificar_credenciales(username, password):
-    conn = conectar_db()
-    c = conn.cursor()
-    c.execute("SELECT id, username, nombre, rol, empresa_id FROM usuarios WHERE username = ? AND password = ?", (username, password))
-    user = c.fetchone()
-    conn.close()
-    return user
+    try:
+        conn = conectar_db()
+        c = conn.cursor()
+        c.execute("SELECT id, username, nombre, rol, empresa_id FROM usuarios WHERE username = ? AND password = ?", (username, password))
+        user = c.fetchone()
+        if hasattr(conn, 'close'):
+            conn.close()
+        return user
+    except Exception:
+        return None
 
 def registrar_usuario(username, nombre, password, rol, empresa_id=None):
-    conn = conectar_db()
-    c = conn.cursor()
     try:
+        conn = conectar_db()
+        c = conn.cursor()
         c.execute("INSERT INTO usuarios (username, nombre, password, rol, empresa_id) VALUES (?, ?, ?, ?, ?)",
                   (username, nombre, password, rol, empresa_id))
-        conn.commit()
-        res = True
-    except sqlite3.IntegrityError:
-        res = False
-    conn.close()
-    return res
+        if hasattr(conn, 'commit'):
+            conn.commit()
+        if hasattr(conn, 'close'):
+            conn.close()
+        return True
+    except Exception:
+        return False
 
 def obtener_empresas():
-    conn = conectar_db()
-    df = pd.read_sql_query("SELECT * FROM empresas", conn)
-    conn.close()
-    return df
+    try:
+        conn = conectar_db()
+        df = pd.read_sql_query("SELECT * FROM empresas", conn)
+        if hasattr(conn, 'close'):
+            conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame(columns=['id', 'nit', 'razon_social'])
 
 def registrar_empresa(nit, razon_social):
-    conn = conectar_db()
-    c = conn.cursor()
     try:
+        conn = conectar_db()
+        c = conn.cursor()
         c.execute("INSERT INTO empresas (nit, razon_social) VALUES (?, ?)", (nit, razon_social))
-        conn.commit()
-        res = True
-    except sqlite3.IntegrityError:
-        res = False
-    conn.close()
-    return res
+        if hasattr(conn, 'commit'):
+            conn.commit()
+        if hasattr(conn, 'close'):
+            conn.close()
+        return True
+    except Exception:
+        return False
 
 def registrar_cuenta(empresa_id, banco, numero_cuenta, tipo_cuenta):
-    conn = conectar_db()
-    c = conn.cursor()
-    c.execute("INSERT INTO cuentas (empresa_id, banco, numero_cuenta, tipo_cuenta) VALUES (?, ?, ?, ?)",
-              (empresa_id, banco, numero_cuenta, tipo_cuenta))
-    conn.commit()
-    conn.close()
+    try:
+        conn = conectar_db()
+        c = conn.cursor()
+        c.execute("INSERT INTO cuentas (empresa_id, banco, numero_cuenta, tipo_cuenta) VALUES (?, ?, ?, ?)",
+                  (empresa_id, banco, numero_cuenta, tipo_cuenta))
+        if hasattr(conn, 'commit'):
+            conn.commit()
+        if hasattr(conn, 'close'):
+            conn.close()
+    except Exception as e:
+        st.error(f"Error al registrar la cuenta: {e}")
 
 def obtener_cuentas_empresa(empresa_id):
-    conn = conectar_db()
-    df = pd.read_sql_query("SELECT * FROM cuentas WHERE empresa_id = ?", conn, params=(empresa_id,))
-    conn.close()
-    return df
+    try:
+        conn = conectar_db()
+        df = pd.read_sql_query("SELECT * FROM cuentas WHERE empresa_id = ?", conn, params=(empresa_id,))
+        if hasattr(conn, 'close'):
+            conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame(columns=['id', 'empresa_id', 'banco', 'numero_cuenta', 'tipo_cuenta'])
 
 def registrar_conciliacion(empresa_id, cuenta_id, periodo, saldo_libro, saldo_banco, preparado_por, df_partidas):
-    conn = conectar_db()
-    c = conn.cursor()
-    fecha_hoy = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    c.execute('''
-        INSERT INTO conciliaciones (empresa_id, cuenta_id, periodo, saldo_libro, saldo_banco, estado, preparado_por, fecha_creacion)
-        VALUES (?, ?, ?, ?, ?, 'Pendiente', ?, ?)
-    ''', (empresa_id, cuenta_id, periodo, saldo_libro, saldo_banco, preparado_por, fecha_hoy))
-    
-    conciliacion_id = c.lastrowid
-    
-    for _, row in df_partidas.iterrows():
-        c.execute('''
-            INSERT INTO partidas_conciliatorias (conciliacion_id, tipo, fecha, concepto, monto, clasificacion, antiguedad_dias)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (conciliacion_id, row['tipo'], str(row['fecha']), row['concepto'], float(row['monto']), row.get('clasificacion', 'General'), int(row.get('antiguedad_dias', 0))))
+    try:
+        conn = conectar_db()
+        c = conn.cursor()
+        fecha_hoy = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-    c.execute('''
-        INSERT INTO bitacora_auditoria (conciliacion_id, usuario, accion, fecha_hora, comentario)
-        VALUES (?, ?, 'Creada y Enviada a Revisión', ?, 'Conciliación registrada')
-    ''', (conciliacion_id, preparado_por, fecha_hoy))
-    
-    conn.commit()
-    conn.close()
-    return conciliacion_id
+        c.execute('''
+            INSERT INTO conciliaciones (empresa_id, cuenta_id, periodo, saldo_libro, saldo_banco, estado, preparado_por, fecha_creacion)
+            VALUES (?, ?, ?, ?, ?, 'Pendiente', ?, ?)
+        ''', (empresa_id, cuenta_id, periodo, saldo_libro, saldo_banco, preparado_por, fecha_hoy))
+        
+        conciliacion_id = c.lastrowid
+        
+        for _, row in df_partidas.iterrows():
+            c.execute('''
+                INSERT INTO partidas_conciliatorias (conciliacion_id, tipo, fecha, concepto, monto, clasificacion, antiguedad_dias)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (conciliacion_id, row['tipo'], str(row['fecha']), row['concepto'], float(row['monto']), row.get('clasificacion', 'General'), int(row.get('antiguedad_dias', 0))))
+            
+        c.execute('''
+            INSERT INTO bitacora_auditoria (conciliacion_id, usuario, accion, fecha_hora, comentario)
+            VALUES (?, ?, 'Creada y Enviada a Revisión', ?, 'Conciliación registrada')
+        ''', (conciliacion_id, preparado_por, fecha_hoy))
+        
+        if hasattr(conn, 'commit'):
+            conn.commit()
+        if hasattr(conn, 'close'):
+            conn.close()
+        return conciliacion_id
+    except Exception as e:
+        st.error(f"Error al guardar conciliación: {e}")
+        return None
 
 def obtener_conciliaciones(empresa_id=None):
-    conn = conectar_db()
-    query = '''
-        SELECT c.id, e.razon_social as empresa, b.banco, b.numero_cuenta, c.periodo, 
-               c.saldo_libro, c.saldo_banco, c.estado, c.preparado_por, c.revisado_por, c.fecha_creacion,
-               c.dictamen, c.observaciones
-        FROM conciliaciones c
-        JOIN empresas e ON c.empresa_id = e.id
-        JOIN cuentas b ON c.cuenta_id = b.id
-    '''
-    if empresa_id:
-        query += f" WHERE c.empresa_id = {empresa_id}"
-    query += " ORDER BY c.id DESC"
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    return df
+    try:
+        conn = conectar_db()
+        query = '''
+            SELECT c.id, e.razon_social as empresa, b.banco, b.numero_cuenta, c.periodo, 
+                   c.saldo_libro, c.saldo_banco, c.estado, c.preparado_por, c.revisado_por, c.fecha_creacion,
+                   c.dictamen, c.observaciones
+            FROM conciliaciones c
+            JOIN empresas e ON c.empresa_id = e.id
+            JOIN cuentas b ON c.cuenta_id = b.id
+        '''
+        if empresa_id:
+            query += f" WHERE c.empresa_id = {empresa_id}"
+        query += " ORDER BY c.id DESC"
+        df = pd.read_sql_query(query, conn)
+        if hasattr(conn, 'close'):
+            conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 def actualizar_dictamen_conciliacion(conciliacion_id, usuario, nuevo_estado, dictamen, observaciones):
-    conn = conectar_db()
-    c = conn.cursor()
-    fecha_hoy = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    c.execute('''
-        UPDATE conciliaciones
-        SET estado = ?, revisado_por = ?, dictamen = ?, observaciones = ?
-        WHERE id = ?
-    ''', (nuevo_estado, usuario, dictamen, observaciones, conciliacion_id))
-    
-    c.execute('''
-        INSERT INTO bitacora_auditoria (conciliacion_id, usuario, accion, fecha_hora, comentario)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (conciliacion_id, usuario, f"Dictamen: {nuevo_estado}", fecha_hoy, f"{dictamen} - {observaciones}"))
-    
-    conn.commit()
-    conn.close()
+    try:
+        conn = conectar_db()
+        c = conn.cursor()
+        fecha_hoy = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        c.execute('''
+            UPDATE conciliaciones
+            SET estado = ?, revisado_por = ?, dictamen = ?, observaciones = ?
+            WHERE id = ?
+        ''', (nuevo_estado, usuario, dictamen, observaciones, conciliacion_id))
+        
+        c.execute('''
+            INSERT INTO bitacora_auditoria (conciliacion_id, usuario, accion, fecha_hora, comentario)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (conciliacion_id, usuario, f"Dictamen: {nuevo_estado}", fecha_hoy, f"{dictamen} - {observaciones}"))
+        
+        if hasattr(conn, 'commit'):
+            conn.commit()
+        if hasattr(conn, 'close'):
+            conn.close()
+    except Exception as e:
+        st.error(f"Error al actualizar dictamen: {e}")
 
 def obtener_partidas(conciliacion_id):
-    conn = conectar_db()
-    df = pd.read_sql_query("SELECT * FROM partidas_conciliatorias WHERE conciliacion_id = ?", conn, params=(conciliacion_id,))
-    conn.close()
-    return df
+    try:
+        conn = conectar_db()
+        df = pd.read_sql_query("SELECT * FROM partidas_conciliatorias WHERE conciliacion_id = ?", conn, params=(conciliacion_id,))
+        if hasattr(conn, 'close'):
+            conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 def obtener_bitacora(conciliacion_id):
-    conn = conectar_db()
-    df = pd.read_sql_query("SELECT * FROM bitacora_auditoria WHERE conciliacion_id = ? ORDER BY id DESC", conn, params=(conciliacion_id,))
-    conn.close()
-    return df
+    try:
+        conn = conectar_db()
+        df = pd.read_sql_query("SELECT * FROM bitacora_auditoria WHERE conciliacion_id = ? ORDER BY id DESC", conn, params=(conciliacion_id,))
+        if hasattr(conn, 'close'):
+            conn.close()
+        return df
+    except Exception:
+        return pd.DataFrame()
 
 # ==========================================
 # GENERADOR DE REPORTE PDF
@@ -281,7 +343,6 @@ def generar_pdf_conciliacion(conciliacion_info, df_partidas, df_bitacora):
     
     title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, leading=20, alignment=1, textColor=colors.HexColor('#1E3A8A'))
     subtitle_style = ParagraphStyle('SubTitleStyle', parent=styles['Heading2'], fontSize=12, leading=16, textColor=colors.HexColor('#1F2937'))
-    bold_style = ParagraphStyle('BoldStyle', parent=styles['Normal'], fontName='Helvetica-Bold')
     
     # Encabezado
     story.append(Paragraph(f"INFORME DE CONCILIACIÓN BANCARIA Y AUDITORÍA", title_style))
@@ -309,8 +370,11 @@ def generar_pdf_conciliacion(conciliacion_info, df_partidas, df_bitacora):
     story.append(Spacer(1, 5))
     
     data_partidas = [["Tipo", "Fecha", "Concepto", "Monto", "Clasificación"]]
-    for _, r in df_partidas.iterrows():
-        data_partidas.append([r['tipo'], r['fecha'], r['concepto'], f"${r['monto']:,.2f}", r.get('clasificacion', 'General')])
+    if not df_partidas.empty:
+        for _, r in df_partidas.iterrows():
+            data_partidas.append([r['tipo'], r['fecha'], r['concepto'], f"${r['monto']:,.2f}", r.get('clasificacion', 'General')])
+    else:
+        data_partidas.append(["N/A", "N/A", "Sin partidas registradas", "$0.00", "N/A"])
         
     t_partidas = Table(data_partidas, colWidths=[90, 70, 180, 80, 80])
     t_partidas.setStyle(TableStyle([
@@ -526,8 +590,9 @@ elif menu == "📝 Nueva Conciliación":
     st.divider()
     if st.button("🚀 Enviar Conciliación a Revisión", type="primary"):
         cid = registrar_conciliacion(emp_id, cta_id, periodo, s_libro, s_banco, user_curr['nombre'], st.session_state.partidas_temp)
-        st.session_state.partidas_temp = pd.DataFrame(columns=['tipo', 'fecha', 'concepto', 'monto', 'clasificacion', 'antiguedad_dias'])
-        st.success(f"Conciliación #{cid} enviada a revisión con éxito.")
+        if cid:
+            st.session_state.partidas_temp = pd.DataFrame(columns=['tipo', 'fecha', 'concepto', 'monto', 'clasificacion', 'antiguedad_dias'])
+            st.success(f"Conciliación #{cid} enviada a revisión con éxito.")
 
 # ==========================================
 # MÓDULO: AUDITORÍA Y REVISIONES
@@ -636,8 +701,9 @@ elif menu == "👥 Usuarios":
     
     df_emp = obtener_empresas()
     emp_opts = {"Ninguna": None}
-    for _, r in df_emp.iterrows():
-        emp_opts[r['razon_social']] = r['id']
+    if not df_emp.empty:
+        for _, r in df_emp.iterrows():
+            emp_opts[r['razon_social']] = r['id']
         
     with st.form("form_reg_usr"):
         st.subheader("Crear Nuevo Usuario")
