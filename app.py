@@ -12,9 +12,9 @@ import streamlit as st
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
-from reportlab.lib.pagesizes import letter, landscape
+from reportlab.lib.pagesizes import letter, portrait
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 
@@ -174,6 +174,11 @@ def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
 def eliminar_empresa_db(empresa_id):
     with conectar_db() as conn:
         conn.execute("DELETE FROM empresas WHERE id = ?", (int(empresa_id),))
+        conn.commit()
+
+def eliminar_conciliacion_db(conciliacion_id):
+    with conectar_db() as conn:
+        conn.execute("DELETE FROM conciliaciones WHERE id = ?", (int(conciliacion_id),))
         conn.commit()
 
 def obtener_cuentas(empresa_id=None):
@@ -637,7 +642,12 @@ with st.sidebar:
     st.divider()
 
     opciones_menu = obtener_opciones_menu(rol_actual)
-    menu_seleccionado = st.radio("Navegación principal", opciones_menu)
+
+    # Redirección dinámica si el usuario hace clic en Editar en el Historial
+    if "menu_override" in st.session_state:
+        menu_seleccionado = st.session_state.pop("menu_override")
+    else:
+        menu_seleccionado = st.radio("Navegación principal", opciones_menu)
     
     st.divider()
     if st.button("🚪 Cerrar sesión", width="stretch"):
@@ -919,60 +929,92 @@ def preparar_excel(
     return output.getvalue(), nombre_archivo
 
 
+# GENERACIÓN DE PDF VERTICAL CON LOGO Y FORMATO LIMPIO
 def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(letter), rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    # Hoja vertical (portrait)
+    doc = SimpleDocTemplate(buffer, pagesize=portrait(letter), rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     story = []
     styles = getSampleStyleSheet()
 
     title_style = ParagraphStyle(
-        'TitleStyle', parent=styles['Heading1'], alignment=1, textColor=colors.white, backColor=colors.HexColor("#1F4E78"), fontSize=14, spaceAfter=10, leading=18
+        'TitleStyle', parent=styles['Heading1'], alignment=1, textColor=colors.white, backColor=colors.HexColor("#1F4E78"), fontSize=13, spaceAfter=8, leading=16
     )
     sec_style = ParagraphStyle(
-        'SecStyle', parent=styles['Heading2'], textColor=colors.HexColor("#1F4E78"), fontSize=11, spaceBefore=8, spaceAfter=4
+        'SecStyle', parent=styles['Heading2'], textColor=colors.HexColor("#1F4E78"), fontSize=10, spaceBefore=6, spaceAfter=3
     )
-    normal_style = ParagraphStyle('NormStyle', parent=styles['Normal'], fontSize=9, leading=11)
+    normal_style = ParagraphStyle('NormStyle', parent=styles['Normal'], fontSize=8, leading=10)
+    bold_style = ParagraphStyle('BoldStyle', parent=styles['Normal'], fontSize=8, leading=10, fontName="Helvetica-Bold")
 
+    consecutivo_str = f"CONC-{int(c_data.get('id', 0)):06d}"
     tipo_cta = c_data.get("tipo") or "Cuenta"
-    story.append(Paragraph(f"CONCILIACIÓN - {tipo_cta.upper()}", title_style))
 
+    # Encabezado con título y Logo
+    logo_bytes = obtener_logo_empresa(c_data.get("empresa"))
+    p_header_text = Paragraph(f"<b>CONCILIACIÓN - {tipo_cta.upper()}</b><br/><font size=8>Consecutivo No: {consecutivo_str}</font>", title_style)
+
+    if logo_bytes:
+        try:
+            img_stream = io.BytesIO(logo_bytes)
+            img_logo = Image(img_stream, width=80, height=45)
+            header_table = Table([[p_header_text, img_logo]], colWidths=[440, 100])
+            header_table.setStyle(TableStyle([
+                ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+                ('ALIGN', (1,0), (1,0), 'RIGHT'),
+            ]))
+            story.append(header_table)
+        except Exception:
+            story.append(p_header_text)
+    else:
+        story.append(p_header_text)
+
+    story.append(Spacer(1, 6))
+
+    # Datos Generales
     data_gen = [
         [Paragraph("<b>Empresa:</b>", normal_style), Paragraph(str(c_data.get("empresa", "")), normal_style), Paragraph("<b>NIT:</b>", normal_style), Paragraph(str(c_data.get("nit", "")), normal_style)],
         [Paragraph("<b>Mes/Año:</b>", normal_style), Paragraph(str(c_data.get("mes", "")), normal_style), Paragraph("<b>Elaboración:</b>", normal_style), Paragraph(str(c_data.get("fecha_elaboracion", "")), normal_style)],
         [Paragraph("<b>Banco:</b>", normal_style), Paragraph(str(c_data.get("banco", "")), normal_style), Paragraph("<b>Cuenta No:</b>", normal_style), Paragraph(str(c_data.get("cuenta", "")), normal_style)],
     ]
-    t_gen = Table(data_gen, colWidths=[100, 250, 100, 250])
+    t_gen = Table(data_gen, colWidths=[80, 190, 80, 190])
     t_gen.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#F2F2F2")),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D9D9D9")),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
     ]))
     story.append(t_gen)
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 8))
 
+    # Saldos y Cálculo Limpio
     story.append(Paragraph("SALDOS Y CÁLCULO DE LA CONCILIACIÓN", sec_style))
+
+    res_final_val = c_data.get('resultado_final', 0.0)
+    res_final_txt = f"$ {res_final_val:,.2f}"
+
     data_sal = [
-        [Paragraph("SALDO SEGÚN EXTRACTO BANCARIO", normal_style), f"${c_data.get('saldo_extracto', 0):,.2f}"],
-        [Paragraph("SALDO SEGÚN LIBROS", normal_style), f"${c_data.get('saldo_libros', 0):,.2f}"],
-        [Paragraph("DIFERENCIA A JUSTIFICAR", normal_style), f"${c_data.get('diferencia_inicial', 0):,.2f}"],
-        [Paragraph("DIFERENCIA CONCILIADA", normal_style), f"${c_data.get('diferencia_conciliada', 0):,.2f}"],
-        [Paragraph("<b>RESULTADO FINAL</b>", normal_style), f"<b>${c_data.get('resultado_final', 0):,.2f}</b>"],
-        [Paragraph("<b>ESTADO</b>", normal_style), Paragraph(f"<b>{c_data.get('estado', '')}</b>", normal_style)],
+        [Paragraph("SALDO SEGÚN EXTRACTO BANCARIO", normal_style), f"$ {c_data.get('saldo_extracto', 0):,.2f}"],
+        [Paragraph("SALDO SEGÚN LIBROS", normal_style), f"$ {c_data.get('saldo_libros', 0):,.2f}"],
+        [Paragraph("DIFERENCIA A JUSTIFICAR", normal_style), f"$ {c_data.get('diferencia_inicial', 0):,.2f}"],
+        [Paragraph("DIFERENCIA CONCILIADA", normal_style), f"$ {c_data.get('diferencia_conciliada', 0):,.2f}"],
+        [Paragraph("RESULTADO FINAL", bold_style), Paragraph(res_final_txt, bold_style)],
+        [Paragraph("ESTADO", bold_style), Paragraph(str(c_data.get('estado', '')), bold_style)],
     ]
-    t_sal = Table(data_sal, colWidths=[400, 300])
+    t_sal = Table(data_sal, colWidths=[320, 220])
     t_sal.setStyle(TableStyle([
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D9D9D9")),
         ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#D9EAF7")),
         ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
     ]))
     story.append(t_sal)
-    story.append(Spacer(1, 10))
+    story.append(Spacer(1, 8))
 
-    def agregar_tabla_pdf(titulo, lista_datos, cols_keys, cols_names):
+    # Tablas Auxiliares
+    def agregar_tabla_pdf(titulo, lista_datos, cols_keys, cols_names, col_widths):
         story.append(Paragraph(titulo, sec_style))
         if not lista_datos:
             story.append(Paragraph("<i>Sin movimientos registrados</i>", normal_style))
-            story.append(Spacer(1, 6))
+            story.append(Spacer(1, 4))
             return
 
         header = [Paragraph(f"<b>{col}</b>", normal_style) for col in cols_names]
@@ -983,31 +1025,32 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
                 val = reg.get(k, "")
                 if k == "Valor" or k not in ["Fecha", "Beneficiario", "Documento", "Concepto"]:
                     try:
-                        val = f"${float(val):,.2f}"
+                        val = f"$ {float(val):,.2f}"
                     except (ValueError, TypeError):
                         pass
                 r.append(Paragraph(str(val), normal_style))
             rows.append(r)
 
-        t_m = Table(rows)
+        t_m = Table(rows, colWidths=col_widths)
         t_m.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#D9EAF7")),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D9D9D9")),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ]))
         story.append(t_m)
-        story.append(Spacer(1, 6))
+        story.append(Spacer(1, 4))
 
-    agregar_tabla_pdf(f"1. {nombres_titulos['t1']}", datos.get("salidas_extracto", []), ["Fecha", "Beneficiario", "Documento", "Valor"], ["Fecha", "Beneficiario", "Documento", "Valor"])
-    agregar_tabla_pdf(f"2. {nombres_titulos['t2']}", datos.get("salidas_libros", []), ["Fecha", "Concepto", "Valor"], ["Fecha", "Concepto", "Valor"])
-    agregar_tabla_pdf(f"3. {nombres_titulos['t3']}", datos.get("entradas_libros", []), ["Fecha", "Concepto", "Valor"], ["Fecha", "Concepto", "Valor"])
-    agregar_tabla_pdf(f"4. {nombres_titulos['t4']}", datos.get("entradas_extracto", []), ["Fecha", "Concepto", "Valor"], ["Fecha", "Concepto", "Valor"])
-    agregar_tabla_pdf("GASTOS BANCARIOS", datos.get("gastos_bancarios", []), ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"], ["Fecha", "4x1000", "Cuota Manejo", "IVA", "Rte.Fuente", "Comisión", "Intereses"])
+    agregar_tabla_pdf(f"1. {nombres_titulos['t1']}", datos.get("salidas_extracto", []), ["Fecha", "Beneficiario", "Documento", "Valor"], ["Fecha", "Beneficiario", "Documento", "Valor"], [90, 210, 120, 120])
+    agregar_tabla_pdf(f"2. {nombres_titulos['t2']}", datos.get("salidas_libros", []), ["Fecha", "Concepto", "Valor"], ["Fecha", "Concepto", "Valor"], [100, 310, 130])
+    agregar_tabla_pdf(f"3. {nombres_titulos['t3']}", datos.get("entradas_libros", []), ["Fecha", "Concepto", "Valor"], ["Fecha", "Concepto", "Valor"], [100, 310, 130])
+    agregar_tabla_pdf(f"4. {nombres_titulos['t4']}", datos.get("entradas_extracto", []), ["Fecha", "Concepto", "Valor"], ["Fecha", "Concepto", "Valor"], [100, 310, 130])
+    agregar_tabla_pdf("GASTOS BANCARIOS", datos.get("gastos_bancarios", []), ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"], ["Fecha", "4x1000", "Cuota Manejo", "IVA", "Rte.Fuente", "Comisión", "Intereses"], [70, 78, 78, 78, 78, 78, 80])
 
-    story.append(Spacer(1, 15))
+    story.append(Spacer(1, 12))
     firmas = [
-        [Paragraph(f"<b>Preparado por:</b> {datos.get('preparado_por', 'N/A')}", normal_style), Paragraph(f"<b>Revisado por:</b> {datos.get('revisado_por', 'N/A')}", normal_style)]
+        [Paragraph(f"<b>Preparado por:</b> {datos.get('preparado_por', 'N/A')}", normal_style), Paragraph(f"<b>Revisado por:</b> {c_data.get('revisado_por_usuario', 'N/A')}", normal_style)]
     ]
-    t_firmas = Table(firmas, colWidths=[350, 350])
+    t_firmas = Table(firmas, colWidths=[270, 270])
     t_firmas.setStyle(TableStyle([
         ('LINEABOVE', (0, 0), (-1, -1), 1, colors.HexColor("#1F4E78")),
     ]))
@@ -1045,8 +1088,9 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
             cuenta_txt = fila.get("cuenta") or "N/A"
             banco_txt = fila.get("banco") or "N/A"
             res_fin = fila.get("resultado_final", 0.0)
+            consecutivo_str = f"CONC-{int(fila['id']):06d}"
             
-            with st.expander(f"📌 #{fila['id']} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']} | Resultado: ${res_fin:,.2f}"):
+            with st.expander(f"📌 {consecutivo_str} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']} | Resultado: ${res_fin:,.2f}"):
                 
                 c_data = obtener_conciliacion_por_id(fila["id"])
                 
@@ -1078,7 +1122,7 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                     st.markdown(
                         f"""
                         <div style="background-color: #1F4E78; color: white; padding: 12px; text-align: center; border-radius: 5px; font-weight: bold; font-size: 18px;">
-                            CONCILIACIÓN - {tipo_cta.upper()}
+                            CONCILIACIÓN - {tipo_cta.upper()} ({consecutivo_str})
                         </div>
                         """, unsafe_allow_html=True
                     )
@@ -1275,9 +1319,12 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     id_edicion = st.session_state.get("conciliacion_a_editar", None)
     if id_edicion:
         c_edit = obtener_conciliacion_por_id(id_edicion)
-        st.info(f"✏️ **Modo Edición Activado:** Editando Conciliación #{id_edicion} ({c_edit.get('empresa')} - {c_edit.get('mes')})")
+        consecutivo_edit_str = f"CONC-{int(id_edicion):06d}"
+        st.info(f"✏️ **Modo Edición Activado:** Editando Conciliación {consecutivo_edit_str} ({c_edit.get('empresa')} - {c_edit.get('mes')})")
         if st.button("❌ Cancelar Edición y Crear Nueva"):
             st.session_state.conciliacion_a_editar = None
+            if "datos_cargados_edit" in st.session_state:
+                del st.session_state.datos_cargados_edit
             st.rerun()
 
     if "tabla1" not in st.session_state or id_edicion:
@@ -1566,7 +1613,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 del st.session_state.conciliacion_a_editar
             if "datos_cargados_edit" in st.session_state:
                 del st.session_state.datos_cargados_edit
-            st.success(f"📝 Conciliación #{id_g} guardada exitosamente como Borrador.")
+            st.success(f"📝 Conciliación CONC-{int(id_g):06d} guardada exitosamente como Borrador.")
 
     with btn_col_env:
         if st.button("📤 Enviar a Revisión", key="btn_enviar_revision", type="primary", width="stretch"):
@@ -1582,7 +1629,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 del st.session_state.conciliacion_a_editar
             if "datos_cargados_edit" in st.session_state:
                 del st.session_state.datos_cargados_edit
-            st.success(f"✅ Conciliación #{id_g} enviada correctamente a Revisión.")
+            st.success(f"✅ Conciliación CONC-{int(id_g):06d} enviada correctamente a Revisión.")
 
 
 elif menu_seleccionado == "📚 Historial":
@@ -1592,7 +1639,6 @@ elif menu_seleccionado == "📚 Historial":
     
     historial = obtener_historial(empresa_activa_nombre)
 
-    # FILTRO RÁPIDO DE ESTADOS EN EL HISTORIAL
     col_f1, col_f2 = st.columns([2, 2])
     with col_f1:
         filtro_estado = st.selectbox("Filtrar por Estado de Revisión:", ["Todos los Estados", "Borrador", "Pendiente de revisión", "Aprobada", "Requiere corrección"])
@@ -1608,6 +1654,9 @@ elif menu_seleccionado == "📚 Historial":
             banco_txt = fila.get("banco") or "N/A"
             res_fin = fila.get("resultado_final", 0.0)
             wf_status = fila.get("workflow_status", "Pendiente de revisión")
+            
+            # CONSECUTIVO ÚNICO DE GESTIÓN Y CONTROL
+            consecutivo_str = f"CONC-{int(fila['id']):06d}"
 
             badge_status = {
                 "Borrador": "📝 BORRADOR",
@@ -1616,7 +1665,7 @@ elif menu_seleccionado == "📚 Historial":
                 "Requiere corrección": "❌ REQUIERE CORRECCIÓN"
             }.get(wf_status, wf_status)
 
-            with st.expander(f"📌 #{fila['id']} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']} | [{badge_status}] | Resultado: ${res_fin:,.2f}"):
+            with st.expander(f"📌 {consecutivo_str} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']} | [{badge_status}] | Resultado: ${res_fin:,.2f}"):
                 
                 c_data = obtener_conciliacion_por_id(fila["id"])
                 try:
@@ -1624,7 +1673,6 @@ elif menu_seleccionado == "📚 Historial":
                 except Exception:
                     datos = {}
 
-                # Si fue devuelta para corrección, mostrar las observaciones del auditor
                 if wf_status == "Requiere corrección" and c_data.get("motivo_correccion"):
                     st.error(f"⚠️ **Observaciones del Revisor / Auditor ({c_data.get('revisado_por_usuario', 'N/A')}):** {c_data.get('motivo_correccion')}")
 
@@ -1646,26 +1694,54 @@ elif menu_seleccionado == "📚 Historial":
                         "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
                     )
 
-                col_b1, col_b2, col_b3 = st.columns(3)
+                # BOTONES DE ACCIÓN (EDITAR, ELIMINAR BORRADOR, EXCEL, PDF)
+                cols_acciones = st.columns(4 if wf_status == "Borrador" else 3)
                 
-                with col_b1:
-                    if st.button(f"✏️ Editar Conciliación #{fila['id']}", key=f"btn_edit_{fila['id']}", width="stretch"):
+                with cols_acciones[0]:
+                    # BOTÓN DE EDICIÓN CON REDIRECCIÓN DIRECTA A "NUEVA CONCILIACIÓN"
+                    if st.button(f"✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}", width="stretch"):
                         st.session_state.conciliacion_a_editar = fila['id']
                         if "datos_cargados_edit" in st.session_state:
                             del st.session_state.datos_cargados_edit
-                        st.success(f"Cargando Conciliación #{fila['id']} para edición...")
+                        st.session_state.menu_override = "📝 Nueva Conciliación"
                         st.rerun()
 
-                with col_b2:
+                if wf_status == "Borrador":
+                    with cols_acciones[1]:
+                        if st.button(f"🗑️ Eliminar Borrador", key=f"btn_del_borr_{fila['id']}", width="stretch"):
+                            st.session_state[f"confirm_del_conc_{fila['id']}"] = True
+
+                    idx_ex = 2
+                    idx_pdf = 3
+                else:
+                    idx_ex = 1
+                    idx_pdf = 2
+
+                with cols_acciones[idx_ex]:
                     if c_data.get("excel"):
-                        nombre_ex = f"CONCILIACION_{limpiar_nombre_archivo(c_data.get('empresa'))}_{limpiar_nombre_archivo(c_data.get('mes'))}.xlsx"
+                        nombre_ex = f"CONCILIACION_{consecutivo_str}_{limpiar_nombre_archivo(c_data.get('empresa'))}_{limpiar_nombre_archivo(c_data.get('mes'))}.xlsx"
                         st.download_button("📥 Descargar Excel (.xlsx)", data=bytes(c_data["excel"]), file_name=nombre_ex, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"down_ex_{fila['id']}", width="stretch")
 
-                with col_b3:
+                with cols_acciones[idx_pdf]:
                     nombres_titulos = {"t1": t1_nombre, "t2": t2_nombre, "t3": t3_nombre, "t4": t4_nombre}
                     pdf_bytes = generar_pdf_conciliacion(c_data, datos, nombres_titulos)
-                    nombre_pdf = f"CONCILIACION_{limpiar_nombre_archivo(c_data.get('empresa'))}_{limpiar_nombre_archivo(c_data.get('mes'))}.pdf"
+                    nombre_pdf = f"CONCILIACION_{consecutivo_str}_{limpiar_nombre_archivo(c_data.get('empresa'))}_{limpiar_nombre_archivo(c_data.get('mes'))}.pdf"
                     st.download_button("📥 Descargar PDF (.pdf)", data=pdf_bytes, file_name=nombre_pdf, mime="application/pdf", key=f"down_pdf_{fila['id']}", width="stretch")
+
+                # CONFIRMACIÓN DE ELIMINACIÓN DE BORRADOR
+                if st.session_state.get(f"confirm_del_conc_{fila['id']}", False):
+                    st.warning(f"⚠️ ¿Estás seguro de eliminar permanentemente el Borrador **{consecutivo_str}**?")
+                    col_si, col_no = st.columns(2)
+                    with col_si:
+                        if st.button("Sí, eliminar borrador", key=f"confirm_yes_conc_{fila['id']}", type="primary", width="stretch"):
+                            eliminar_conciliacion_db(fila['id'])
+                            st.session_state[f"confirm_del_conc_{fila['id']}"] = False
+                            st.success("Borrador eliminado correctamente.")
+                            st.rerun()
+                    with col_no:
+                        if st.button("Cancelar", key=f"confirm_no_conc_{fila['id']}", width="stretch"):
+                            st.session_state[f"confirm_del_conc_{fila['id']}"] = False
+                            st.rerun()
 
                 st.divider()
 
@@ -1674,7 +1750,7 @@ elif menu_seleccionado == "📚 Historial":
                     st.markdown(
                         f"""
                         <div style="background-color: #1F4E78; color: white; padding: 10px; text-align: center; border-radius: 5px; font-weight: bold; font-size: 16px;">
-                            VISTA VIRTUAL FORMATO OFICIAL - CONCILIACIÓN {tipo_cta.upper()}
+                            VISTA VIRTUAL FORMATO OFICIAL - CONCILIACIÓN {tipo_cta.upper()} ({consecutivo_str})
                         </div>
                         """, unsafe_allow_html=True
                     )
