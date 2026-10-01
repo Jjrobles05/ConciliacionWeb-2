@@ -69,6 +69,8 @@ def inicializar_db():
                 revisado_por_usuario TEXT,
                 fecha_revision TEXT,
                 motivo_correccion TEXT,
+                tipo_hallazgo TEXT,
+                checklist_json TEXT,
                 usuario_ultima_accion TEXT
             )
             """
@@ -79,6 +81,8 @@ def inicializar_db():
             "revisado_por_usuario": "ALTER TABLE conciliaciones ADD COLUMN revisado_por_usuario TEXT",
             "fecha_revision": "ALTER TABLE conciliaciones ADD COLUMN fecha_revision TEXT",
             "motivo_correccion": "ALTER TABLE conciliaciones ADD COLUMN motivo_correccion TEXT",
+            "tipo_hallazgo": "ALTER TABLE conciliaciones ADD COLUMN tipo_hallazgo TEXT",
+            "checklist_json": "ALTER TABLE conciliaciones ADD COLUMN checklist_json TEXT",
             "usuario_ultima_accion": "ALTER TABLE conciliaciones ADD COLUMN usuario_ultima_accion TEXT",
         }
         for nombre, sql in migraciones_conc.items():
@@ -382,7 +386,7 @@ def obtener_historial(empresa_nombre=None):
                 SELECT id, fecha_guardado, empresa, nit, mes, banco, cuenta, tipo,
                        saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
                        resultado_final, estado, workflow_status, revisado_por_usuario,
-                       fecha_revision, motivo_correccion, datos_json, fecha_elaboracion, excel
+                       fecha_revision, motivo_correccion, tipo_hallazgo, checklist_json, datos_json, fecha_elaboracion, excel
                 FROM conciliaciones
                 WHERE empresa = ?
                 ORDER BY id DESC
@@ -394,7 +398,7 @@ def obtener_historial(empresa_nombre=None):
                 SELECT id, fecha_guardado, empresa, nit, mes, banco, cuenta, tipo,
                        saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
                        resultado_final, estado, workflow_status, revisado_por_usuario,
-                       fecha_revision, motivo_correccion, datos_json, fecha_elaboracion, excel
+                       fecha_revision, motivo_correccion, tipo_hallazgo, checklist_json, datos_json, fecha_elaboracion, excel
                 FROM conciliaciones
                 ORDER BY id DESC
                 """, conn
@@ -412,16 +416,18 @@ def obtener_conciliacion_por_id(id_conciliacion):
         return dict(zip(cols, fila))
 
 
-def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, motivo_correccion=None):
+def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, motivo_correccion=None, tipo_hallazgo=None, checklist=None):
     fecha_rev = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    checklist_txt = json.dumps(checklist) if checklist else None
     with conectar_db() as conn:
         conn.execute(
             """
             UPDATE conciliaciones
-            SET workflow_status = ?, revisado_por_usuario = ?, fecha_revision = ?, motivo_correccion = ?
+            SET workflow_status = ?, revisado_por_usuario = ?, fecha_revision = ?,
+                motivo_correccion = ?, tipo_hallazgo = ?, checklist_json = ?
             WHERE id = ?
             """,
-            (nuevo_estado, revisado_por, fecha_rev, motivo_correccion, int(id_conciliacion))
+            (nuevo_estado, revisado_por, fecha_rev, motivo_correccion, tipo_hallazgo, checklist_txt, int(id_conciliacion))
         )
         conn.commit()
 
@@ -1061,8 +1067,8 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
 # =========================================================
 
 if menu_seleccionado == "🔍 Auditoría y Revisiones":
-    st.title("🔍 BANDEJA DE AUDITORÍA Y REVISIONES")
-    st.caption("Módulo exclusivo para la revisión técnica y aprobación de Conciliaciones Bancarias.")
+    st.title("🔍 BANDEJA Y MÓDULO DE AUDITORÍA Y CONTROL INTERNO")
+    st.caption("Panel de control exclusivo para la revisión analítica, verificación y dictamen de Conciliaciones Bancarias.")
 
     historial = obtener_historial(empresa_activa_nombre)
     pendientes = historial[historial["workflow_status"] == "Pendiente de revisión"]
@@ -1075,9 +1081,9 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
     st.divider()
 
     if pendientes.empty:
-        st.success("🎉 ¡Excelente! No hay conciliaciones pendientes por auditar.")
+        st.success("🎉 ¡Excelente! No hay conciliaciones pendientes por auditar en este momento.")
     else:
-        st.subheader("📋 Conciliaciones Pendientes de Revisión")
+        st.subheader("📋 Conciliaciones Asignadas para Auditoría")
         
         for idx, fila in pendientes.iterrows():
             cuenta_txt = fila.get("cuenta") or "N/A"
@@ -1088,7 +1094,6 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
             with st.expander(f"📌 {consecutivo_str} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']} | Resultado: ${res_fin:,.2f}"):
                 
                 c_data = obtener_conciliacion_por_id(fila["id"])
-                
                 try:
                     datos = json.loads(c_data.get("datos_json", "{}"))
                 except Exception:
@@ -1112,76 +1117,131 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                         "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
                     )
 
-                col_tit, col_lg = st.columns([4, 1])
-                with col_tit:
-                    st.markdown(
-                        f"""
-                        <div style="background-color: #1F4E78; color: white; padding: 12px; text-align: center; border-radius: 5px; font-weight: bold; font-size: 18px;">
-                            CONCILIACIÓN - {tipo_cta.upper()} ({consecutivo_str})
-                        </div>
-                        """, unsafe_allow_html=True
-                    )
-                with col_lg:
-                    logo_aud = obtener_logo_empresa(c_data.get("empresa"))
-                    if logo_aud:
-                        st.image(logo_aud, width=110)
-
-                col_inf1, col_inf2 = st.columns(2)
-                with col_inf1:
-                    st.write(f"🏢 **Empresa:** {c_data.get('empresa', 'N/A')} | **NIT:** {c_data.get('nit', 'N/A')}")
-                    st.write(f"📅 **Mes/Año:** {c_data.get('mes', 'N/A')} | **Elaboración:** {c_data.get('fecha_elaboracion', 'N/A')}")
-                with col_inf2:
-                    st.write(f"🏦 **Banco:** {c_data.get('banco', 'N/A')} | **Cuenta No:** {c_data.get('cuenta', 'N/A')}")
-                    st.write(f"👤 **Preparado por:** {datos.get('preparado_por', 'N/A')}")
-
-                st.divider()
-
-                st.markdown("**💰 SALDOS Y CÁLCULO DE LA CONCILIACIÓN**")
-                df_saldos = pd.DataFrame([
-                    {"Concepto": "SALDO SEGÚN EXTRACTO BANCARIO", "Valor": f"${c_data.get('saldo_extracto', 0):,.2f}"},
-                    {"Concepto": "SALDO SEGÚN LIBROS", "Valor": f"${c_data.get('saldo_libros', 0):,.2f}"},
-                    {"Concepto": "DIFERENCIA A JUSTIFICAR", "Valor": f"${c_data.get('diferencia_inicial', 0):,.2f}"},
-                    {"Concepto": "DIFERENCIA CONCILIADA", "Valor": f"${c_data.get('diferencia_conciliada', 0):,.2f}"},
-                    {"Concepto": "RESULTADO FINAL", "Valor": f"${c_data.get('resultado_final', 0):,.2f}"},
-                    {"Concepto": "ESTADO", "Valor": c_data.get('estado', 'N/A')}
+                # PESTAÑAS INTERNAS DE AUDITORÍA
+                tab_aud1, tab_aud2, tab_aud3, tab_aud4 = st.tabs([
+                    "📊 Movimientos y Saldos",
+                    "✅ Checklist de Verificación",
+                    "⏱️ Análisis de Partidas y Antigüedad",
+                    "⚡ Dictamen y Decisión"
                 ])
-                st.table(df_saldos)
 
-                st.markdown(f"**1. {t1_nombre}**")
-                st.dataframe(pd.DataFrame(datos.get("salidas_extracto", [])), width="stretch", hide_index=True)
+                with tab_aud1:
+                    col_tit, col_lg = st.columns([4, 1])
+                    with col_tit:
+                        st.markdown(
+                            f"""
+                            <div style="background-color: #1F4E78; color: white; padding: 10px; text-align: center; border-radius: 5px; font-weight: bold; font-size: 16px;">
+                                CONCILIACIÓN - {tipo_cta.upper()} ({consecutivo_str})
+                            </div>
+                            """, unsafe_allow_html=True
+                        )
+                    with col_lg:
+                        logo_aud = obtener_logo_empresa(c_data.get("empresa"))
+                        if logo_aud:
+                            st.image(logo_aud, width=100)
 
-                st.markdown(f"**2. {t2_nombre}**")
-                st.dataframe(pd.DataFrame(datos.get("salidas_libros", [])), width="stretch", hide_index=True)
+                    col_inf1, col_inf2 = st.columns(2)
+                    with col_inf1:
+                        st.write(f"🏢 **Empresa:** {c_data.get('empresa', 'N/A')} | **NIT:** {c_data.get('nit', 'N/A')}")
+                        st.write(f"📅 **Mes/Año:** {c_data.get('mes', 'N/A')} | **Elaboración:** {c_data.get('fecha_elaboracion', 'N/A')}")
+                    with col_inf2:
+                        st.write(f"🏦 **Banco:** {c_data.get('banco', 'N/A')} | **Cuenta No:** {c_data.get('cuenta', 'N/A')}")
+                        st.write(f"👤 **Preparado por:** {datos.get('preparado_por', 'N/A')}")
 
-                st.markdown(f"**3. {t3_nombre}**")
-                st.dataframe(pd.DataFrame(datos.get("entradas_libros", [])), width="stretch", hide_index=True)
+                    st.markdown("**💰 SALDOS Y CÁLCULO DE LA CONCILIACIÓN**")
+                    df_saldos = pd.DataFrame([
+                        {"Concepto": "SALDO SEGÚN EXTRACTO BANCARIO", "Valor": f"${c_data.get('saldo_extracto', 0):,.2f}"},
+                        {"Concepto": "SALDO SEGÚN LIBROS", "Valor": f"${c_data.get('saldo_libros', 0):,.2f}"},
+                        {"Concepto": "DIFERENCIA A JUSTIFICAR", "Valor": f"${c_data.get('diferencia_inicial', 0):,.2f}"},
+                        {"Concepto": "DIFERENCIA CONCILIADA", "Valor": f"${c_data.get('diferencia_conciliada', 0):,.2f}"},
+                        {"Concepto": "RESULTADO FINAL", "Valor": f"${c_data.get('resultado_final', 0):,.2f}"},
+                        {"Concepto": "ESTADO", "Valor": c_data.get('estado', 'N/A')}
+                    ])
+                    st.table(df_saldos)
 
-                st.markdown(f"**4. {t4_nombre}**")
-                st.dataframe(pd.DataFrame(datos.get("entradas_extracto", [])), width="stretch", hide_index=True)
+                    st.markdown(f"**1. {t1_nombre}**")
+                    st.dataframe(pd.DataFrame(datos.get("salidas_extracto", [])), width="stretch", hide_index=True)
 
-                st.markdown("**GASTOS BANCARIOS**")
-                st.dataframe(pd.DataFrame(datos.get("gastos_bancarios", [])), width="stretch", hide_index=True)
+                    st.markdown(f"**2. {t2_nombre}**")
+                    st.dataframe(pd.DataFrame(datos.get("salidas_libros", [])), width="stretch", hide_index=True)
 
-                st.divider()
+                    st.markdown(f"**3. {t3_nombre}**")
+                    st.dataframe(pd.DataFrame(datos.get("entradas_libros", [])), width="stretch", hide_index=True)
 
-                st.subheader("⚡ Decisión del Auditor")
-                btn_col1, btn_col2 = st.columns(2)
+                    st.markdown(f"**4. {t4_nombre}**")
+                    st.dataframe(pd.DataFrame(datos.get("entradas_extracto", [])), width="stretch", hide_index=True)
 
-                with btn_col1:
-                    if st.button("🔒 APROBAR CONCILIACIÓN", key=f"aprob_{fila['id']}", type="primary", width="stretch"):
-                        actualizar_estado_auditoria(fila["id"], "Aprobada", usuario_actual["nombre"])
-                        st.success("✅ Conciliación aprobada con éxito.")
-                        st.rerun()
+                    st.markdown("**GASTOS BANCARIOS**")
+                    st.dataframe(pd.DataFrame(datos.get("gastos_bancarios", [])), width="stretch", hide_index=True)
 
-                with btn_col2:
-                    motivo = st.text_input("Observaciones / Motivo de Corrección (Obligatorio si se devuelve)", key=f"mot_{fila['id']}")
-                    if st.button("❌ DEVOLVER PARA CORRECCIÓN", key=f"dev_{fila['id']}", width="stretch"):
-                        if not motivo.strip():
-                            st.error("Debes ingresar el motivo de devolución.")
-                        else:
-                            actualizar_estado_auditoria(fila["id"], "Requiere corrección", usuario_actual["nombre"], motivo)
-                            st.warning("⚠️ Conciliación devuelta al preparador.")
+                with tab_aud2:
+                    st.subheader("📋 Lista de Verificación de Control Interno")
+                    st.caption("Marca las verificaciones ejecutadas antes de autorizar el cierre:")
+                    
+                    chk_extracto = st.checkbox("El saldo de extracto bancario coincide exactamente con el documento/PDF adjunto.", key=f"chk_ext_{fila['id']}")
+                    chk_libros = st.checkbox("El saldo en libros fue verificado contra el balance de comprobación o auxiliar contable.", key=f"chk_lib_{fila['id']}")
+                    chk_gastos = st.checkbox("Los gastos bancarios (4x1000, comisiones, IVA, retenciones) fueron contabilizados.", key=f"chk_gas_{fila['id']}")
+                    chk_soportes = st.checkbox("Las partidas conciliadas poseen soportes documentales válidos.", key=f"chk_sop_{fila['id']}")
+                    chk_antiguedad = st.checkbox("No existen partidas pendientes sin justificar con una antigüedad mayor a 60 días.", key=f"chk_ant_{fila['id']}")
+
+                with tab_aud3:
+                    st.subheader("⏱️ Análisis de Partidas Pendientes y Riesgo")
+                    st.info("Visualización de renglones cargados en la conciliación:")
+                    
+                    df_t1 = pd.DataFrame(datos.get("salidas_extracto", []))
+                    df_t2 = pd.DataFrame(datos.get("salidas_libros", []))
+                    df_t3 = pd.DataFrame(datos.get("entradas_libros", []))
+                    df_t4 = pd.DataFrame(datos.get("entradas_extracto", []))
+
+                    tot_partidas = len(df_t1) + len(df_t2) + len(df_t3) + len(df_t4)
+                    st.metric("Total Partidas Conciliadas Registradas", tot_partidas)
+
+                    if tot_partidas > 0:
+                        st.markdown("🟢 **Riesgo Bajo:** Partidas del mes en curso.")
+                        st.markdown("🟡 **Riesgo Medio:** Partidas con más de 30 días de antigüedad.")
+                        st.markdown("🔴 **Riesgo Crítico:** Partidas con más de 60 días de antigüedad (posible pérdida o duplicidad).")
+                    else:
+                        st.caption("No existen partidas pendientes registradas en esta conciliación.")
+
+                with tab_aud4:
+                    st.subheader("⚡ Emisión del Dictamen")
+                    
+                    decision = st.radio("Seleccione Acción:", ["🔒 Aprobar Conciliación", "❌ Devolver a Corrección"], key=f"dec_{fila['id']}")
+
+                    if "Aprobar" in decision:
+                        if st.button("🔒 Confirmar y Emitir Aprobación", key=f"btn_aprob_final_{fila['id']}", type="primary", width="stretch"):
+                            checklist_guardar = {
+                                "chk_extracto": chk_extracto,
+                                "chk_libros": chk_libros,
+                                "chk_gastos": chk_gastos,
+                                "chk_soportes": chk_soportes,
+                                "chk_antiguedad": chk_antiguedad
+                            }
+                            actualizar_estado_auditoria(fila["id"], "Aprobada", usuario_actual["nombre"], checklist=checklist_guardar)
+                            st.success("✅ Conciliación aprobada con éxito.")
                             st.rerun()
+                    else:
+                        tipo_hallazgo_sel = st.selectbox(
+                            "Categoría Principal del Hallazgo:",
+                            [
+                                "Diferencia en saldos no justificada",
+                                "Falta soporte documental",
+                                "Error en clasificación de transacción",
+                                "Partidas duplicadas o con fecha errónea",
+                                "Gastos bancarios no contabilizados",
+                                "Otro hallazgo de auditoría"
+                            ],
+                            key=f"cat_hallazgo_{fila['id']}"
+                        )
+                        motivo_det = st.text_area("Detalle de las Observaciones para el Preparador:", key=f"mot_det_{fila['id']}")
+
+                        if st.button("❌ Confirmar y Devolver al Preparador", key=f"btn_dev_final_{fila['id']}", width="stretch"):
+                            if not motivo_det.strip():
+                                st.error("Debes ingresar el detalle de las observaciones.")
+                            else:
+                                actualizar_estado_auditoria(fila["id"], "Requiere corrección", usuario_actual["nombre"], motivo_correccion=motivo_det, tipo_hallazgo=tipo_hallazgo_sel)
+                                st.warning("⚠️ Conciliación devuelta al preparador.")
+                                st.rerun()
 
 
 elif menu_seleccionado == "📊 Dashboard":
@@ -1196,7 +1256,6 @@ elif menu_seleccionado == "📊 Dashboard":
     if historial.empty:
         st.info("ℹ️ Aún no hay datos registradas para generar el análisis analítico.")
     else:
-        # CALCULO DE KPIS GENERALES
         total_conciliaciones = len(historial)
         exitosas = len(historial[historial["resultado_final"].abs() < 0.005])
         tasa_éxito = (exitosas / total_conciliaciones * 100) if total_conciliaciones > 0 else 0
@@ -1207,7 +1266,6 @@ elif menu_seleccionado == "📊 Dashboard":
         borradores_cnt = len(historial[historial["workflow_status"] == "Borrador"])
         devueltas_cnt = len(historial[historial["workflow_status"] == "Requiere corrección"])
 
-        # ALERTA DE CUENTAS PENDIENTES DEL MES ACTUAL
         mes_actual_nombre = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"][datetime.now().month - 1]
         mes_actual_txt = f"{mes_actual_nombre} {datetime.now().year}"
 
@@ -1216,7 +1274,6 @@ elif menu_seleccionado == "📊 Dashboard":
         cuentas_conciliadas_mes = len(historial[historial["mes"].str.upper() == mes_actual_txt]["cuenta"].unique())
         cuentas_pendientes_mes = max(0, cuentas_totales_cnt - cuentas_conciliadas_mes)
 
-        # 1. TARJETAS KPIS PRINCIPALES
         st.subheader("📌 Indicadores Clave de Desempeño (KPIs)")
         kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
 
@@ -1231,7 +1288,6 @@ elif menu_seleccionado == "📊 Dashboard":
 
         st.divider()
 
-        # 2. SEGUNDA FILA: WORKFLOW Y DISTRIBUCIÓN
         col_wf, col_pie = st.columns([2, 2])
 
         with col_wf:
@@ -1267,7 +1323,6 @@ elif menu_seleccionado == "📊 Dashboard":
 
         st.divider()
 
-        # 3. TENDENCIAS Y GASTOS BANCARIOS
         st.subheader("📈 Análisis de Saldos y Gastos Bancarios")
         tab_sal, tab_gastos = st.tabs(["📊 Evolución de Saldos", "💸 Desglose de Gastos Bancarios"])
 
@@ -1287,7 +1342,6 @@ elif menu_seleccionado == "📊 Dashboard":
                 st.plotly_chart(fig_line, use_container_width=True)
 
         with tab_gastos:
-            # Extracción de gastos bancarios acumulados desde el JSON
             gastos_totales = []
             for _, r in historial.iterrows():
                 try:
@@ -1320,7 +1374,6 @@ elif menu_seleccionado == "📊 Dashboard":
 
         st.divider()
 
-        # 4. TABLA DE ALERTAS Y CASOS CRÍTICOS
         st.subheader("⚠️ Atención Prioritaria: Descuadres Mayores")
         historial_des = historial[historial["resultado_final"].abs() > 0.005].sort_values(by="resultado_final", key=abs, ascending=False).head(5)
         
@@ -1651,7 +1704,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 st.session_state.tabla3 = pd.concat([st.session_state.tabla3, df_p3], ignore_index=True)
                 st.rerun()
     with c_del3:
-        if st.button("🗑️ Limpiar Ítem 3", key="btn_del_t3"):
+        if st.button("🗑️️ Limpiar Ítem 3", key="btn_del_t3"):
             st.session_state.tabla3 = pd.DataFrame(columns=cols_t3)
             st.rerun()
 
@@ -1802,7 +1855,9 @@ elif menu_seleccionado == "📚 Historial":
                     datos = {}
 
                 if wf_status == "Requiere corrección" and c_data.get("motivo_correccion"):
-                    st.error(f"⚠️ **Observaciones del Revisor / Auditor ({c_data.get('revisado_por_usuario', 'N/A')}):** {c_data.get('motivo_correccion')}")
+                    st.error(f"⚠️ **Observaciones del Revisor / Auditor ({c_data.get('revisado_por_usuario', 'N/A')}):**\n"
+                             f"• **Categoría del Hallazgo:** {c_data.get('tipo_hallazgo', 'General')}\n"
+                             f"• **Detalle:** {c_data.get('motivo_correccion')}")
 
                 tipo_cta = c_data.get("tipo") or "Cuenta de ahorros"
                 es_tc = "tarjeta" in tipo_cta.lower() or "crédito" in tipo_cta.lower() or "credito" in tipo_cta.lower()
