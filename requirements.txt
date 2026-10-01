@@ -3,4 +3,4 @@ pandas
 openpyxl
 reportlab
 plotly
-libsql-client
+libsql-experimental
