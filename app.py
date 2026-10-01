@@ -430,6 +430,16 @@ def generar_pdf_conciliacion(conciliacion_info, df_partidas, df_bitacora):
 if 'usuario' not in st.session_state:
     st.session_state.usuario = None
 
+# ==========================================
+# ACCESO DE EMERGENCIA EN BARRA LATERAL (SI OLVIDAS TU USUARIO)
+# ==========================================
+with st.sidebar.expander("🛠️ Acceso de Emergencia (Admin)"):
+    if st.button("Crear Admin de Respaldo"):
+        if registrar_usuario("admin_emergencia", "Administrador Principal", "123456", "Administrador"):
+            st.sidebar.success("Usuario creado: `admin_emergencia` / `123456`")
+        else:
+            st.sidebar.info("El usuario `admin_emergencia` ya existe. Úsalo con clave `123456`.")
+
 # Pantalla de Configuración Inicial si no existen usuarios
 if contar_usuarios() == 0:
     st.title("🔐 Configuración Inicial")
