@@ -21,21 +21,74 @@ st.set_page_config(
 )
 
 # ==========================================
-# CONEXIÓN A BASE DE DATOS (TURSO / SQLITE)
+# ADAPTADOR COMPATIBLE PARA TURSO / SQLITE
 # ==========================================
+class TursoCursorWrapper:
+    """Adaptador para que libsql_client responda exactamente igual que un cursor de SQLite."""
+    def __init__(self, client):
+        self.client = client
+        self.lastrowid = None
+
+    def execute(self, query, params=()):
+        # Convertir parámetros a tuplas si vienen en otro formato
+        if params and not isinstance(params, (list, tuple)):
+            params = (params,)
+        
+        # libsql_client usa ? como marcador de posición igual que SQLite
+        res = self.client.execute(query, list(params) if params else [])
+        self._last_result = res
+        try:
+            if res.last_insert_rowid is not None:
+                self.lastrowid = res.last_insert_rowid
+        except Exception:
+            pass
+        return self
+
+    def fetchone(self):
+        try:
+            rows = self._last_result.rows
+            if rows:
+                return rows[0]
+        except Exception:
+            pass
+        return None
+
+    def fetchall(self):
+        try:
+            return self._last_result.rows
+        except Exception:
+            return []
+
+class TursoConnectionWrapper:
+    """Adaptador de conexión para libsql_client."""
+    def __init__(self, client):
+        self.client = client
+
+    def cursor(self):
+        return TursoCursorWrapper(self.client)
+
+    def commit(self):
+        pass  # libsql_client realiza commit automático en cada sentencia
+
+    def close(self):
+        try:
+            self.client.close()
+        except Exception:
+            pass
+
 def conectar_db():
     """
-    Conecta a la base de datos persistente en Turso utilizando libsql-experimental
-    para mantener total compatibilidad con cursores SQLite.
-    Si no hay credenciales o falla, utiliza SQLite local como respaldo.
+    Conecta a la base de datos persistente en Turso usando libsql-client
+    o utiliza SQLite local como respaldo automático.
     """
     if "TURSO_DATABASE_URL" in st.secrets and "TURSO_AUTH_TOKEN" in st.secrets:
         url = st.secrets["TURSO_DATABASE_URL"]
         token = st.secrets["TURSO_AUTH_TOKEN"]
         
         try:
-            import libsql_experimental as libsql
-            return libsql.connect(database=url, auth_token=token)
+            import libsql_client
+            client = libsql_client.create_client_sync(url=url, auth_token=token)
+            return TursoConnectionWrapper(client)
         except Exception as e:
             st.warning(f"⚠️ Error conectando a Turso: {e}. Usando respaldo local.")
             
