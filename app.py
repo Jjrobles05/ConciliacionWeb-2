@@ -1549,7 +1549,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         nombres_titulos
     )
 
-    # BOTONES DE ACCIÓN: BORRADOR O ENVIAR A REVISIÓN
     st.divider()
     btn_col_borr, btn_col_env = st.columns(2)
 
@@ -1592,21 +1591,42 @@ elif menu_seleccionado == "📚 Historial":
         st.caption(f"Mostrando conciliaciones de: **{empresa_activa_nombre}**")
     
     historial = obtener_historial(empresa_activa_nombre)
+
+    # FILTRO RÁPIDO DE ESTADOS EN EL HISTORIAL
+    col_f1, col_f2 = st.columns([2, 2])
+    with col_f1:
+        filtro_estado = st.selectbox("Filtrar por Estado de Revisión:", ["Todos los Estados", "Borrador", "Pendiente de revisión", "Aprobada", "Requiere corrección"])
+    
+    if filtro_estado != "Todos los Estados":
+        historial = historial[historial["workflow_status"] == filtro_estado]
+
     if historial.empty:
-        st.info("No hay conciliaciones guardadas.")
+        st.info("No hay conciliaciones guardadas para el filtro seleccionado.")
     else:
         for idx, fila in historial.iterrows():
             cuenta_txt = fila.get("cuenta") or "N/A"
             banco_txt = fila.get("banco") or "N/A"
             res_fin = fila.get("resultado_final", 0.0)
-            
-            with st.expander(f"📌 #{fila['id']} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']} | Estado: {fila['workflow_status']} | Resultado: ${res_fin:,.2f}"):
+            wf_status = fila.get("workflow_status", "Pendiente de revisión")
+
+            badge_status = {
+                "Borrador": "📝 BORRADOR",
+                "Pendiente de revisión": "🕒 PENDIENTE DE REVISIÓN",
+                "Aprobada": "🔒 APROBADA",
+                "Requiere corrección": "❌ REQUIERE CORRECCIÓN"
+            }.get(wf_status, wf_status)
+
+            with st.expander(f"📌 #{fila['id']} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']} | [{badge_status}] | Resultado: ${res_fin:,.2f}"):
                 
                 c_data = obtener_conciliacion_por_id(fila["id"])
                 try:
                     datos = json.loads(c_data.get("datos_json", "{}"))
                 except Exception:
                     datos = {}
+
+                # Si fue devuelta para corrección, mostrar las observaciones del auditor
+                if wf_status == "Requiere corrección" and c_data.get("motivo_correccion"):
+                    st.error(f"⚠️ **Observaciones del Revisor / Auditor ({c_data.get('revisado_por_usuario', 'N/A')}):** {c_data.get('motivo_correccion')}")
 
                 tipo_cta = c_data.get("tipo") or "Cuenta de ahorros"
                 es_tc = "tarjeta" in tipo_cta.lower() or "crédito" in tipo_cta.lower() or "credito" in tipo_cta.lower()
