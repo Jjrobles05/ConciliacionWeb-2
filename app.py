@@ -206,7 +206,7 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
 
 
 # =========================================================
-# ROTACIÓN AUTOMÁTICA MENSUAL DE CUENTAS
+# ROTACIÓN AUTOMÁTICA MENSUAL DE CUENTAS (EXCLUSIVO PREPARADORES ACTIVOS)
 # =========================================================
 
 def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
@@ -215,7 +215,7 @@ def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
 
     with conectar_db() as conn:
         usuarios = pd.read_sql_query(
-            "SELECT id, nombre FROM usuarios WHERE empresa_id = ? AND activo = 1 ORDER BY id",
+            "SELECT id, nombre FROM usuarios WHERE empresa_id = ? AND activo = 1 AND rol = 'Preparador' ORDER BY id",
             conn, params=(int(empresa_id),)
         )
         cuentas = pd.read_sql_query(
@@ -287,7 +287,8 @@ def guardar_conciliacion_historial(
     saldo_extracto, saldo_libros, diferencia_inicial,
     diferencia_conciliada, resultado_final, salidas_extracto,
     salidas_libros, entradas_libros, entradas_extracto,
-    gastos_bancarios, preparado_por, revisado_por, excel_data, id_edicion=None
+    gastos_bancarios, preparado_por, revisado_por, excel_data,
+    workflow_status="Pendiente de revisión", id_edicion=None
 ):
     estado = (
         "CONCILIACIÓN BANCARIA CORRECTA"
@@ -326,7 +327,7 @@ def guardar_conciliacion_historial(
                 SET fecha_guardado=?, empresa=?, nit=?, mes=?, fecha_elaboracion=?,
                     banco=?, cuenta=?, tipo=?, saldo_extracto=?, saldo_libros=?,
                     diferencia_inicial=?, diferencia_conciliada=?, resultado_final=?,
-                    estado=?, datos_json=?, excel=?, workflow_status='Pendiente de revisión',
+                    estado=?, datos_json=?, excel=?, workflow_status=?,
                     usuario_ultima_accion=?
                 WHERE id=?
                 """,
@@ -336,7 +337,7 @@ def guardar_conciliacion_historial(
                     float(diferencia_inicial), float(diferencia_conciliada),
                     float(resultado_final), estado,
                     json.dumps(datos, ensure_ascii=False),
-                    sqlite3.Binary(excel_data), preparado_por or None, int(id_edicion)
+                    sqlite3.Binary(excel_data), workflow_status, preparado_por or None, int(id_edicion)
                 )
             )
             conn.commit()
@@ -358,7 +359,7 @@ def guardar_conciliacion_historial(
                     float(resultado_final), estado,
                     json.dumps(datos, ensure_ascii=False),
                     sqlite3.Binary(excel_data),
-                    "Pendiente de revisión",
+                    workflow_status,
                     preparado_por or None,
                 )
             )
@@ -1164,7 +1165,6 @@ elif menu_seleccionado == "📊 Dashboard":
 elif menu_seleccionado == "🏢 Empresas":
     st.title("🏢 Maestro de Empresas")
 
-    # SI SE ESTÁ EDITANDO UNA EMPRESA
     empresa_edit_id = st.session_state.get("empresa_a_editar", None)
     if empresa_edit_id:
         emp_obj = obtener_empresa_por_id(empresa_edit_id)
@@ -1361,7 +1361,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                     empresa_activa_id, mes_num, usuario_actual["id"]
                 )
                 if not cuentas_asig_df.empty:
-                    st.info("🔄 **Cuentas a conciliar en este período:**")
+                    st.info("🔄 **Cuentas asignadas para tu perfil este mes:**")
                     cta_sel = st.selectbox(
                         "Cuenta / Tarjeta Registrada",
                         cuentas_asig_df["id"].tolist(),
@@ -1371,7 +1371,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                     cuenta = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "numero_cuenta"].values[0]
                     tipo = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "tipo_cuenta"].values[0]
                 else:
-                    st.warning("No hay cuentas asignadas o registradas para esta empresa.")
+                    st.warning("No hay cuentas asignadas o registradas para preparadores activos en esta empresa.")
                     banco = st.text_input("Nombre del Banco", key="form_banco")
                     cuenta = st.text_input("Número de Cuenta", key="form_cuenta")
                     tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"], key="form_tipo")
@@ -1549,21 +1549,41 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         nombres_titulos
     )
 
+    # BOTONES DE ACCIÓN: BORRADOR O ENVIAR A REVISIÓN
     st.divider()
-    txt_btn = "💾 Guardar Cambios y Enviar a Revisión" if id_edicion else "💾 Guardar Conciliación en Historial"
-    if st.button(txt_btn, type="primary", width="stretch"):
-        id_g = guardar_conciliacion_historial(
-            empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
-            saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
-            resultado_final, salidas_extracto, salidas_libros, entradas_libros,
-            entradas_extracto, gastos_bancarios, preparado_por, revisado_por, excel_data,
-            id_edicion=id_edicion
-        )
-        if "conciliacion_a_editar" in st.session_state:
-            del st.session_state.conciliacion_a_editar
-        if "datos_cargados_edit" in st.session_state:
-            del st.session_state.datos_cargados_edit
-        st.success(f"✅ Conciliación #{id_g} guardada y actualizada con éxito.")
+    btn_col_borr, btn_col_env = st.columns(2)
+
+    with btn_col_borr:
+        if st.button("💾 Guardar como Borrador", key="btn_guardar_borrador", width="stretch"):
+            id_g = guardar_conciliacion_historial(
+                empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
+                saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
+                resultado_final, salidas_extracto, salidas_libros, entradas_libros,
+                entradas_extracto, gastos_bancarios, preparado_por, revisado_por, excel_data,
+                workflow_status="Borrador",
+                id_edicion=id_edicion
+            )
+            if "conciliacion_a_editar" in st.session_state:
+                del st.session_state.conciliacion_a_editar
+            if "datos_cargados_edit" in st.session_state:
+                del st.session_state.datos_cargados_edit
+            st.success(f"📝 Conciliación #{id_g} guardada exitosamente como Borrador.")
+
+    with btn_col_env:
+        if st.button("📤 Enviar a Revisión", key="btn_enviar_revision", type="primary", width="stretch"):
+            id_g = guardar_conciliacion_historial(
+                empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
+                saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
+                resultado_final, salidas_extracto, salidas_libros, entradas_libros,
+                entradas_extracto, gastos_bancarios, preparado_por, revisado_por, excel_data,
+                workflow_status="Pendiente de revisión",
+                id_edicion=id_edicion
+            )
+            if "conciliacion_a_editar" in st.session_state:
+                del st.session_state.conciliacion_a_editar
+            if "datos_cargados_edit" in st.session_state:
+                del st.session_state.datos_cargados_edit
+            st.success(f"✅ Conciliación #{id_g} enviada correctamente a Revisión.")
 
 
 elif menu_seleccionado == "📚 Historial":
