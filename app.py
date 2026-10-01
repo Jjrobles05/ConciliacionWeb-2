@@ -139,7 +139,14 @@ def inicializar_db():
 
 def obtener_empresas():
     with conectar_db() as conn:
-        return pd.read_sql_query("SELECT id, nombre, nit FROM empresas ORDER BY nombre", conn)
+        return pd.read_sql_query("SELECT id, nombre, nit, logo FROM empresas ORDER BY nombre", conn)
+
+def obtener_empresa_por_id(empresa_id):
+    with conectar_db() as conn:
+        res = conn.execute("SELECT id, nombre, nit, logo FROM empresas WHERE id = ?", (int(empresa_id),)).fetchone()
+        if res:
+            return {"id": res[0], "nombre": res[1], "nit": res[2], "logo": res[3]}
+    return None
 
 def obtener_logo_empresa(nombre_empresa):
     with conectar_db() as conn:
@@ -154,6 +161,19 @@ def guardar_empresa(nombre, nit, logo_bytes=None):
             conn.execute("INSERT INTO empresas (nombre, nit, logo) VALUES (?, ?, ?)", (nombre.strip(), nit.strip(), sqlite3.Binary(logo_bytes)))
         else:
             conn.execute("INSERT INTO empresas (nombre, nit) VALUES (?, ?)", (nombre.strip(), nit.strip()))
+        conn.commit()
+
+def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
+    with conectar_db() as conn:
+        if logo_bytes:
+            conn.execute("UPDATE empresas SET nombre = ?, nit = ?, logo = ? WHERE id = ?", (nombre.strip(), nit.strip(), sqlite3.Binary(logo_bytes), int(empresa_id)))
+        else:
+            conn.execute("UPDATE empresas SET nombre = ?, nit = ? WHERE id = ?", (nombre.strip(), nit.strip(), int(empresa_id)))
+        conn.commit()
+
+def eliminar_empresa_db(empresa_id):
+    with conectar_db() as conn:
+        conn.execute("DELETE FROM empresas WHERE id = ?", (int(empresa_id),))
         conn.commit()
 
 def obtener_cuentas(empresa_id=None):
@@ -1143,18 +1163,93 @@ elif menu_seleccionado == "📊 Dashboard":
 
 elif menu_seleccionado == "🏢 Empresas":
     st.title("🏢 Maestro de Empresas")
-    if rol_actual == "Administrador":
+
+    # SI SE ESTÁ EDITANDO UNA EMPRESA
+    empresa_edit_id = st.session_state.get("empresa_a_editar", None)
+    if empresa_edit_id:
+        emp_obj = obtener_empresa_por_id(empresa_edit_id)
+        if emp_obj:
+            st.info(f"✏️ **Modo Edición:** Editando la empresa **{emp_obj['nombre']}**")
+            with st.form("form_editar_empresa"):
+                edit_nom = st.text_input("Nombre de la empresa", value=emp_obj["nombre"])
+                edit_nit = st.text_input("NIT", value=emp_obj["nit"])
+                edit_logo = st.file_uploader("Actualizar Logo (Opcional - PNG, JPG)", type=["png", "jpg", "jpeg"])
+                
+                c_guard, c_canc = st.columns(2)
+                with c_guard:
+                    if st.form_submit_button("💾 Guardar Cambios", type="primary", width="stretch"):
+                        logo_b = edit_logo.getvalue() if edit_logo else None
+                        actualizar_empresa_db(empresa_edit_id, edit_nom, edit_nit, logo_b)
+                        st.session_state.empresa_a_editar = None
+                        st.success("Empresa actualizada con éxito.")
+                        st.rerun()
+                with c_canc:
+                    if st.form_submit_button("❌ Cancelar", width="stretch"):
+                        st.session_state.empresa_a_editar = None
+                        st.rerun()
+            st.divider()
+
+    if rol_actual == "Administrador" and not empresa_edit_id:
         with st.expander("➕ Registrar nueva empresa con Logo"):
             with st.form("form_empresa_maestro"):
                 nom = st.text_input("Nombre de la empresa")
                 nit = st.text_input("NIT")
                 logo_file = st.file_uploader("Logo de la Empresa (PNG, JPG)", type=["png", "jpg", "jpeg"])
                 if st.form_submit_button("Guardar Empresa", type="primary"):
-                    logo_b = logo_file.getvalue() if logo_file else None
-                    guardar_empresa(nom, nit, logo_b)
-                    st.success("Empresa registrada con éxito.")
-                    st.rerun()
-    st.dataframe(obtener_empresas(), width="stretch", hide_index=True)
+                    if not nom.strip() or not nit.strip():
+                        st.error("Por favor completa el nombre y el NIT.")
+                    else:
+                        logo_b = logo_file.getvalue() if logo_file else None
+                        guardar_empresa(nom, nit, logo_b)
+                        st.success("Empresa registrada con éxito.")
+                        st.rerun()
+
+    st.subheader("Empresas Registradas")
+    empresas_list = obtener_empresas()
+
+    if empresas_list.empty:
+        st.info("No hay empresas registradas.")
+    else:
+        for _, emp in empresas_list.iterrows():
+            with st.container():
+                col_lg, col_dt, col_act1, col_act2 = st.columns([1, 4, 1.5, 1.5])
+                
+                with col_lg:
+                    if emp["logo"]:
+                        st.image(emp["logo"], width=70)
+                    else:
+                        st.caption("Sin logo")
+
+                with col_dt:
+                    st.write(f"🏢 **{emp['nombre']}**")
+                    st.write(f"🆔 NIT: {emp['nit']}")
+
+                with col_act1:
+                    if rol_actual == "Administrador":
+                        if st.button("✏️ Editar", key=f"btn_edit_emp_{emp['id']}", width="stretch"):
+                            st.session_state.empresa_a_editar = emp['id']
+                            st.rerun()
+
+                with col_act2:
+                    if rol_actual == "Administrador":
+                        if st.button("🗑️ Eliminar", key=f"btn_del_emp_{emp['id']}", width="stretch"):
+                            st.session_state[f"confirm_del_emp_{emp['id']}"] = True
+
+                if st.session_state.get(f"confirm_del_emp_{emp['id']}", False):
+                    st.warning(f"⚠️ ¿Estás seguro de eliminar la empresa '{emp['nombre']}'?")
+                    col_si, col_no = st.columns(2)
+                    with col_si:
+                        if st.button("Sí, eliminar", key=f"confirm_yes_{emp['id']}", type="primary", width="stretch"):
+                            eliminar_empresa_db(emp['id'])
+                            st.session_state[f"confirm_del_emp_{emp['id']}"] = False
+                            st.success("Empresa eliminada.")
+                            st.rerun()
+                    with col_no:
+                        if st.button("Cancelar", key=f"confirm_no_{emp['id']}", width="stretch"):
+                            st.session_state[f"confirm_del_emp_{emp['id']}"] = False
+                            st.rerun()
+
+            st.divider()
 
 
 elif menu_seleccionado == "🏦 Bancos y Cuentas":
@@ -1210,7 +1305,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 pass
             st.session_state.datos_cargados_edit = True
 
-    # ENCABEZADO CON LOGO DE LA EMPRESA
     col_info_emp, col_logo_emp = st.columns([3, 1])
 
     with col_info_emp:
@@ -1319,18 +1413,11 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     diferencia_inicial = saldo_extracto - saldo_libros
     st.metric("Diferencia a Justificar", f"${diferencia_inicial:,.2f}")
 
-    # =========================================================
-    # BOTÓN GENERAL DE RECALCULO / ACTUALIZACIÓN
-    # =========================================================
     st.divider()
     col_act1, col_act2 = st.columns([3, 1])
     with col_act2:
         if st.button("🔄 Actualizar y Recalcular Conciliación", width="stretch", type="secondary"):
             st.rerun()
-
-    # =========================================================
-    # TABLAS DE ÍTEMS CON PEGADO Y ELIMINACIÓN
-    # =========================================================
 
     st.divider()
     st.subheader(f"1. {nombres_titulos['t1']}")
@@ -1432,7 +1519,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             st.session_state.tabla5 = pd.DataFrame(columns=cols_t5)
             st.rerun()
 
-    # CÁLCULO DE LA CONCILIACIÓN
     m1 = total_columna(salidas_extracto)
     m2 = total_columna(salidas_libros)
     m3 = total_columna(entradas_libros)
