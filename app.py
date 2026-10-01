@@ -9,6 +9,8 @@ from datetime import datetime
 
 import pandas as pd
 import streamlit as st
+import plotly.express as px
+import plotly.graph_objects as go
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -643,7 +645,6 @@ with st.sidebar:
 
     opciones_menu = obtener_opciones_menu(rol_actual)
 
-    # Redirección dinámica si el usuario hace clic en Editar en el Historial
     if "menu_override" in st.session_state:
         menu_seleccionado = st.session_state.pop("menu_override")
     else:
@@ -929,10 +930,8 @@ def preparar_excel(
     return output.getvalue(), nombre_archivo
 
 
-# GENERACIÓN DE PDF VERTICAL CON LOGO Y FORMATO LIMPIO
 def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     buffer = io.BytesIO()
-    # Hoja vertical (portrait)
     doc = SimpleDocTemplate(buffer, pagesize=portrait(letter), rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     story = []
     styles = getSampleStyleSheet()
@@ -949,7 +948,6 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     consecutivo_str = f"CONC-{int(c_data.get('id', 0)):06d}"
     tipo_cta = c_data.get("tipo") or "Cuenta"
 
-    # Encabezado con título y Logo
     logo_bytes = obtener_logo_empresa(c_data.get("empresa"))
     p_header_text = Paragraph(f"<b>CONCILIACIÓN - {tipo_cta.upper()}</b><br/><font size=8>Consecutivo No: {consecutivo_str}</font>", title_style)
 
@@ -970,7 +968,6 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
 
     story.append(Spacer(1, 6))
 
-    # Datos Generales
     data_gen = [
         [Paragraph("<b>Empresa:</b>", normal_style), Paragraph(str(c_data.get("empresa", "")), normal_style), Paragraph("<b>NIT:</b>", normal_style), Paragraph(str(c_data.get("nit", "")), normal_style)],
         [Paragraph("<b>Mes/Año:</b>", normal_style), Paragraph(str(c_data.get("mes", "")), normal_style), Paragraph("<b>Elaboración:</b>", normal_style), Paragraph(str(c_data.get("fecha_elaboracion", "")), normal_style)],
@@ -985,7 +982,6 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     story.append(t_gen)
     story.append(Spacer(1, 8))
 
-    # Saldos y Cálculo Limpio
     story.append(Paragraph("SALDOS Y CÁLCULO DE LA CONCILIACIÓN", sec_style))
 
     res_final_val = c_data.get('resultado_final', 0.0)
@@ -1009,7 +1005,6 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     story.append(t_sal)
     story.append(Spacer(1, 8))
 
-    # Tablas Auxiliares
     def agregar_tabla_pdf(titulo, lista_datos, cols_keys, cols_names, col_widths):
         story.append(Paragraph(titulo, sec_style))
         if not lista_datos:
@@ -1190,20 +1185,154 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
 
 
 elif menu_seleccionado == "📊 Dashboard":
-    st.title("📊 Dashboard de Conciliaciones")
+    st.title("📊 DASHBOARD Y CENTRO DE CONTROL FINANCIERO")
     if empresa_activa_nombre != "Todas las empresas":
-        st.caption(f"Filtrado por empresa: **{empresa_activa_nombre}**")
-    
-    historial = obtener_historial(empresa_activa_nombre)
-    if len(historial) == 0:
-        st.info("Aún no hay conciliaciones registradas para la empresa seleccionada.")
+        st.caption(f"Panel analítico filtrado por empresa: **{empresa_activa_nombre}**")
     else:
-        kpi1, kpi2, kpi3 = st.columns(3)
-        kpi1.metric("Total Conciliaciones", len(historial))
-        kpi2.metric("Aprobadas 🔒", len(historial[historial["workflow_status"] == "Aprobada"]))
-        kpi3.metric("Pendientes 🕒", len(historial[historial["workflow_status"] == "Pendiente de revisión"]))
+        st.caption("Panel analítico consolidado para **Todas las Empresas**")
+
+    historial = obtener_historial(empresa_activa_nombre)
+
+    if historial.empty:
+        st.info("ℹ️ Aún no hay datos registradas para generar el análisis analítico.")
+    else:
+        # CALCULO DE KPIS GENERALES
+        total_conciliaciones = len(historial)
+        exitosas = len(historial[historial["resultado_final"].abs() < 0.005])
+        tasa_éxito = (exitosas / total_conciliaciones * 100) if total_conciliaciones > 0 else 0
+        monto_diferencias = historial["resultado_final"].abs().sum()
+
+        aprobadas_cnt = len(historial[historial["workflow_status"] == "Aprobada"])
+        pendientes_cnt = len(historial[historial["workflow_status"] == "Pendiente de revisión"])
+        borradores_cnt = len(historial[historial["workflow_status"] == "Borrador"])
+        devueltas_cnt = len(historial[historial["workflow_status"] == "Requiere corrección"])
+
+        # ALERTA DE CUENTAS PENDIENTES DEL MES ACTUAL
+        mes_actual_nombre = ["ENERO", "FEBRERO", "MARZO", "ABRIL", "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE", "OCTUBRE", "NOVIEMBRE", "DICIEMBRE"][datetime.now().month - 1]
+        mes_actual_txt = f"{mes_actual_nombre} {datetime.now().year}"
+
+        cuentas_totales_df = obtener_cuentas(empresa_activa_id)
+        cuentas_totales_cnt = len(cuentas_totales_df)
+        cuentas_conciliadas_mes = len(historial[historial["mes"].str.upper() == mes_actual_txt]["cuenta"].unique())
+        cuentas_pendientes_mes = max(0, cuentas_totales_cnt - cuentas_conciliadas_mes)
+
+        # 1. TARJETAS KPIS PRINCIPALES
+        st.subheader("📌 Indicadores Clave de Desempeño (KPIs)")
+        kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
+
+        with kpi_col1:
+            st.metric("Total Conciliaciones 📊", total_conciliaciones)
+        with kpi_col2:
+            st.metric("Tasa de Éxito Conciliatorio 🎯", f"{tasa_éxito:.1f}%", help="Porcentaje de cuentas cerradas sin diferencia ($0.00)")
+        with kpi_col3:
+            st.metric("Diferencia Total Pendiente 💰", f"${monto_diferencias:,.2f}")
+        with kpi_col4:
+            st.metric(f"Pendientes por Conciliar ({mes_actual_nombre}) ⚠️", cuentas_pendientes_mes, help=f"Cuentas que aún no tienen conciliación creada en {mes_actual_txt}")
+
         st.divider()
-        st.dataframe(historial[["id", "empresa", "mes", "banco", "resultado_final", "workflow_status"]].head(10), width="stretch", hide_index=True)
+
+        # 2. SEGUNDA FILA: WORKFLOW Y DISTRIBUCIÓN
+        col_wf, col_pie = st.columns([2, 2])
+
+        with col_wf:
+            st.markdown("**🔄 Estado del Flujo de Auditoría**")
+            w1, w2 = st.columns(2)
+            w1.metric("🔒 Aprobadas", aprobadas_cnt)
+            w2.metric("🕒 Pendientes de Revisión", pendientes_cnt)
+            w3, w4 = st.columns(2)
+            w3.metric("📝 Borradores", borradores_cnt)
+            w4.metric("❌ Devueltas / Corrección", devueltas_cnt)
+
+        with col_pie:
+            st.markdown("**🍩 Distribución por Estado de Revisión**")
+            df_pie = pd.DataFrame({
+                "Estado": ["Aprobada", "Pendiente de revisión", "Borrador", "Requiere corrección"],
+                "Cantidad": [aprobadas_cnt, pendientes_cnt, borradores_cnt, devueltas_cnt]
+            })
+            df_pie = df_pie[df_pie["Cantidad"] > 0]
+            if not df_pie.empty:
+                fig_pie = px.pie(
+                    df_pie, names="Estado", values="Cantidad",
+                    color="Estado",
+                    color_discrete_map={
+                        "Aprobada": "#2ECC71",
+                        "Pendiente de revisión": "#F39C12",
+                        "Borrador": "#3498DB",
+                        "Requiere corrección": "#E74C3C"
+                    },
+                    hole=0.4
+                )
+                fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=200)
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+        st.divider()
+
+        # 3. TENDENCIAS Y GASTOS BANCARIOS
+        st.subheader("📈 Análisis de Saldos y Gastos Bancarios")
+        tab_sal, tab_gastos = st.tabs(["📊 Evolución de Saldos", "💸 Desglose de Gastos Bancarios"])
+
+        with tab_sal:
+            if not historial.empty:
+                hist_graf = historial.copy()
+                hist_graf["saldo_extracto"] = pd.to_numeric(hist_graf["saldo_extracto"], errors="coerce").fillna(0)
+                hist_graf["saldo_libros"] = pd.to_numeric(hist_graf["saldo_libros"], errors="coerce").fillna(0)
+
+                fig_line = px.line(
+                    hist_graf, x="mes", y=["saldo_extracto", "saldo_libros"],
+                    color="banco", markers=True,
+                    labels={"value": "Monto ($)", "mes": "Mes / Año", "variable": "Tipo de Saldo"},
+                    title="Evolución de Saldo en Extracto vs Libros por Banco"
+                )
+                fig_line.update_layout(height=350)
+                st.plotly_chart(fig_line, use_container_width=True)
+
+        with tab_gastos:
+            # Extracción de gastos bancarios acumulados desde el JSON
+            gastos_totales = []
+            for _, r in historial.iterrows():
+                try:
+                    js = json.loads(r.get("datos_json", "{}"))
+                    gb = js.get("gastos_bancarios", [])
+                    for g in gb:
+                        g["Mes"] = r["mes"]
+                        g["Banco"] = r["banco"]
+                        gastos_totales.append(g)
+                except Exception:
+                    pass
+
+            if gastos_totales:
+                df_gb = pd.DataFrame(gastos_totales)
+                cols_num = ["4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
+                for c in cols_num:
+                    if c in df_gb.columns:
+                        df_gb[c] = pd.to_numeric(df_gb[c], errors="coerce").fillna(0)
+
+                df_gb_m = df_gb.groupby("Mes")[cols_num].sum().reset_index()
+                fig_bar_gb = px.bar(
+                    df_gb_m, x="Mes", y=cols_num,
+                    title="Gastos Bancarios Acumulados por Mes",
+                    barmode="stack"
+                )
+                fig_bar_gb.update_layout(height=350)
+                st.plotly_chart(fig_bar_gb, use_container_width=True)
+            else:
+                st.info("No se registran renglones de gastos bancarios en el historial seleccionado.")
+
+        st.divider()
+
+        # 4. TABLA DE ALERTAS Y CASOS CRÍTICOS
+        st.subheader("⚠️ Atención Prioritaria: Descuadres Mayores")
+        historial_des = historial[historial["resultado_final"].abs() > 0.005].sort_values(by="resultado_final", key=abs, ascending=False).head(5)
+        
+        if historial_des.empty:
+            st.success("🎉 ¡Excelente! No existen descuadres significativos en el historial activo.")
+        else:
+            historial_des["Consecutivo"] = historial_des["id"].apply(lambda x: f"CONC-{int(x):06d}")
+            st.dataframe(
+                historial_des[["Consecutivo", "empresa", "mes", "banco", "cuenta", "resultado_final", "workflow_status"]],
+                width="stretch",
+                hide_index=True
+            )
 
 
 elif menu_seleccionado == "🏢 Empresas":
@@ -1655,7 +1784,6 @@ elif menu_seleccionado == "📚 Historial":
             res_fin = fila.get("resultado_final", 0.0)
             wf_status = fila.get("workflow_status", "Pendiente de revisión")
             
-            # CONSECUTIVO ÚNICO DE GESTIÓN Y CONTROL
             consecutivo_str = f"CONC-{int(fila['id']):06d}"
 
             badge_status = {
@@ -1694,11 +1822,9 @@ elif menu_seleccionado == "📚 Historial":
                         "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
                     )
 
-                # BOTONES DE ACCIÓN (EDITAR, ELIMINAR BORRADOR, EXCEL, PDF)
                 cols_acciones = st.columns(4 if wf_status == "Borrador" else 3)
                 
                 with cols_acciones[0]:
-                    # BOTÓN DE EDICIÓN CON REDIRECCIÓN DIRECTA A "NUEVA CONCILIACIÓN"
                     if st.button(f"✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}", width="stretch"):
                         st.session_state.conciliacion_a_editar = fila['id']
                         if "datos_cargados_edit" in st.session_state:
@@ -1728,7 +1854,6 @@ elif menu_seleccionado == "📚 Historial":
                     nombre_pdf = f"CONCILIACION_{consecutivo_str}_{limpiar_nombre_archivo(c_data.get('empresa'))}_{limpiar_nombre_archivo(c_data.get('mes'))}.pdf"
                     st.download_button("📥 Descargar PDF (.pdf)", data=pdf_bytes, file_name=nombre_pdf, mime="application/pdf", key=f"down_pdf_{fila['id']}", width="stretch")
 
-                # CONFIRMACIÓN DE ELIMINACIÓN DE BORRADOR
                 if st.session_state.get(f"confirm_del_conc_{fila['id']}", False):
                     st.warning(f"⚠️ ¿Estás seguro de eliminar permanentemente el Borrador **{consecutivo_str}**?")
                     col_si, col_no = st.columns(2)
