@@ -88,10 +88,14 @@ def inicializar_db():
             CREATE TABLE IF NOT EXISTS empresas (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 nombre TEXT NOT NULL UNIQUE,
-                nit TEXT NOT NULL
+                nit TEXT NOT NULL,
+                logo BLOB
             )
             """
         )
+        cols_emp = {fila[1] for fila in conn.execute("PRAGMA table_info(empresas)").fetchall()}
+        if "logo" not in cols_emp:
+            conn.execute("ALTER TABLE empresas ADD COLUMN logo BLOB")
 
         conn.execute(
             """
@@ -137,9 +141,19 @@ def obtener_empresas():
     with conectar_db() as conn:
         return pd.read_sql_query("SELECT id, nombre, nit FROM empresas ORDER BY nombre", conn)
 
-def guardar_empresa(nombre, nit):
+def obtener_logo_empresa(nombre_empresa):
     with conectar_db() as conn:
-        conn.execute("INSERT INTO empresas (nombre, nit) VALUES (?, ?)", (nombre.strip(), nit.strip()))
+        res = conn.execute("SELECT logo FROM empresas WHERE nombre = ?", (nombre_empresa,)).fetchone()
+        if res and res[0]:
+            return res[0]
+    return None
+
+def guardar_empresa(nombre, nit, logo_bytes=None):
+    with conectar_db() as conn:
+        if logo_bytes:
+            conn.execute("INSERT INTO empresas (nombre, nit, logo) VALUES (?, ?, ?)", (nombre.strip(), nit.strip(), sqlite3.Binary(logo_bytes)))
+        else:
+            conn.execute("INSERT INTO empresas (nombre, nit) VALUES (?, ?)", (nombre.strip(), nit.strip()))
         conn.commit()
 
 def obtener_cuentas(empresa_id=None):
@@ -1038,13 +1052,19 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                         "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
                     )
 
-                st.markdown(
-                    f"""
-                    <div style="background-color: #1F4E78; color: white; padding: 12px; text-align: center; border-radius: 5px; font-weight: bold; font-size: 18px;">
-                        CONCILIACIÓN - {tipo_cta.upper()}
-                    </div>
-                    """, unsafe_allow_html=True
-                )
+                col_tit, col_lg = st.columns([4, 1])
+                with col_tit:
+                    st.markdown(
+                        f"""
+                        <div style="background-color: #1F4E78; color: white; padding: 12px; text-align: center; border-radius: 5px; font-weight: bold; font-size: 18px;">
+                            CONCILIACIÓN - {tipo_cta.upper()}
+                        </div>
+                        """, unsafe_allow_html=True
+                    )
+                with col_lg:
+                    logo_aud = obtener_logo_empresa(c_data.get("empresa"))
+                    if logo_aud:
+                        st.image(logo_aud, width=110)
 
                 col_inf1, col_inf2 = st.columns(2)
                 with col_inf1:
@@ -1124,12 +1144,15 @@ elif menu_seleccionado == "📊 Dashboard":
 elif menu_seleccionado == "🏢 Empresas":
     st.title("🏢 Maestro de Empresas")
     if rol_actual == "Administrador":
-        with st.expander("➕ Registrar nueva empresa"):
+        with st.expander("➕ Registrar nueva empresa con Logo"):
             with st.form("form_empresa_maestro"):
                 nom = st.text_input("Nombre de la empresa")
                 nit = st.text_input("NIT")
+                logo_file = st.file_uploader("Logo de la Empresa (PNG, JPG)", type=["png", "jpg", "jpeg"])
                 if st.form_submit_button("Guardar Empresa", type="primary"):
-                    guardar_empresa(nom, nit)
+                    logo_b = logo_file.getvalue() if logo_file else None
+                    guardar_empresa(nom, nit, logo_b)
+                    st.success("Empresa registrada con éxito.")
                     st.rerun()
     st.dataframe(obtener_empresas(), width="stretch", hide_index=True)
 
@@ -1187,73 +1210,82 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 pass
             st.session_state.datos_cargados_edit = True
 
-    st.subheader("Información General")
-    col1, col2 = st.columns(2)
+    # ENCABEZADO CON LOGO DE LA EMPRESA
+    col_info_emp, col_logo_emp = st.columns([3, 1])
 
-    with col1:
-        if id_edicion:
-            c_edit = obtener_conciliacion_por_id(id_edicion)
-            empresa = c_edit.get("empresa", "")
-            nit = c_edit.get("nit", "")
-            mes = c_edit.get("mes", "")
-            st.text_input("Empresa", value=empresa, disabled=True)
-            st.text_input("NIT", value=nit, disabled=True)
-            st.text_input("Mes / Año", value=mes, disabled=True)
-            fecha_elaboracion = st.date_input("Fecha de elaboración", key="form_fecha_elaboracion_edit")
-        else:
-            if empresa_activa_nombre != "Todas las empresas" and empresa_activa_nombre != "Sin asignar":
-                empresa = empresa_activa_nombre
-                nit = empresa_activa_nit
-                st.text_input("Empresa Seleccionada", value=empresa, disabled=True)
+    with col_info_emp:
+        st.subheader("Información General")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            if id_edicion:
+                c_edit = obtener_conciliacion_por_id(id_edicion)
+                empresa = c_edit.get("empresa", "")
+                nit = c_edit.get("nit", "")
+                mes = c_edit.get("mes", "")
+                st.text_input("Empresa", value=empresa, disabled=True)
                 st.text_input("NIT", value=nit, disabled=True)
-            elif not empresas_df.empty:
-                empresa_obj = st.selectbox("Empresa Registrada", empresas_df["nombre"].tolist())
-                empresa = empresa_obj
-                nit = empresas_df.loc[empresas_df["nombre"] == empresa_obj, "nit"].values[0]
-                empresa_activa_id = empresas_df.loc[empresas_df["nombre"] == empresa_obj, "id"].values[0]
-                st.text_input("NIT", value=nit, disabled=True)
+                st.text_input("Mes / Año", value=mes, disabled=True)
+                fecha_elaboracion = st.date_input("Fecha de elaboración", key="form_fecha_elaboracion_edit")
             else:
-                empresa = st.text_input("Nombre de la Empresa", key="form_empresa")
-                nit = st.text_input("NIT", key="form_nit")
+                if empresa_activa_nombre != "Todas las empresas" and empresa_activa_nombre != "Sin asignar":
+                    empresa = empresa_activa_nombre
+                    nit = empresa_activa_nit
+                    st.text_input("Empresa Seleccionada", value=empresa, disabled=True)
+                    st.text_input("NIT", value=nit, disabled=True)
+                elif not empresas_df.empty:
+                    empresa_obj = st.selectbox("Empresa Registrada", empresas_df["nombre"].tolist())
+                    empresa = empresa_obj
+                    nit = empresas_df.loc[empresas_df["nombre"] == empresa_obj, "nit"].values[0]
+                    empresa_activa_id = empresas_df.loc[empresas_df["nombre"] == empresa_obj, "id"].values[0]
+                    st.text_input("NIT", value=nit, disabled=True)
+                else:
+                    empresa = st.text_input("Nombre de la Empresa", key="form_empresa")
+                    nit = st.text_input("NIT", key="form_nit")
 
-            mes_nombre = st.selectbox("Mes a Conciliar", [
-                "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-                "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
-            ], index=datetime.now().month - 1)
-            
-            mes_num = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"].index(mes_nombre) + 1
-            anio = st.number_input("Año", value=datetime.now().year, step=1)
-            mes = f"{mes_nombre.upper()} {anio}"
-            fecha_elaboracion = st.date_input("Fecha de elaboración", key="form_fecha_elaboracion")
+                mes_nombre = st.selectbox("Mes a Conciliar", [
+                    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+                    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+                ], index=datetime.now().month - 1)
+                
+                mes_num = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"].index(mes_nombre) + 1
+                anio = st.number_input("Año", value=datetime.now().year, step=1)
+                mes = f"{mes_nombre.upper()} {anio}"
+                fecha_elaboracion = st.date_input("Fecha de elaboración", key="form_fecha_elaboracion")
 
-    with col2:
-        if id_edicion:
-            c_edit = obtener_conciliacion_por_id(id_edicion)
-            banco = c_edit.get("banco", "")
-            cuenta = c_edit.get("cuenta", "")
-            tipo = c_edit.get("tipo", "Cuenta de ahorros")
-            st.text_input("Banco", value=banco, disabled=True)
-            st.text_input("Cuenta / Tarjeta", value=cuenta, disabled=True)
-            st.text_input("Tipo", value=tipo, disabled=True)
-        else:
-            cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(
-                empresa_activa_id, mes_num, usuario_actual["id"]
-            )
-            if not cuentas_asig_df.empty:
-                st.info("🔄 **Cuentas a conciliar en este período:**")
-                cta_sel = st.selectbox(
-                    "Cuenta / Tarjeta Registrada",
-                    cuentas_asig_df["id"].tolist(),
-                    format_func=lambda x: f"{cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'banco'].values[0]} - {cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'numero_cuenta'].values[0]} ({cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'tipo_cuenta'].values[0]})"
+        with col2:
+            if id_edicion:
+                c_edit = obtener_conciliacion_por_id(id_edicion)
+                banco = c_edit.get("banco", "")
+                cuenta = c_edit.get("cuenta", "")
+                tipo = c_edit.get("tipo", "Cuenta de ahorros")
+                st.text_input("Banco", value=banco, disabled=True)
+                st.text_input("Cuenta / Tarjeta", value=cuenta, disabled=True)
+                st.text_input("Tipo", value=tipo, disabled=True)
+            else:
+                cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(
+                    empresa_activa_id, mes_num, usuario_actual["id"]
                 )
-                banco = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "banco"].values[0]
-                cuenta = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "numero_cuenta"].values[0]
-                tipo = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "tipo_cuenta"].values[0]
-            else:
-                st.warning("No hay cuentas asignadas o registradas para esta empresa.")
-                banco = st.text_input("Nombre del Banco", key="form_banco")
-                cuenta = st.text_input("Número de Cuenta", key="form_cuenta")
-                tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"], key="form_tipo")
+                if not cuentas_asig_df.empty:
+                    st.info("🔄 **Cuentas a conciliar en este período:**")
+                    cta_sel = st.selectbox(
+                        "Cuenta / Tarjeta Registrada",
+                        cuentas_asig_df["id"].tolist(),
+                        format_func=lambda x: f"{cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'banco'].values[0]} - {cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'numero_cuenta'].values[0]} ({cuentas_asig_df.loc[cuentas_asig_df['id']==x, 'tipo_cuenta'].values[0]})"
+                    )
+                    banco = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "banco"].values[0]
+                    cuenta = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "numero_cuenta"].values[0]
+                    tipo = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "tipo_cuenta"].values[0]
+                else:
+                    st.warning("No hay cuentas asignadas o registradas para esta empresa.")
+                    banco = st.text_input("Nombre del Banco", key="form_banco")
+                    cuenta = st.text_input("Número de Cuenta", key="form_cuenta")
+                    tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"], key="form_tipo")
+
+    with col_logo_emp:
+        logo_bytes = obtener_logo_empresa(empresa)
+        if logo_bytes:
+            st.image(logo_bytes, caption=f"Logo - {empresa}", width=150)
 
     es_tc = "tarjeta" in tipo.lower() or "crédito" in tipo.lower() or "credito" in tipo.lower()
 
@@ -1288,7 +1320,16 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.metric("Diferencia a Justificar", f"${diferencia_inicial:,.2f}")
 
     # =========================================================
-    # PEGADO DIRECTO EN LOS ÍTEMS DE CADA TABLA
+    # BOTÓN GENERAL DE RECALCULO / ACTUALIZACIÓN
+    # =========================================================
+    st.divider()
+    col_act1, col_act2 = st.columns([3, 1])
+    with col_act2:
+        if st.button("🔄 Actualizar y Recalcular Conciliación", width="stretch", type="secondary"):
+            st.rerun()
+
+    # =========================================================
+    # TABLAS DE ÍTEMS CON PEGADO Y ELIMINACIÓN
     # =========================================================
 
     st.divider()
@@ -1297,16 +1338,19 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.session_state.tabla1 = salidas_extracto
 
     cols_t1 = ["Fecha", "Beneficiario", "Documento", "Valor"]
-    c_p1, c_b1 = st.columns([3, 1])
+    c_p1, c_b1, c_del1 = st.columns([3, 1, 1])
     with c_p1:
-        txt_t1 = st.text_input("📋 Pegar ítems desde Excel para este Ítem 1 (Fecha | Beneficiario | Documento | Valor):", key="paste_t1")
+        txt_t1 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Beneficiario | Documento | Valor):", key="paste_t1")
     with c_b1:
         if st.button("➕ Cargar Ítems", key="btn_parse_t1"):
             df_p1 = parsear_texto_pegado(txt_t1, cols_t1)
             if df_p1 is not None:
                 st.session_state.tabla1 = pd.concat([st.session_state.tabla1, df_p1], ignore_index=True)
-                st.success("Ítems pegados.")
                 st.rerun()
+    with c_del1:
+        if st.button("🗑️ Limpiar Ítem 1", key="btn_del_t1"):
+            st.session_state.tabla1 = pd.DataFrame(columns=cols_t1)
+            st.rerun()
 
     st.divider()
     st.subheader(f"2. {nombres_titulos['t2']}")
@@ -1314,16 +1358,19 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.session_state.tabla2 = salidas_libros
 
     cols_t2 = ["Fecha", "Concepto", "Valor"]
-    c_p2, c_b2 = st.columns([3, 1])
+    c_p2, c_b2, c_del2 = st.columns([3, 1, 1])
     with c_p2:
-        txt_t2 = st.text_input("📋 Pegar ítems desde Excel para este Ítem 2 (Fecha | Concepto | Valor):", key="paste_t2")
+        txt_t2 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t2")
     with c_b2:
         if st.button("➕ Cargar Ítems", key="btn_parse_t2"):
             df_p2 = parsear_texto_pegado(txt_t2, cols_t2)
             if df_p2 is not None:
                 st.session_state.tabla2 = pd.concat([st.session_state.tabla2, df_p2], ignore_index=True)
-                st.success("Ítems pegados.")
                 st.rerun()
+    with c_del2:
+        if st.button("🗑️ Limpiar Ítem 2", key="btn_del_t2"):
+            st.session_state.tabla2 = pd.DataFrame(columns=cols_t2)
+            st.rerun()
 
     st.divider()
     st.subheader(f"3. {nombres_titulos['t3']}")
@@ -1331,16 +1378,19 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.session_state.tabla3 = entradas_libros
 
     cols_t3 = ["Fecha", "Concepto", "Valor"]
-    c_p3, c_b3 = st.columns([3, 1])
+    c_p3, c_b3, c_del3 = st.columns([3, 1, 1])
     with c_p3:
-        txt_t3 = st.text_input("📋 Pegar ítems desde Excel para este Ítem 3 (Fecha | Concepto | Valor):", key="paste_t3")
+        txt_t3 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t3")
     with c_b3:
         if st.button("➕ Cargar Ítems", key="btn_parse_t3"):
             df_p3 = parsear_texto_pegado(txt_t3, cols_t3)
             if df_p3 is not None:
                 st.session_state.tabla3 = pd.concat([st.session_state.tabla3, df_p3], ignore_index=True)
-                st.success("Ítems pegados.")
                 st.rerun()
+    with c_del3:
+        if st.button("🗑️ Limpiar Ítem 3", key="btn_del_t3"):
+            st.session_state.tabla3 = pd.DataFrame(columns=cols_t3)
+            st.rerun()
 
     st.divider()
     st.subheader(f"4. {nombres_titulos['t4']}")
@@ -1348,16 +1398,19 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.session_state.tabla4 = entradas_extracto
 
     cols_t4 = ["Fecha", "Concepto", "Valor"]
-    c_p4, c_b4 = st.columns([3, 1])
+    c_p4, c_b4, c_del4 = st.columns([3, 1, 1])
     with c_p4:
-        txt_t4 = st.text_input("📋 Pegar ítems desde Excel para este Ítem 4 (Fecha | Concepto | Valor):", key="paste_t4")
+        txt_t4 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t4")
     with c_b4:
         if st.button("➕ Cargar Ítems", key="btn_parse_t4"):
             df_p4 = parsear_texto_pegado(txt_t4, cols_t4)
             if df_p4 is not None:
                 st.session_state.tabla4 = pd.concat([st.session_state.tabla4, df_p4], ignore_index=True)
-                st.success("Ítems pegados.")
                 st.rerun()
+    with c_del4:
+        if st.button("🗑️ Limpiar Ítem 4", key="btn_del_t4"):
+            st.session_state.tabla4 = pd.DataFrame(columns=cols_t4)
+            st.rerun()
 
     st.divider()
     st.subheader("Gastos Bancarios")
@@ -1365,7 +1418,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.session_state.tabla5 = gastos_bancarios
 
     cols_t5 = ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
-    c_p5, c_b5 = st.columns([3, 1])
+    c_p5, c_b5, c_del5 = st.columns([3, 1, 1])
     with c_p5:
         txt_t5 = st.text_input("📋 Pegar ítems desde Excel para Gastos Bancarios:", key="paste_t5")
     with c_b5:
@@ -1373,8 +1426,11 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             df_p5 = parsear_texto_pegado(txt_t5, cols_t5)
             if df_p5 is not None:
                 st.session_state.tabla5 = pd.concat([st.session_state.tabla5, df_p5], ignore_index=True)
-                st.success("Ítems pegados.")
                 st.rerun()
+    with c_del5:
+        if st.button("🗑️ Limpiar Gastos", key="btn_del_t5"):
+            st.session_state.tabla5 = pd.DataFrame(columns=cols_t5)
+            st.rerun()
 
     # CÁLCULO DE LA CONCILIACIÓN
     m1 = total_columna(salidas_extracto)
@@ -1487,13 +1543,19 @@ elif menu_seleccionado == "📚 Historial":
 
                 st.divider()
 
-                st.markdown(
-                    f"""
-                    <div style="background-color: #1F4E78; color: white; padding: 10px; text-align: center; border-radius: 5px; font-weight: bold; font-size: 16px;">
-                        VISTA VIRTUAL FORMATO OFICIAL - CONCILIACIÓN {tipo_cta.upper()}
-                    </div>
-                    """, unsafe_allow_html=True
-                )
+                col_tit_h, col_lg_h = st.columns([4, 1])
+                with col_tit_h:
+                    st.markdown(
+                        f"""
+                        <div style="background-color: #1F4E78; color: white; padding: 10px; text-align: center; border-radius: 5px; font-weight: bold; font-size: 16px;">
+                            VISTA VIRTUAL FORMATO OFICIAL - CONCILIACIÓN {tipo_cta.upper()}
+                        </div>
+                        """, unsafe_allow_html=True
+                    )
+                with col_lg_h:
+                    logo_h = obtener_logo_empresa(c_data.get("empresa"))
+                    if logo_h:
+                        st.image(logo_h, width=110)
 
                 col_inf1, col_inf2 = st.columns(2)
                 with col_inf1:
