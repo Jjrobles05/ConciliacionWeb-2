@@ -25,29 +25,20 @@ st.set_page_config(
 # ==========================================
 def conectar_db():
     """
-    Intenta conectar a la base de datos persistente en la nube (Turso).
-    Soporta múltiples conectores (libsql_client, libsql_experimental).
-    Si ocurre cualquier error o se ejecuta localmente, utiliza SQLite local como respaldo.
+    Conecta a la base de datos persistente en Turso utilizando libsql-experimental
+    para mantener total compatibilidad con cursores SQLite.
+    Si no hay credenciales o falla, utiliza SQLite local como respaldo.
     """
     if "TURSO_DATABASE_URL" in st.secrets and "TURSO_AUTH_TOKEN" in st.secrets:
         url = st.secrets["TURSO_DATABASE_URL"]
         token = st.secrets["TURSO_AUTH_TOKEN"]
         
-        # Intentar conectar con libsql_client (Conector HTTP ultraligero)
-        try:
-            import libsql_client
-            return libsql_client.create_client_sync(url=url, auth_token=token)
-        except Exception:
-            pass
-            
-        # Intentar conectar con libsql_experimental
         try:
             import libsql_experimental as libsql
             return libsql.connect(database=url, auth_token=token)
-        except Exception:
-            pass
-
-    # Respaldo a SQLite local
+        except Exception as e:
+            st.warning(f"⚠️ Error conectando a Turso: {e}. Usando respaldo local.")
+            
     return sqlite3.connect("conciliaciones.db")
 
 def inicializar_bd():
@@ -136,10 +127,8 @@ def inicializar_bd():
             )
         ''')
         
-        if hasattr(conn, 'commit'):
-            conn.commit()
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.commit()
+        conn.close()
     except Exception as e:
         st.error(f"Error al inicializar la base de datos: {e}")
 
@@ -156,8 +145,7 @@ def contar_usuarios():
         c.execute("SELECT COUNT(*) FROM usuarios")
         res = c.fetchone()
         total = res[0] if res else 0
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.close()
         return total
     except Exception:
         return 0
@@ -168,8 +156,7 @@ def verificar_credenciales(username, password):
         c = conn.cursor()
         c.execute("SELECT id, username, nombre, rol, empresa_id FROM usuarios WHERE username = ? AND password = ?", (username, password))
         user = c.fetchone()
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.close()
         return user
     except Exception:
         return None
@@ -180,10 +167,8 @@ def registrar_usuario(username, nombre, password, rol, empresa_id=None):
         c = conn.cursor()
         c.execute("INSERT INTO usuarios (username, nombre, password, rol, empresa_id) VALUES (?, ?, ?, ?, ?)",
                   (username, nombre, password, rol, empresa_id))
-        if hasattr(conn, 'commit'):
-            conn.commit()
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.commit()
+        conn.close()
         return True
     except Exception:
         return False
@@ -192,8 +177,7 @@ def obtener_empresas():
     try:
         conn = conectar_db()
         df = pd.read_sql_query("SELECT * FROM empresas", conn)
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.close()
         return df
     except Exception:
         return pd.DataFrame(columns=['id', 'nit', 'razon_social'])
@@ -203,10 +187,8 @@ def registrar_empresa(nit, razon_social):
         conn = conectar_db()
         c = conn.cursor()
         c.execute("INSERT INTO empresas (nit, razon_social) VALUES (?, ?)", (nit, razon_social))
-        if hasattr(conn, 'commit'):
-            conn.commit()
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.commit()
+        conn.close()
         return True
     except Exception:
         return False
@@ -217,10 +199,8 @@ def registrar_cuenta(empresa_id, banco, numero_cuenta, tipo_cuenta):
         c = conn.cursor()
         c.execute("INSERT INTO cuentas (empresa_id, banco, numero_cuenta, tipo_cuenta) VALUES (?, ?, ?, ?)",
                   (empresa_id, banco, numero_cuenta, tipo_cuenta))
-        if hasattr(conn, 'commit'):
-            conn.commit()
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.commit()
+        conn.close()
     except Exception as e:
         st.error(f"Error al registrar la cuenta: {e}")
 
@@ -228,8 +208,7 @@ def obtener_cuentas_empresa(empresa_id):
     try:
         conn = conectar_db()
         df = pd.read_sql_query("SELECT * FROM cuentas WHERE empresa_id = ?", conn, params=(empresa_id,))
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.close()
         return df
     except Exception:
         return pd.DataFrame(columns=['id', 'empresa_id', 'banco', 'numero_cuenta', 'tipo_cuenta'])
@@ -258,10 +237,8 @@ def registrar_conciliacion(empresa_id, cuenta_id, periodo, saldo_libro, saldo_ba
             VALUES (?, ?, 'Creada y Enviada a Revisión', ?, 'Conciliación registrada')
         ''', (conciliacion_id, preparado_por, fecha_hoy))
         
-        if hasattr(conn, 'commit'):
-            conn.commit()
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.commit()
+        conn.close()
         return conciliacion_id
     except Exception as e:
         st.error(f"Error al guardar conciliación: {e}")
@@ -282,8 +259,7 @@ def obtener_conciliaciones(empresa_id=None):
             query += f" WHERE c.empresa_id = {empresa_id}"
         query += " ORDER BY c.id DESC"
         df = pd.read_sql_query(query, conn)
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.close()
         return df
     except Exception:
         return pd.DataFrame()
@@ -305,10 +281,8 @@ def actualizar_dictamen_conciliacion(conciliacion_id, usuario, nuevo_estado, dic
             VALUES (?, ?, ?, ?, ?)
         ''', (conciliacion_id, usuario, f"Dictamen: {nuevo_estado}", fecha_hoy, f"{dictamen} - {observaciones}"))
         
-        if hasattr(conn, 'commit'):
-            conn.commit()
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.commit()
+        conn.close()
     except Exception as e:
         st.error(f"Error al actualizar dictamen: {e}")
 
@@ -316,8 +290,7 @@ def obtener_partidas(conciliacion_id):
     try:
         conn = conectar_db()
         df = pd.read_sql_query("SELECT * FROM partidas_conciliatorias WHERE conciliacion_id = ?", conn, params=(conciliacion_id,))
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.close()
         return df
     except Exception:
         return pd.DataFrame()
@@ -326,8 +299,7 @@ def obtener_bitacora(conciliacion_id):
     try:
         conn = conectar_db()
         df = pd.read_sql_query("SELECT * FROM bitacora_auditoria WHERE conciliacion_id = ? ORDER BY id DESC", conn, params=(conciliacion_id,))
-        if hasattr(conn, 'close'):
-            conn.close()
+        conn.close()
         return df
     except Exception:
         return pd.DataFrame()
