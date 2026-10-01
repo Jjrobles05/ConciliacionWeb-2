@@ -212,11 +212,10 @@ def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
 
 
 # =========================================================
-# FUNCIÓN DE PARSEO DE COPIAR Y PEGAR MASIVO (TAB-SEPARATED)
+# FUNCIÓN PARA PEGAR ÍTEMS DE EXCEL DIRECTAMENTE
 # =========================================================
 
 def parsear_texto_pegado(texto, columnas_esperadas):
-    """Parsea texto copiado de Excel / hojas de cálculo separadas por tabuladores o comas."""
     if not texto or not texto.strip():
         return None
     lines = [l.strip() for l in texto.strip().splitlines() if l.strip()]
@@ -225,7 +224,6 @@ def parsear_texto_pegado(texto, columnas_esperadas):
         parts = line.split('\t') if '\t' in line else line.split(',')
         parts = [p.strip() for p in parts]
         
-        # Ajustar al número de columnas esperadas
         if len(parts) < len(columnas_esperadas):
             parts += [""] * (len(columnas_esperadas) - len(parts))
         else:
@@ -1290,83 +1288,93 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.metric("Diferencia a Justificar", f"${diferencia_inicial:,.2f}")
 
     # =========================================================
-    # JUSTIFICACIONES CON OPCIÓN DE PEGADO MASIVO (COPY - PASTE)
+    # PEGADO DIRECTO EN LOS ÍTEMS DE CADA TABLA
     # =========================================================
 
     st.divider()
     st.subheader(f"1. {nombres_titulos['t1']}")
-    cols_t1 = ["Fecha", "Beneficiario", "Documento", "Valor"]
-    with st.expander("📋 Pegar datos masivamente desde Excel para esta sección"):
-        txt_t1 = st.text_area("Copia de Excel (filas/columnas) y pega aquí:", key="paste_t1", help="Columnas esperadas: Fecha | Beneficiario | Documento | Valor")
-        if st.button("📥 Importar datos a la Tabla 1", key="btn_parse_t1"):
-            df_p1 = parsear_texto_pegado(txt_t1, cols_t1)
-            if df_p1 is not None:
-                st.session_state.tabla1 = df_p1
-                st.success("✅ Datos pegados con éxito.")
-                st.rerun()
-
     salidas_extracto = st.data_editor(st.session_state.tabla1, num_rows="dynamic", width="stretch", key="editor_tabla1")
     st.session_state.tabla1 = salidas_extracto
 
-    st.divider()
-    st.subheader(f"2. {nombres_titulos['t2']}")
-    cols_t2 = ["Fecha", "Concepto", "Valor"]
-    with st.expander("📋 Pegar datos masivamente desde Excel para esta sección"):
-        txt_t2 = st.text_area("Copia de Excel y pega aquí:", key="paste_t2", help="Columnas esperadas: Fecha | Concepto | Valor")
-        if st.button("📥 Importar datos a la Tabla 2", key="btn_parse_t2"):
-            df_p2 = parsear_texto_pegado(txt_t2, cols_t2)
-            if df_p2 is not None:
-                st.session_state.tabla2 = df_p2
-                st.success("✅ Datos pegados con éxito.")
+    cols_t1 = ["Fecha", "Beneficiario", "Documento", "Valor"]
+    c_p1, c_b1 = st.columns([3, 1])
+    with c_p1:
+        txt_t1 = st.text_input("📋 Pegar ítems desde Excel para este Ítem 1 (Fecha | Beneficiario | Documento | Valor):", key="paste_t1")
+    with c_b1:
+        if st.button("➕ Cargar Ítems", key="btn_parse_t1"):
+            df_p1 = parsear_texto_pegado(txt_t1, cols_t1)
+            if df_p1 is not None:
+                st.session_state.tabla1 = pd.concat([st.session_state.tabla1, df_p1], ignore_index=True)
+                st.success("Ítems pegados.")
                 st.rerun()
 
+    st.divider()
+    st.subheader(f"2. {nombres_titulos['t2']}")
     salidas_libros = st.data_editor(st.session_state.tabla2, num_rows="dynamic", width="stretch", key="editor_tabla2")
     st.session_state.tabla2 = salidas_libros
 
-    st.divider()
-    st.subheader(f"3. {nombres_titulos['t3']}")
-    cols_t3 = ["Fecha", "Concepto", "Valor"]
-    with st.expander("📋 Pegar datos masivamente desde Excel para esta sección"):
-        txt_t3 = st.text_area("Copia de Excel y pega aquí:", key="paste_t3", help="Columnas esperadas: Fecha | Concepto | Valor")
-        if st.button("📥 Importar datos a la Tabla 3", key="btn_parse_t3"):
-            df_p3 = parsear_texto_pegado(txt_t3, cols_t3)
-            if df_p3 is not None:
-                st.session_state.tabla3 = df_p3
-                st.success("✅ Datos pegados con éxito.")
+    cols_t2 = ["Fecha", "Concepto", "Valor"]
+    c_p2, c_b2 = st.columns([3, 1])
+    with c_p2:
+        txt_t2 = st.text_input("📋 Pegar ítems desde Excel para este Ítem 2 (Fecha | Concepto | Valor):", key="paste_t2")
+    with c_b2:
+        if st.button("➕ Cargar Ítems", key="btn_parse_t2"):
+            df_p2 = parsear_texto_pegado(txt_t2, cols_t2)
+            if df_p2 is not None:
+                st.session_state.tabla2 = pd.concat([st.session_state.tabla2, df_p2], ignore_index=True)
+                st.success("Ítems pegados.")
                 st.rerun()
 
+    st.divider()
+    st.subheader(f"3. {nombres_titulos['t3']}")
     entradas_libros = st.data_editor(st.session_state.tabla3, num_rows="dynamic", width="stretch", key="editor_tabla3")
     st.session_state.tabla3 = entradas_libros
 
-    st.divider()
-    st.subheader(f"4. {nombres_titulos['t4']}")
-    cols_t4 = ["Fecha", "Concepto", "Valor"]
-    with st.expander("📋 Pegar datos masivamente desde Excel para esta sección"):
-        txt_t4 = st.text_area("Copia de Excel y pega aquí:", key="paste_t4", help="Columnas esperadas: Fecha | Concepto | Valor")
-        if st.button("📥 Importar datos a la Tabla 4", key="btn_parse_t4"):
-            df_p4 = parsear_texto_pegado(txt_t4, cols_t4)
-            if df_p4 is not None:
-                st.session_state.tabla4 = df_p4
-                st.success("✅ Datos pegados con éxito.")
+    cols_t3 = ["Fecha", "Concepto", "Valor"]
+    c_p3, c_b3 = st.columns([3, 1])
+    with c_p3:
+        txt_t3 = st.text_input("📋 Pegar ítems desde Excel para este Ítem 3 (Fecha | Concepto | Valor):", key="paste_t3")
+    with c_b3:
+        if st.button("➕ Cargar Ítems", key="btn_parse_t3"):
+            df_p3 = parsear_texto_pegado(txt_t3, cols_t3)
+            if df_p3 is not None:
+                st.session_state.tabla3 = pd.concat([st.session_state.tabla3, df_p3], ignore_index=True)
+                st.success("Ítems pegados.")
                 st.rerun()
 
+    st.divider()
+    st.subheader(f"4. {nombres_titulos['t4']}")
     entradas_extracto = st.data_editor(st.session_state.tabla4, num_rows="dynamic", width="stretch", key="editor_tabla4")
     st.session_state.tabla4 = entradas_extracto
 
-    st.divider()
-    st.subheader("Gastos Bancarios")
-    cols_t5 = ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
-    with st.expander("📋 Pegar datos masivamente desde Excel para esta sección"):
-        txt_t5 = st.text_area("Copia de Excel y pega aquí:", key="paste_t5", help="Columnas esperadas: Fecha | 4x1000 | Cuota Manejo | IVA | Rte.Fuente | Comisión | Intereses")
-        if st.button("📥 Importar datos a Gastos Bancarios", key="btn_parse_t5"):
-            df_p5 = parsear_texto_pegado(txt_t5, cols_t5)
-            if df_p5 is not None:
-                st.session_state.tabla5 = df_p5
-                st.success("✅ Datos pegados con éxito.")
+    cols_t4 = ["Fecha", "Concepto", "Valor"]
+    c_p4, c_b4 = st.columns([3, 1])
+    with c_p4:
+        txt_t4 = st.text_input("📋 Pegar ítems desde Excel para este Ítem 4 (Fecha | Concepto | Valor):", key="paste_t4")
+    with c_b4:
+        if st.button("➕ Cargar Ítems", key="btn_parse_t4"):
+            df_p4 = parsear_texto_pegado(txt_t4, cols_t4)
+            if df_p4 is not None:
+                st.session_state.tabla4 = pd.concat([st.session_state.tabla4, df_p4], ignore_index=True)
+                st.success("Ítems pegados.")
                 st.rerun()
 
+    st.divider()
+    st.subheader("Gastos Bancarios")
     gastos_bancarios = st.data_editor(st.session_state.tabla5, num_rows="dynamic", width="stretch", key="editor_tabla5")
     st.session_state.tabla5 = gastos_bancarios
+
+    cols_t5 = ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
+    c_p5, c_b5 = st.columns([3, 1])
+    with c_p5:
+        txt_t5 = st.text_input("📋 Pegar ítems desde Excel para Gastos Bancarios:", key="paste_t5")
+    with c_b5:
+        if st.button("➕ Cargar Ítems", key="btn_parse_t5"):
+            df_p5 = parsear_texto_pegado(txt_t5, cols_t5)
+            if df_p5 is not None:
+                st.session_state.tabla5 = pd.concat([st.session_state.tabla5, df_p5], ignore_index=True)
+                st.success("Ítems pegados.")
+                st.rerun()
 
     # CÁLCULO DE LA CONCILIACIÓN
     m1 = total_columna(salidas_extracto)
