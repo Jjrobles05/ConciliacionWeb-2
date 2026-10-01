@@ -66,7 +66,7 @@ class TursoConnectionWrapper:
         return TursoCursorWrapper(self.client)
 
     def commit(self):
-        pass  # libsql_client realiza commit automático en cada sentencia
+        pass
 
     def close(self):
         try:
@@ -83,7 +83,6 @@ def conectar_db():
         url = st.secrets["TURSO_DATABASE_URL"]
         token = st.secrets["TURSO_AUTH_TOKEN"]
         
-        # Corregir prefijo libsql:// a https:// para el cliente HTTP de Turso
         if url.startswith("libsql://"):
             url = url.replace("libsql://", "https://")
         
@@ -187,7 +186,7 @@ def inicializar_bd():
     except Exception as e:
         st.error(f"Error al inicializar la base de datos: {e}")
 
-# Inicializar tablas al cargar la aplicación
+# Inicializar tablas en la BD
 inicializar_bd()
 
 # ==========================================
@@ -231,11 +230,15 @@ def registrar_usuario(username, nombre, password, rol, empresa_id=None):
 def obtener_empresas():
     try:
         conn = conectar_db()
-        df = pd.read_sql_query("SELECT * FROM empresas", conn)
+        c = conn.cursor()
+        c.execute("SELECT id, nit, razon_social FROM empresas")
+        rows = c.fetchall()
         conn.close()
-        return df
+        if rows:
+            return pd.DataFrame(rows, columns=['id', 'nit', 'razon_social'])
     except Exception:
-        return pd.DataFrame(columns=['id', 'nit', 'razon_social'])
+        pass
+    return pd.DataFrame(columns=['id', 'nit', 'razon_social'])
 
 def registrar_empresa(nit, razon_social):
     try:
@@ -262,11 +265,15 @@ def registrar_cuenta(empresa_id, banco, numero_cuenta, tipo_cuenta):
 def obtener_cuentas_empresa(empresa_id):
     try:
         conn = conectar_db()
-        df = pd.read_sql_query("SELECT * FROM cuentas WHERE empresa_id = ?", conn, params=(empresa_id,))
+        c = conn.cursor()
+        c.execute("SELECT id, empresa_id, banco, numero_cuenta, tipo_cuenta FROM cuentas WHERE empresa_id = ?", (empresa_id,))
+        rows = c.fetchall()
         conn.close()
-        return df
+        if rows:
+            return pd.DataFrame(rows, columns=['id', 'empresa_id', 'banco', 'numero_cuenta', 'tipo_cuenta'])
     except Exception:
-        return pd.DataFrame(columns=['id', 'empresa_id', 'banco', 'numero_cuenta', 'tipo_cuenta'])
+        pass
+    return pd.DataFrame(columns=['id', 'empresa_id', 'banco', 'numero_cuenta', 'tipo_cuenta'])
 
 def registrar_conciliacion(empresa_id, cuenta_id, periodo, saldo_libro, saldo_banco, preparado_por, df_partidas):
     try:
@@ -302,6 +309,7 @@ def registrar_conciliacion(empresa_id, cuenta_id, periodo, saldo_libro, saldo_ba
 def obtener_conciliaciones(empresa_id=None):
     try:
         conn = conectar_db()
+        c = conn.cursor()
         query = '''
             SELECT c.id, e.razon_social as empresa, b.banco, b.numero_cuenta, c.periodo, 
                    c.saldo_libro, c.saldo_banco, c.estado, c.preparado_por, c.revisado_por, c.fecha_creacion,
@@ -313,11 +321,14 @@ def obtener_conciliaciones(empresa_id=None):
         if empresa_id:
             query += f" WHERE c.empresa_id = {empresa_id}"
         query += " ORDER BY c.id DESC"
-        df = pd.read_sql_query(query, conn)
+        c.execute(query)
+        rows = c.fetchall()
         conn.close()
-        return df
+        if rows:
+            return pd.DataFrame(rows, columns=['id', 'empresa', 'banco', 'numero_cuenta', 'periodo', 'saldo_libro', 'saldo_banco', 'estado', 'preparado_por', 'revisado_por', 'fecha_creacion', 'dictamen', 'observaciones'])
     except Exception:
-        return pd.DataFrame()
+        pass
+    return pd.DataFrame()
 
 def actualizar_dictamen_conciliacion(conciliacion_id, usuario, nuevo_estado, dictamen, observaciones):
     try:
@@ -344,20 +355,28 @@ def actualizar_dictamen_conciliacion(conciliacion_id, usuario, nuevo_estado, dic
 def obtener_partidas(conciliacion_id):
     try:
         conn = conectar_db()
-        df = pd.read_sql_query("SELECT * FROM partidas_conciliatorias WHERE conciliacion_id = ?", conn, params=(conciliacion_id,))
+        c = conn.cursor()
+        c.execute("SELECT id, conciliacion_id, tipo, fecha, concepto, monto, clasificacion, antiguedad_dias FROM partidas_conciliatorias WHERE conciliacion_id = ?", (conciliacion_id,))
+        rows = c.fetchall()
         conn.close()
-        return df
+        if rows:
+            return pd.DataFrame(rows, columns=['id', 'conciliacion_id', 'tipo', 'fecha', 'concepto', 'monto', 'clasificacion', 'antiguedad_dias'])
     except Exception:
-        return pd.DataFrame()
+        pass
+    return pd.DataFrame()
 
 def obtener_bitacora(conciliacion_id):
     try:
         conn = conectar_db()
-        df = pd.read_sql_query("SELECT * FROM bitacora_auditoria WHERE conciliacion_id = ? ORDER BY id DESC", conn, params=(conciliacion_id,))
+        c = conn.cursor()
+        c.execute("SELECT id, conciliacion_id, usuario, accion, fecha_hora, comentario FROM bitacora_auditoria WHERE conciliacion_id = ? ORDER BY id DESC", (conciliacion_id,))
+        rows = c.fetchall()
         conn.close()
-        return df
+        if rows:
+            return pd.DataFrame(rows, columns=['id', 'conciliacion_id', 'usuario', 'accion', 'fecha_hora', 'comentario'])
     except Exception:
-        return pd.DataFrame()
+        pass
+    return pd.DataFrame()
 
 # ==========================================
 # GENERADOR DE REPORTE PDF
@@ -371,12 +390,10 @@ def generar_pdf_conciliacion(conciliacion_info, df_partidas, df_bitacora):
     title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, leading=20, alignment=1, textColor=colors.HexColor('#1E3A8A'))
     subtitle_style = ParagraphStyle('SubTitleStyle', parent=styles['Heading2'], fontSize=12, leading=16, textColor=colors.HexColor('#1F2937'))
     
-    # Encabezado
     story.append(Paragraph(f"INFORME DE CONCILIACIÓN BANCARIA Y AUDITORÍA", title_style))
     story.append(Paragraph(f"Empresa: {conciliacion_info['empresa']} | Periodo: {conciliacion_info['periodo']}", subtitle_style))
     story.append(Spacer(1, 15))
     
-    # Datos Principales
     data_resumen = [
         [Paragraph("<b>Banco:</b>", styles['Normal']), conciliacion_info['banco'], Paragraph("<b>Cuenta:</b>", styles['Normal']), conciliacion_info['numero_cuenta']],
         [Paragraph("<b>Saldo Libros:</b>", styles['Normal']), f"${conciliacion_info['saldo_libro']:,.2f}", Paragraph("<b>Saldo Banco:</b>", styles['Normal']), f"${conciliacion_info['saldo_banco']:,.2f}"],
@@ -392,7 +409,6 @@ def generar_pdf_conciliacion(conciliacion_info, df_partidas, df_bitacora):
     story.append(t_resumen)
     story.append(Spacer(1, 15))
     
-    # Tabla de Partidas
     story.append(Paragraph("Detalle de Partidas Conciliatorias", subtitle_style))
     story.append(Spacer(1, 5))
     
@@ -414,7 +430,6 @@ def generar_pdf_conciliacion(conciliacion_info, df_partidas, df_bitacora):
     story.append(t_partidas)
     story.append(Spacer(1, 15))
     
-    # Observaciones
     if conciliacion_info['observaciones']:
         story.append(Paragraph("Observaciones del Auditor", subtitle_style))
         story.append(Paragraph(conciliacion_info['observaciones'], styles['Normal']))
@@ -425,14 +440,11 @@ def generar_pdf_conciliacion(conciliacion_info, df_partidas, df_bitacora):
     return buffer
 
 # ==========================================
-# GESTIÓN DE SESIÓN
+# GESTIÓN DE SESIÓN Y VISTAS
 # ==========================================
 if 'usuario' not in st.session_state:
     st.session_state.usuario = None
 
-# ==========================================
-# ACCESO DE EMERGENCIA EN BARRA LATERAL (SI OLVIDAS TU USUARIO)
-# ==========================================
 with st.sidebar.expander("🛠️ Acceso de Emergencia (Admin)"):
     if st.button("Crear Admin de Respaldo"):
         if registrar_usuario("admin_emergencia", "Administrador Principal", "123456", "Administrador"):
@@ -440,7 +452,6 @@ with st.sidebar.expander("🛠️ Acceso de Emergencia (Admin)"):
         else:
             st.sidebar.info("El usuario `admin_emergencia` ya existe. Úsalo con clave `123456`.")
 
-# Pantalla de Configuración Inicial si no existen usuarios
 if contar_usuarios() == 0:
     st.title("🔐 Configuración Inicial")
     st.info("Crea el primer usuario con rol Administrador para comenzar.")
@@ -465,7 +476,6 @@ if contar_usuarios() == 0:
                     st.error("El usuario ya existe.")
     st.stop()
 
-# Pantalla de Login
 if not st.session_state.usuario:
     st.title("⚖️ Sistema de Conciliación Bancaria y Auditoría")
     col1, col2 = st.columns([1, 2])
@@ -493,9 +503,6 @@ if not st.session_state.usuario:
                     st.error("Usuario o contraseña incorrectos.")
     st.stop()
 
-# ==========================================
-# MENÚ LATERAL Y NAVEGACIÓN
-# ==========================================
 user_curr = st.session_state.usuario
 st.sidebar.title(f"👤 {user_curr['nombre']}")
 st.sidebar.caption(f"Rol: {user_curr['rol']}")
@@ -513,31 +520,23 @@ if user_curr['rol'] == "Administrador":
 menu = st.sidebar.radio("Navegación", opciones_menu)
 
 # ==========================================
-# MÓDULO: DASHBOARD
+# MÓDULOS DE LA APLICACIÓN
 # ==========================================
 if menu == "📊 Dashboard":
     st.title("📊 Dashboard de Control y Auditoría")
-    
     df_conc = obtener_conciliaciones(user_curr['empresa_id'] if user_curr['rol'] != "Administrador" else None)
     
     if df_conc.empty:
         st.info("No hay conciliaciones registradas en el sistema.")
     else:
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        total_conc = len(df_conc)
-        aprobadas = len(df_conc[df_conc['estado'] == 'Aprobada'])
-        pendientes = len(df_conc[df_conc['estado'] == 'Pendiente'])
-        corregir = len(df_conc[df_conc['estado'] == 'Requiere Corrección'])
-        
-        kpi1.metric("Total Conciliaciones", total_conc)
-        kpi2.metric("Aprobadas", aprobadas)
-        kpi3.metric("Pendientes", pendientes)
-        kpi4.metric("Requieren Corrección", corregir)
+        kpi1.metric("Total Conciliaciones", len(df_conc))
+        kpi2.metric("Aprobadas", len(df_conc[df_conc['estado'] == 'Aprobada']))
+        kpi3.metric("Pendientes", len(df_conc[df_conc['estado'] == 'Pendiente']))
+        kpi4.metric("Requieren Corrección", len(df_conc[df_conc['estado'] == 'Requiere Corrección']))
         
         st.divider()
-        
         col_chart1, col_chart2 = st.columns(2)
-        
         with col_chart1:
             fig_pie = px.pie(df_conc, names='estado', title='Distribución por Estado de Conciliación',
                              color='estado', color_discrete_map={
@@ -546,19 +545,13 @@ if menu == "📊 Dashboard":
                                  'Requiere Corrección': '#EF4444'
                              })
             st.plotly_chart(fig_pie, use_container_width=True)
-            
         with col_chart2:
             fig_bar = px.bar(df_conc, x='periodo', y=['saldo_libro', 'saldo_banco'],
-                             barmode='group', title='Comparativa Saldo Libros vs Saldo Bancos',
-                             labels={'value': 'Monto ($)', 'variable': 'Tipo Saldo'})
+                             barmode='group', title='Comparativa Saldo Libros vs Saldo Bancos')
             st.plotly_chart(fig_bar, use_container_width=True)
 
-# ==========================================
-# MÓDULO: NUEVA CONCILIACIÓN
-# ==========================================
 elif menu == "📝 Nueva Conciliación":
     st.title("📝 Registrar Nueva Conciliación Bancaria")
-    
     df_emp = obtener_empresas()
     if df_emp.empty:
         st.warning("Debe registrar al menos una empresa antes de conciliar.")
@@ -613,7 +606,6 @@ elif menu == "📝 Nueva Conciliación":
                     'antiguedad_dias': (datetime.date.today() - p_fecha).days
                 }
                 st.session_state.partidas_temp = pd.concat([st.session_state.partidas_temp, pd.DataFrame([nueva_p])], ignore_index=True)
-                st.success("Partida agregada.")
                 st.rerun()
             else:
                 st.error("Proporcione concepto y monto mayor a 0.")
@@ -631,12 +623,8 @@ elif menu == "📝 Nueva Conciliación":
             st.session_state.partidas_temp = pd.DataFrame(columns=['tipo', 'fecha', 'concepto', 'monto', 'clasificacion', 'antiguedad_dias'])
             st.success(f"Conciliación #{cid} enviada a revisión con éxito.")
 
-# ==========================================
-# MÓDULO: AUDITORÍA Y REVISIONES
-# ==========================================
 elif menu == "🔍 Auditoría y Revisiones":
     st.title("🔍 Bandeja de Auditoría y Revisiones")
-    
     df_conc = obtener_conciliaciones(user_curr['empresa_id'] if user_curr['rol'] != "Administrador" else None)
     
     if df_conc.empty:
@@ -650,64 +638,43 @@ elif menu == "🔍 Auditoría y Revisiones":
                 col3.write(f"**Preparado por:** {r['preparado_por']}")
                 
                 df_p = obtener_partidas(r['id'])
-                
                 tab1, tab2, tab3 = st.tabs(["📊 Movimientos y Saldos", "📋 Bitácora", "⚡ Dictamen"])
-                
                 with tab1:
                     st.dataframe(df_p, use_container_width=True)
-                    
                 with tab2:
-                    df_b = obtener_bitacora(r['id'])
-                    st.dataframe(df_b, use_container_width=True)
-                    
+                    st.dataframe(obtener_bitacora(r['id']), use_container_width=True)
                 with tab3:
                     if user_curr['rol'] in ["Auditor", "Administrador"]:
-                        with st.form(f"form_dictamen_{r['id']}"):
-                            nuevo_estado = st.selectbox("Estado", ["Aprobada", "Requiere Corrección", "Pendiente"])
-                            dictamen_sel = st.selectbox("Dictamen Auditor", ["Sin Salvedades", "Con Salvedades", "Abstención", "Adverso"])
-                            obs_text = st.text_area("Observaciones del Auditor", value=r['observaciones'] or "")
-                            btn_dictamen = st.form_submit_button("Guardar Dictamen")
-                            
-                            if btn_dictamen:
-                                actualizar_dictamen_conciliacion(r['id'], user_curr['nombre'], nuevo_estado, dictamen_sel, obs_text)
+                        with st.form(f"form_dict_{r['id']}"):
+                            n_est = st.selectbox("Estado", ["Aprobada", "Requiere Corrección", "Pendiente"])
+                            n_dict = st.selectbox("Dictamen Auditor", ["Sin Salvedades", "Con Salvedades", "Abstención", "Adverso"])
+                            n_obs = st.text_area("Observaciones del Auditor", value=r['observaciones'] or "")
+                            if st.form_submit_button("Guardar Dictamen"):
+                                actualizar_dictamen_conciliacion(r['id'], user_curr['nombre'], n_est, n_dict, n_obs)
                                 st.success("Dictamen guardado.")
                                 st.rerun()
                     else:
-                        st.info("Solo Auditores o Administradores pueden emitir dictamen.")
+                        st.info("Solo Auditores o Administradores pueden dictaminar.")
                         
-                # Botón Descargar PDF
-                pdf_bytes = generar_pdf_conciliacion(r, df_p, obtener_bitacora(r['id']))
-                st.download_button(
-                    label="📄 Descargar Reporte PDF",
-                    data=pdf_bytes,
-                    file_name=f"Conciliacion_{r['empresa']}_{r['periodo']}.pdf",
-                    mime="application/pdf",
-                    key=f"pdf_btn_{r['id']}"
-                )
+                st.download_button("📄 Descargar Reporte PDF", data=generar_pdf_conciliacion(r, df_p, obtener_bitacora(r['id'])), file_name=f"Conciliacion_{r['empresa']}_{r['periodo']}.pdf", mime="application/pdf", key=f"pdf_{r['id']}")
 
-# ==========================================
-# MÓDULO: GESTIÓN DE EMPRESAS
-# ==========================================
 elif menu == "🏢 Gestión de Empresas":
     st.title("🏢 Gestión de Empresas y Cuentas Bancarias")
-    
     tab_e1, tab_e2 = st.tabs(["Registrar Empresa", "Registrar Cuenta Bancaria"])
     
     with tab_e1:
-        with st.form("form_empresa"):
-            nit_emp = st.text_input("NIT")
-            razon_emp = st.text_input("Razón Social")
-            btn_emp = st.form_submit_button("Guardar Empresa")
-            if btn_emp:
-                if nit_emp and razon_emp:
-                    if registrar_empresa(nit_emp, razon_emp):
+        with st.form("form_emp"):
+            nit_e = st.text_input("NIT")
+            raz_e = st.text_input("Razón Social")
+            if st.form_submit_button("Guardar Empresa"):
+                if nit_e and raz_e:
+                    if registrar_empresa(nit_e, raz_e):
                         st.success("Empresa registrada con éxito.")
                         st.rerun()
                     else:
-                        st.error("El NIT ya está registrado.")
+                        st.error("El NIT ya está registrado en Turso.")
                 else:
                     st.error("Completa todos los campos.")
-                    
         st.subheader("Empresas Registradas")
         st.dataframe(obtener_empresas(), use_container_width=True)
         
@@ -715,48 +682,39 @@ elif menu == "🏢 Gestión de Empresas":
         df_e = obtener_empresas()
         if not df_e.empty:
             e_dict = dict(zip(df_e['razon_social'], df_e['id']))
-            with st.form("form_cuenta"):
+            with st.form("form_cta"):
                 e_sel = st.selectbox("Empresa", list(e_dict.keys()))
                 banco = st.text_input("Banco")
-                num_cuenta = st.text_input("Número de Cuenta")
-                tipo_cuenta = st.selectbox("Tipo de Cuenta", ["Ahorros", "Corriente"])
-                btn_cta = st.form_submit_button("Guardar Cuenta")
-                
-                if btn_cta:
-                    if banco and num_cuenta:
-                        registrar_cuenta(e_dict[e_sel], banco, num_cuenta, tipo_cuenta)
+                num_c = st.text_input("Número de Cuenta")
+                t_c = st.selectbox("Tipo de Cuenta", ["Ahorros", "Corriente"])
+                if st.form_submit_button("Guardar Cuenta"):
+                    if banco and num_c:
+                        registrar_cuenta(e_dict[e_sel], banco, num_c, t_c)
                         st.success("Cuenta registrada.")
                         st.rerun()
                     else:
                         st.error("Completa los datos de la cuenta.")
 
-# ==========================================
-# MÓDULO: GESTIÓN DE USUARIOS
-# ==========================================
 elif menu == "👥 Usuarios":
     st.title("👥 Gestión de Usuarios del Sistema")
-    
     df_emp = obtener_empresas()
     emp_opts = {"Ninguna": None}
     if not df_emp.empty:
         for _, r in df_emp.iterrows():
             emp_opts[r['razon_social']] = r['id']
-        
-    with st.form("form_reg_usr"):
-        st.subheader("Crear Nuevo Usuario")
-        u_name = st.text_input("Usuario")
-        u_nom = st.text_input("Nombre Completo")
-        u_pwd = st.text_input("Contraseña", type="password")
-        u_rol = st.selectbox("Rol", ["Auxiliar", "Auditor", "Administrador"])
-        u_emp = st.selectbox("Empresa Asignada", list(emp_opts.keys()))
-        
-        btn_usr = st.form_submit_button("Registrar Usuario")
-        if btn_usr:
-            if u_name and u_nom and u_pwd:
-                if registrar_usuario(u_name, u_nom, u_pwd, u_rol, emp_opts[u_emp]):
-                    st.success("Usuario registrado exitosamente.")
+            
+    with st.form("form_usr"):
+        u_n = st.text_input("Usuario")
+        u_nm = st.text_input("Nombre Completo")
+        u_p = st.text_input("Contraseña", type="password")
+        u_r = st.selectbox("Rol", ["Auxiliar", "Auditor", "Administrador"])
+        u_e = st.selectbox("Empresa Asignada", list(emp_opts.keys()))
+        if st.form_submit_button("Registrar Usuario"):
+            if u_n and u_nm and u_p:
+                if registrar_usuario(u_n, u_nm, u_p, u_r, emp_opts[u_e]):
+                    st.success("Usuario registrado con éxito.")
                     st.rerun()
                 else:
-                    st.error("El nombre de usuario ya existe.")
+                    st.error("El usuario ya existe.")
             else:
                 st.error("Completa todos los datos requeridos.")
