@@ -30,11 +30,9 @@ class TursoCursorWrapper:
         self.lastrowid = None
 
     def execute(self, query, params=()):
-        # Convertir parámetros a tuplas si vienen en otro formato
         if params and not isinstance(params, (list, tuple)):
             params = (params,)
         
-        # libsql_client usa ? como marcador de posición igual que SQLite
         res = self.client.execute(query, list(params) if params else [])
         self._last_result = res
         try:
@@ -78,12 +76,16 @@ class TursoConnectionWrapper:
 
 def conectar_db():
     """
-    Conecta a la base de datos persistente en Turso usando libsql-client
-    o utiliza SQLite local como respaldo automático.
+    Conecta a la base de datos persistente en Turso usando libsql-client,
+    asegurando que la URL utilice el protocolo HTTPS correcto.
     """
     if "TURSO_DATABASE_URL" in st.secrets and "TURSO_AUTH_TOKEN" in st.secrets:
         url = st.secrets["TURSO_DATABASE_URL"]
         token = st.secrets["TURSO_AUTH_TOKEN"]
+        
+        # Corregir prefijo libsql:// a https:// para el cliente HTTP de Turso
+        if url.startswith("libsql://"):
+            url = url.replace("libsql://", "https://")
         
         try:
             import libsql_client
