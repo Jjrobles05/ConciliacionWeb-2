@@ -28,40 +28,42 @@ st.set_page_config(
 )
 
 # ==========================================
-# 2. ADAPTADOR CONEXIÓN TURSO / SQLITE
+# 2. ADAPTADOR CONEXIÓN TURSO / SQLITE (ROBUSTO)
 # ==========================================
 class TursoCursorWrapper:
     def __init__(self, client):
         self.client = client
         self.lastrowid = None
+        self._rows = []
 
     def execute(self, query, params=()):
         if params and not isinstance(params, (list, tuple)):
             params = (params,)
         
         res = self.client.execute(query, list(params) if params else [])
-        self._last_result = res
+        
+        # Extraer filas de manera compatible con todas las versiones de libsql-client
+        if hasattr(res, "rows"):
+            self._rows = list(res.rows)
+        elif isinstance(res, list):
+            self._rows = res
+        else:
+            self._rows = []
+
         try:
-            if res.last_insert_rowid is not None:
+            if hasattr(res, "last_insert_rowid") and res.last_insert_rowid is not None:
                 self.lastrowid = res.last_insert_rowid
         except Exception:
             pass
         return self
 
     def fetchone(self):
-        try:
-            rows = self._last_result.rows
-            if rows:
-                return rows[0]
-        except Exception:
-            pass
+        if self._rows:
+            return self._rows[0]
         return None
 
     def fetchall(self):
-        try:
-            return self._last_result.rows
-        except Exception:
-            return []
+        return self._rows
 
 class TursoConnectionWrapper:
     def __init__(self, client):
@@ -481,7 +483,7 @@ def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, mot
     conn.close()
 
 # ==========================================
-# 5. AUTENTICACIÓN FLEXIBLE (SIN PROBLEMAS DE MAYÚSCULAS)
+# 5. AUTENTICACIÓN FLEXIBLE Y SEGURA
 # ==========================================
 def hash_password(password, salt=None):
     salt = salt or secrets.token_hex(16)
@@ -536,7 +538,6 @@ def autenticar_usuario(usuario, password):
     try:
         conn = conectar_db()
         c = conn.cursor()
-        # Búsqueda usando LOWER para no fallar por mayúsculas o minúsculas
         query = """
         SELECT u.id, u.usuario, u.nombre, u.password_hash, u.salt, u.rol, u.empresa_id, e.nombre as empresa_nombre, e.nit as empresa_nit
         FROM usuarios u
@@ -1376,7 +1377,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             else:
                 cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(empresa_activa_id, mes_num, usuario_actual["id"])
                 if not cuentas_asig_df.empty:
-                    st.info("ℹ️️ **Cuentas asignadas para tu perfil este mes:**")
+                    st.info("ℹ️ **Cuentas asignadas para tu perfil este mes:**")
                     cta_sel = st.selectbox(
                         "Cuenta / Tarjeta Registrada",
                         cuentas_asig_df["id"].tolist(),
