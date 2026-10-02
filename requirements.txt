@@ -1,6 +1,6 @@
 streamlit
 pandas
+plotly
 openpyxl
 reportlab
-plotly
-libsql-client
+turso_serverless
