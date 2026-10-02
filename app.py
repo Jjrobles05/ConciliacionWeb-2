@@ -264,6 +264,41 @@ def eliminar_conciliacion_db(conciliacion_id):
     conn.close()
 
 
+def reiniciar_datos_aplicativo():
+    """Elimina todos los datos operativos y deja la aplicación como instalación nueva.
+
+    Conserva la estructura de las tablas y la conexión a Turso/SQLite.
+    Después del borrado no quedan usuarios, por lo que la pantalla inicial
+    permitirá crear nuevamente el primer Administrador.
+    """
+    conn = conectar_db()
+    c = conn.cursor()
+    try:
+        # Se eliminan primero las tablas hijas para respetar las relaciones.
+        c.execute("DELETE FROM conciliaciones")
+        c.execute("DELETE FROM cuentas_bancarias")
+        c.execute("DELETE FROM usuarios")
+        c.execute("DELETE FROM empresas")
+
+        # Reinicia los consecutivos cuando el motor dispone de sqlite_sequence.
+        for tabla in ["conciliaciones", "cuentas_bancarias", "usuarios", "empresas"]:
+            try:
+                c.execute("DELETE FROM sqlite_sequence WHERE name=?", (tabla,))
+            except Exception:
+                pass
+
+        conn.commit()
+        return True, "El aplicativo quedó completamente limpio. Ahora puedes crear el primer Administrador."
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False, f"No fue posible reiniciar los datos: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
+
 def obtener_cuentas(empresa_id=None):
     try:
         conn = conectar_db()
@@ -671,7 +706,7 @@ def obtener_opciones_menu(rol):
     elif rol == "Revisor":
         return ["🔍 Auditoría y Revisiones", "📊 Dashboard", "📋 Historial", "🏢 Empresas", "🏦 Bancos y Cuentas", "📄 Reportes"]
     elif rol == "Administrador":
-        return ["📊 Dashboard", "🔍 Auditoría y Revisiones", "📝 Nueva Conciliación", "📋 Historial", "🏢 Empresas", "🏦 Bancos y Cuentas", "👥 Usuarios", "📄 Reportes"]
+        return ["📊 Dashboard", "🔍 Auditoría y Revisiones", "📝 Nueva Conciliación", "📋 Historial", "🏢 Empresas", "🏦 Bancos y Cuentas", "👥 Usuarios", "⚙️ Administración", "📄 Reportes"]
     return ["📊 Dashboard"]
 
 # ==========================================
@@ -1887,6 +1922,44 @@ elif menu_seleccionado == "👥 Usuarios":
                             actualizar_empresa_usuario(usr_sel_e, emp_sel)
                             st.success("Empresa asignada correctamente.")
                             st.rerun()
+
+elif menu_seleccionado == "⚙️ Administración":
+    st.title("⚙️ Administración")
+    st.subheader("🧹 Reiniciar datos del aplicativo")
+    st.warning(
+        "⚠️ Esta función elimina TODOS los datos almacenados en la aplicación: "
+        "usuarios, empresas, logos, bancos, cuentas y conciliaciones. "
+        "La estructura del sistema y la conexión a Turso se conservan. "
+        "Esta acción no se puede deshacer."
+    )
+
+    st.divider()
+    st.write("**Después del reinicio:**")
+    st.write("• El aplicativo quedará como una instalación nueva.")
+    st.write("• Se mostrará nuevamente la pantalla para crear el primer Administrador.")
+    st.write("• Los consecutivos volverán a comenzar desde 1 cuando el motor lo permita.")
+
+    confirmar_reset = st.checkbox(
+        "Entiendo que voy a borrar permanentemente todos los datos",
+        key="confirmar_reinicio_total"
+    )
+
+    if st.button(
+        "🧹 REINICIAR APLICATIVO Y BORRAR TODOS LOS DATOS",
+        type="primary",
+        disabled=not confirmar_reset,
+        use_container_width=True
+    ):
+        ok, mensaje = reiniciar_datos_aplicativo()
+        if ok:
+            # El usuario actual acaba de ser eliminado de la base de datos.
+            st.session_state.usuario_autenticado = None
+            st.session_state.pop("menu_override", None)
+            st.session_state.pop("confirmar_reinicio_total", None)
+            st.success(mensaje)
+            st.rerun()
+        else:
+            st.error(mensaje)
 
 elif menu_seleccionado == "📄 Reportes":
     st.title("📄 Reportes y Descargas")
