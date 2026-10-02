@@ -162,11 +162,44 @@ def obtener_logo_empresa(nombre_empresa):
 def guardar_empresa(nombre, nit, logo_bytes=None):
     conn = conectar_db()
     c = conn.cursor()
-    c.execute("INSERT INTO empresas (nit, razon_social) VALUES (?, ?)", (nit.strip(), nombre.strip()))
-    conn.commit()
-    last_id = c.lastrowid
-    conn.close()
-    return last_id
+
+    nombre = str(nombre).strip()
+    nit = str(nit).strip()
+
+    # Verificar si el NIT ya existe
+    c.execute(
+        "SELECT id, razon_social FROM empresas WHERE nit = ?",
+        (nit,)
+    )
+
+    existente = c.fetchone()
+
+    if existente:
+        conn.close()
+        return False, (
+            f"El NIT {nit} ya está registrado para "
+            f"la empresa {existente[1]}."
+        )
+
+    try:
+        c.execute(
+            """
+            INSERT INTO empresas (nit, razon_social)
+            VALUES (?, ?)
+            """,
+            (nit, nombre)
+        )
+
+        conn.commit()
+        conn.close()
+
+        return True, "Empresa registrada con éxito."
+
+    except Exception as e:
+        conn.rollback()
+        conn.close()
+
+        return False, f"No fue posible registrar la empresa: {e}"
 
 
 def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
@@ -1246,10 +1279,15 @@ elif menu_seleccionado == "🏢 Empresas":
                     if not nom.strip() or not nit.strip():
                         st.error("Por favor completa el nombre y el NIT.")
                     else:
-                        logo_b = logo_file.getvalue() if logo_file else None
-                        guardar_empresa(nom, nit, logo_b)
-                        st.success("Empresa registrada con éxito.")
-                        st.rerun()
+                       logo_b = logo_file.getvalue() if logo_file else None
+
+ok, mensaje = guardar_empresa(nom, nit, logo_b)
+
+if ok:
+    st.success(mensaje)
+    st.rerun()
+else:
+    st.warning(mensaje)
 
     st.subheader("Empresas Registradas")
     empresas_list = obtener_empresas()
