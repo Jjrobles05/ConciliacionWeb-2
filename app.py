@@ -18,7 +18,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 # ==========================================
-# CONFIGURACIÓN GENERAL
+# 1. CONFIGURACIÓN DE PÁGINA
 # ==========================================
 st.set_page_config(
     page_title="Sistema de Conciliación Bancaria",
@@ -28,7 +28,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# ADAPTADOR COMPATIBLE TURSO / SQLITE
+# 2. ADAPTADOR CONEXIÓN TURSO / SQLITE
 # ==========================================
 class TursoCursorWrapper:
     def __init__(self, client):
@@ -85,7 +85,7 @@ class TursoConnectionWrapper:
         return c
 
 def conectar_db():
-    """Conecta a la base de datos persistente en Turso o respaldo local."""
+    """Conecta a Turso si existen las llaves en Secrets, sino usa SQLite local."""
     if "TURSO_DATABASE_URL" in st.secrets and "TURSO_AUTH_TOKEN" in st.secrets:
         url = st.secrets["TURSO_DATABASE_URL"]
         token = st.secrets["TURSO_AUTH_TOKEN"]
@@ -98,12 +98,12 @@ def conectar_db():
             client = libsql_client.create_client_sync(url=url, auth_token=token)
             return TursoConnectionWrapper(client)
         except Exception as e:
-            st.warning(f"⚠️️ Error conectando a Turso: {e}. Usando respaldo local.")
+            st.warning(f"⚠️ Error conectando a Turso: {e}. Usando respaldo local.")
             
     return sqlite3.connect("conciliaciones.db")
 
 # ==========================================
-# INICIALIZACIÓN Y MIGRACIONES DE TABLAS
+# 3. CREACIÓN Y ESTRUCTURA DE TABLAS
 # ==========================================
 def inicializar_db():
     conn = conectar_db()
@@ -183,7 +183,7 @@ def inicializar_db():
 inicializar_db()
 
 # ==========================================
-# FUNCIONES MAESTRAS DE BASE DE DATOS
+# 4. CONSULTAS A LA BASE DE DATOS
 # ==========================================
 def obtener_empresas():
     try:
@@ -481,7 +481,7 @@ def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, mot
     conn.close()
 
 # ==========================================
-# AUTENTICACIÓN Y SEGURIDAD (PBKDF2/SHA256)
+# 5. AUTENTICACIÓN FLEXIBLE (SIN PROBLEMAS DE MAYÚSCULAS)
 # ==========================================
 def hash_password(password, salt=None):
     salt = salt or secrets.token_hex(16)
@@ -506,13 +506,13 @@ def contar_usuarios():
         return 0
 
 def crear_usuario(usuario, nombre, password, rol, empresa_id=None):
-    salt, password_hash = hash_password(password)
+    salt, password_hash = hash_password(str(password).strip())
     conn = conectar_db()
     c = conn.cursor()
     c.execute('''
         INSERT INTO usuarios (usuario, nombre, password_hash, salt, rol, activo, fecha_creacion, empresa_id)
         VALUES (?, ?, ?, ?, ?, 1, ?, ?)
-    ''', (usuario.strip(), nombre.strip(), password_hash, salt, rol, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), empresa_id))
+    ''', (str(usuario).strip().lower(), nombre.strip(), password_hash, salt, rol, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), empresa_id))
     conn.commit()
     last_id = c.lastrowid
     conn.close()
@@ -536,28 +536,33 @@ def autenticar_usuario(usuario, password):
     try:
         conn = conectar_db()
         c = conn.cursor()
+        # Búsqueda usando LOWER para no fallar por mayúsculas o minúsculas
         query = """
         SELECT u.id, u.usuario, u.nombre, u.password_hash, u.salt, u.rol, u.empresa_id, e.nombre as empresa_nombre, e.nit as empresa_nit
         FROM usuarios u
         LEFT JOIN empresas e ON u.empresa_id = e.id
-        WHERE u.usuario = ? AND u.activo = 1
+        WHERE LOWER(u.usuario) = LOWER(?) AND u.activo = 1
         """
-        c.execute(query, (usuario.strip(),))
+        c.execute(query, (str(usuario).strip(),))
         fila = c.fetchone()
         conn.close()
-        if not fila or not verificar_password(password, fila[4], fila[3]):
+        
+        if not fila:
             return None
-        return {
-            "id": fila[0],
-            "usuario": fila[1],
-            "nombre": fila[2],
-            "rol": fila[5],
-            "empresa_id": fila[6],
-            "empresa_nombre": fila[7],
-            "empresa_nit": fila[8]
-        }
-    except Exception:
-        return None
+            
+        if verificar_password(str(password).strip(), fila[4], fila[3]):
+            return {
+                "id": fila[0],
+                "usuario": fila[1],
+                "nombre": fila[2],
+                "rol": fila[5],
+                "empresa_id": fila[6],
+                "empresa_nombre": fila[7],
+                "empresa_nit": fila[8]
+            }
+    except Exception as e:
+        st.error(f"Error técnico durante la autenticación: {e}")
+    return None
 
 def obtener_usuarios():
     try:
@@ -588,7 +593,7 @@ def obtener_opciones_menu(rol):
     return ["📊 Dashboard"]
 
 # ==========================================
-# FLUJO DE AUTENTICACIÓN
+# 6. FLUJO DE LOGIN Y AUTENTICACIÓN
 # ==========================================
 def iniciar_autenticacion():
     if "usuario_autenticado" not in st.session_state:
@@ -678,7 +683,7 @@ usuario_actual = st.session_state.usuario_autenticado
 rol_actual = usuario_actual["rol"]
 
 # ==========================================
-# MENÚ LATERAL Y SELECCIÓN DE EMPRESA
+# 7. BARRA LATERAL (SIDEBAR)
 # ==========================================
 empresas_df = obtener_empresas()
 with st.sidebar:
@@ -717,7 +722,7 @@ with st.sidebar:
         st.rerun()
 
 # ==========================================
-# FUNCIONES AUXILIARES DE FORMATO Y REPORTES
+# 8. EXPORTADORES A EXCEL Y PDF
 # ==========================================
 def total_columna(df, columna="Valor"):
     if df is None or df.empty or columna not in df.columns:
@@ -979,7 +984,7 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     return buffer.getvalue()
 
 # ==========================================
-# MÓDULOS Y VISTAS DE LA APLICACIÓN
+# 9. VISTAS Y NAVEGACIÓN
 # ==========================================
 if menu_seleccionado == "🔍 Auditoría y Revisiones":
     st.title("🔍 BANDEJA Y MÓDULO DE AUDITORÍA Y CONTROL INTERNO")
@@ -1371,7 +1376,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             else:
                 cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(empresa_activa_id, mes_num, usuario_actual["id"])
                 if not cuentas_asig_df.empty:
-                    st.info("ℹ️ **Cuentas asignadas para tu perfil este mes:**")
+                    st.info("ℹ️️ **Cuentas asignadas para tu perfil este mes:**")
                     cta_sel = st.selectbox(
                         "Cuenta / Tarjeta Registrada",
                         cuentas_asig_df["id"].tolist(),
