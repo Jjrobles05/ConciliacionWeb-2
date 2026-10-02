@@ -28,7 +28,7 @@ st.set_page_config(
 )
 
 # ==========================================
-# 2. ADAPTADOR CONEXIÓN TURSO / SQLITE (ROBUSTO)
+# 2. ADAPTADOR CONEXIÓN TURSO / SQLITE (DEFINITIVO)
 # ==========================================
 class TursoCursorWrapper:
     def __init__(self, client):
@@ -42,13 +42,27 @@ class TursoCursorWrapper:
         
         res = self.client.execute(query, list(params) if params else [])
         
-        # Extraer filas de manera compatible con todas las versiones de libsql-client
-        if hasattr(res, "rows"):
-            self._rows = list(res.rows)
+        # Extraer filas y convertirlas a tuplas puras de Python para evitar fallos de 'result'
+        filas_raw = []
+        if hasattr(res, "rows") and res.rows is not None:
+            filas_raw = list(res.rows)
         elif isinstance(res, list):
-            self._rows = res
-        else:
-            self._rows = []
+            filas_raw = res
+
+        self._rows = []
+        for r in filas_raw:
+            if isinstance(r, (list, tuple)):
+                self._rows.append(tuple(r))
+            elif hasattr(r, "values"):
+                self._rows.append(tuple(r.values()))
+            elif isinstance(r, dict):
+                self._rows.append(tuple(r.values()))
+            else:
+                # Si el objeto r es un Row especial de libsql, iteramos sobre sus elementos
+                try:
+                    self._rows.append(tuple(item for item in r))
+                except Exception:
+                    self._rows.append(tuple(r))
 
         try:
             if hasattr(res, "last_insert_rowid") and res.last_insert_rowid is not None:
@@ -551,27 +565,19 @@ def autenticar_usuario(usuario, password):
         if not fila:
             return None
 
-        # Función auxiliar para acceder a datos tanto si es objeto/dict como tupla/lista
-        def obtener_val(f, idx, clave):
-            if isinstance(f, dict):
-                return f.get(clave)
-            elif hasattr(f, clave):
-                return getattr(f, clave)
-            else:
-                return f[idx]
-
-        p_hash = obtener_val(fila, 3, "password_hash")
-        p_salt = obtener_val(fila, 4, "salt")
+        # Al estar convertidas las filas en tuplas por TursoCursorWrapper, accedemos directamente por índice
+        p_hash = fila[3]
+        p_salt = fila[4]
 
         if p_hash and p_salt and verificar_password(str(password).strip(), p_salt, p_hash):
             return {
-                "id": obtener_val(fila, 0, "id"),
-                "usuario": obtener_val(fila, 1, "usuario"),
-                "nombre": obtener_val(fila, 2, "nombre"),
-                "rol": obtener_val(fila, 5, "rol"),
-                "empresa_id": obtener_val(fila, 6, "empresa_id"),
-                "empresa_nombre": obtener_val(fila, 7, "empresa_nombre"),
-                "empresa_nit": obtener_val(fila, 8, "empresa_nit")
+                "id": fila[0],
+                "usuario": fila[1],
+                "nombre": fila[2],
+                "rol": fila[5],
+                "empresa_id": fila[6],
+                "empresa_nombre": fila[7],
+                "empresa_nit": fila[8]
             }
     except Exception as e:
         st.error(f"Error técnico durante la autenticación: {e}")
@@ -1389,7 +1395,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             else:
                 cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(empresa_activa_id, mes_num, usuario_actual["id"])
                 if not cuentas_asig_df.empty:
-                    st.info("ℹ️️ **Cuentas asignadas para tu perfil este mes:**")
+                    st.info("ℹ️ **Cuentas asignadas para tu perfil este mes:**")
                     cta_sel = st.selectbox(
                         "Cuenta / Tarjeta Registrada",
                         cuentas_asig_df["id"].tolist(),
@@ -1615,7 +1621,7 @@ elif menu_seleccionado == "📋 Historial":
                     datos = {}
 
                 if wf_status == "Requiere corrección" and c_data.get("motivo_correccion"):
-                    st.error(f"⚠️ **Observaciones del Auditor ({c_data.get('revisado_por_usuario', 'N/A')}):**\n"
+                    st.error(f"⚠️️ **Observaciones del Auditor ({c_data.get('revisado_por_usuario', 'N/A')}):**\n"
                              f"• **Categoría:** {c_data.get('tipo_hallazgo', 'General')}\n"
                              f"• **Detalle:** {c_data.get('motivo_correccion')}")
 
