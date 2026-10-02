@@ -68,7 +68,6 @@ def conectar_db():
 # ==========================================
 # 3. CREACIÓN Y ESTRUCTURA DE TABLAS
 # ==========================================
-@st.cache_resource(show_spinner=False)
 def inicializar_db():
     """Crea únicamente las tablas si no existen usando el esquema Turso actual."""
     conn = conectar_db()
@@ -130,7 +129,6 @@ inicializar_db()
 # ==========================================
 # 4. CONSULTAS A LA BASE DE DATOS
 # ==========================================
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_empresas():
     try:
         conn = conectar_db()
@@ -145,7 +143,6 @@ def obtener_empresas():
         return pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_empresa_por_id(empresa_id):
     try:
         conn = conectar_db()
@@ -164,18 +161,6 @@ def obtener_logo_empresa(nombre_empresa):
     return None
 
 
-def limpiar_cache_consultas():
-    """Limpia solo las consultas cacheadas cuando hay cambios en Turso."""
-    for nombre in (
-        "obtener_empresas", "obtener_empresa_por_id", "obtener_cuentas",
-        "obtener_cuentas_rotadas_por_usuario", "obtener_historial",
-        "obtener_conciliacion_por_id", "obtener_usuarios"
-    ):
-        fn = globals().get(nombre)
-        if fn is not None and hasattr(fn, "clear"):
-            fn.clear()
-
-
 def guardar_empresa(nombre, nit, logo_bytes=None):
     """Registra una empresa y controla NIT duplicado sin mostrar errores técnicos."""
     nombre = str(nombre or "").strip()
@@ -191,7 +176,6 @@ def guardar_empresa(nombre, nit, logo_bytes=None):
             return False, f"El NIT {nit} ya está registrado para la empresa {existente[1]}."
         c.execute("INSERT INTO empresas (nit, razon_social) VALUES (?, ?)", (nit, nombre))
         conn.commit()
-        limpiar_cache_consultas()
         return True, "Empresa registrada con éxito."
     except Exception as e:
         try: conn.rollback()
@@ -213,7 +197,6 @@ def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
             return False, f"El NIT {nit} ya está registrado para {existente[1]}."
         c.execute("UPDATE empresas SET razon_social=?, nit=? WHERE id=?", (nombre, nit, int(empresa_id)))
         conn.commit()
-        limpiar_cache_consultas()
         return True, "Empresa actualizada con éxito."
     except Exception as e:
         try: conn.rollback()
@@ -241,7 +224,6 @@ def eliminar_empresa_db(empresa_id):
             return False, "No se puede eliminar: la empresa tiene " + ", ".join(partes) + "."
         c.execute("DELETE FROM empresas WHERE id=?", (int(empresa_id),))
         conn.commit()
-        limpiar_cache_consultas()
         return True, "Empresa eliminada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -257,11 +239,9 @@ def eliminar_conciliacion_db(conciliacion_id):
     c = conn.cursor()
     c.execute("DELETE FROM conciliaciones WHERE id=?", (int(conciliacion_id),))
     conn.commit()
-    limpiar_cache_consultas()
     conn.close()
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_cuentas(empresa_id=None):
     try:
         conn = conectar_db()
@@ -294,12 +274,10 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
               (banco.strip(), numero_cuenta.strip(), tipo_cuenta, empresa_id))
     conn.commit()
     last_id = c.lastrowid
-    limpiar_cache_consultas()
     conn.close()
     return last_id
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
     if not empresa_id:
         return pd.DataFrame()
@@ -427,17 +405,6 @@ def guardar_conciliacion_historial(
             entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
             workflow_status
         )
-
-        # Cuando se corrige una devolución, conservamos las observaciones de
-        # Auditoría para que no desaparezcan al guardar o reenviar la corrección.
-        if id_edicion:
-            c.execute("SELECT observaciones FROM conciliaciones WHERE id=?", (int(id_edicion),))
-            anterior = c.fetchone()
-            datos_anteriores = _decodificar_observaciones(anterior[0] if anterior else None)
-            for campo in ("motivo_correccion", "tipo_hallazgo", "revisado_por_usuario", "fecha_revision"):
-                if datos_anteriores.get(campo):
-                    datos[campo] = datos_anteriores[campo]
-
         estado = datos["estado"]
         fecha_creacion = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         observaciones = json.dumps(datos, ensure_ascii=False)
@@ -461,7 +428,6 @@ def guardar_conciliacion_historial(
                      observaciones))
             last_id = int(c.lastrowid)
         conn.commit()
-        limpiar_cache_consultas()
         return last_id
     finally:
         conn.close()
@@ -477,7 +443,6 @@ def _decodificar_observaciones(texto):
         return {}
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_historial(empresa_nombre=None):
     try:
         conn = conectar_db()
@@ -523,7 +488,6 @@ def obtener_historial(empresa_nombre=None):
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_conciliacion_por_id(id_conciliacion):
     try:
         conn = conectar_db()
@@ -597,7 +561,7 @@ def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, mot
                   'motivo_correccion': motivo_correccion, 'tipo_hallazgo': tipo_hallazgo, 'checklist_json': checklist})
     c.execute("UPDATE conciliaciones SET revisado_por=?, dictamen=?, observaciones=? WHERE id=?",
               (revisado_por, nuevo_estado, json.dumps(datos,ensure_ascii=False), int(id_conciliacion)))
-    conn.commit(); limpiar_cache_consultas(); conn.close()
+    conn.commit(); conn.close()
 
 # ==========================================
 # 5. AUTENTICACIÓN FLEXIBLE Y SEGURA
@@ -634,7 +598,6 @@ def crear_usuario(usuario, nombre, password, rol, empresa_id=None):
     ''', (str(usuario).strip().lower(), nombre.strip(), password_hash, salt, rol, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), empresa_id))
     conn.commit()
     last_id = c.lastrowid
-    limpiar_cache_consultas()
     conn.close()
     return last_id
 
@@ -643,7 +606,6 @@ def actualizar_empresa_usuario(usuario_id, empresa_id):
     c = conn.cursor()
     c.execute("UPDATE usuarios SET empresa_id=? WHERE id=?", (empresa_id, int(usuario_id)))
     conn.commit()
-    limpiar_cache_consultas()
     conn.close()
 
 def actualizar_rol_usuario(usuario_id, nuevo_rol):
@@ -651,7 +613,6 @@ def actualizar_rol_usuario(usuario_id, nuevo_rol):
     c = conn.cursor()
     c.execute("UPDATE usuarios SET rol=? WHERE id=?", (nuevo_rol, int(usuario_id)))
     conn.commit()
-    limpiar_cache_consultas()
     conn.close()
 
 def autenticar_usuario(usuario, password):
@@ -672,7 +633,6 @@ def autenticar_usuario(usuario, password):
         st.error("Error técnico durante la autenticación: " + f"{type(e).__name__}: {e}")
     return None
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_usuarios():
     try:
         conn = conectar_db(); c = conn.cursor()
@@ -811,33 +771,10 @@ with st.sidebar:
 
     st.divider()
     opciones_menu = obtener_opciones_menu(rol_actual)
-
-    # Navegación persistente: evita que Streamlit vuelva al Dashboard
-    # cuando una acción de Historial/Edición provoca un rerun.
     if "menu_override" in st.session_state:
-        destino = st.session_state.pop("menu_override")
-        if destino in opciones_menu:
-            # Actualizamos AMBOS estados: el destino de navegación y
-            # el valor del widget radio. Si solo cambiamos menu_actual,
-            # Streamlit puede conservar el valor anterior del radio
-            # (por ejemplo Dashboard) y volver a mostrarlo.
-            st.session_state.menu_actual = destino
-            st.session_state.radio_menu_principal = destino
-
-    if st.session_state.get("menu_actual") not in opciones_menu:
-        st.session_state.menu_actual = opciones_menu[0]
-
-    # Mantener sincronizado el radio con la navegación programática.
-    if st.session_state.get("radio_menu_principal") not in opciones_menu:
-        st.session_state.radio_menu_principal = st.session_state.menu_actual
-
-    menu_seleccionado = st.radio(
-        "Navegación principal",
-        opciones_menu,
-        index=opciones_menu.index(st.session_state.menu_actual),
-        key="radio_menu_principal"
-    )
-    st.session_state.menu_actual = menu_seleccionado
+        menu_seleccionado = st.session_state.pop("menu_override")
+    else:
+        menu_seleccionado = st.radio("Navegación principal", opciones_menu)
 
     st.divider()
     if st.button("🚪 Cerrar sesión"):
@@ -847,6 +784,38 @@ with st.sidebar:
 # ==========================================
 # 8. EXPORTADORES A EXCEL Y PDF
 # ==========================================
+def formatear_moneda(valor):
+    """Formatea valores monetarios en formato colombiano sin alterar el valor numérico interno."""
+    try:
+        numero = float(valor or 0)
+    except (TypeError, ValueError):
+        numero = 0.0
+    texto = f"{numero:,.2f}"
+    texto = texto.replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"$ {texto}"
+
+
+def formatear_columna_valor(df, columna="Valor"):
+    """Configura la columna monetaria de un DataFrame para edición/visualización sin convertirla a texto."""
+    if df is None or df.empty or columna not in df.columns:
+        return df
+    resultado = df.copy()
+    resultado[columna] = pd.to_numeric(resultado[columna], errors="coerce").fillna(0.0)
+    return resultado
+
+
+def config_monetaria(columnas):
+    """Devuelve configuración monetaria para st.data_editor/st.dataframe."""
+    config = {}
+    for columna in columnas:
+        config[columna] = st.column_config.NumberColumn(
+            columna,
+            format="$ %,.2f",
+            step=0.01
+        )
+    return config
+
+
 def total_columna(df, columna="Valor"):
     if df is None or df.empty or columna not in df.columns:
         return 0.0
@@ -902,7 +871,7 @@ def escribir_tabla(ws, fila, titulo, df):
                 celda = ws.cell(row=fila, column=columna)
                 celda.value = valor if not pd.isna(valor) else ""
                 if nombre == "Valor":
-                    celda.number_format = '#,##0.00'
+                    celda.number_format = '$ #,##0.00'
             fila += 1
     else:
         fila += 1
@@ -938,7 +907,7 @@ def escribir_gastos_bancarios(ws, fila, df):
                 celda = ws.cell(row=fila, column=columna)
                 celda.value = valor if not pd.isna(valor) else ""
                 if nombre != "Fecha":
-                    celda.number_format = '#,##0.00'
+                    celda.number_format = '$ #,##0.00'
             fila += 1
             
     fila_total = fila
@@ -994,7 +963,7 @@ def preparar_excel(
         ws.cell(row=fila, column=1).value = nombre
         ws.cell(row=fila, column=1).font = Font(bold=True)
         ws.cell(row=fila, column=2).value = valor
-        ws.cell(row=fila, column=2).number_format = '#,##0.00'
+        ws.cell(row=fila, column=2).number_format = '$ #,##0.00'
         fila += 1
 
     fila = escribir_tabla(ws, fila, nombres_titulos["t1"], salidas_extracto)
@@ -1052,11 +1021,11 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     story.append(Paragraph("SALDOS Y CÁLCULO DE LA CONCILIACIÓN", sec_style))
     res_final_val = c_data.get('resultado_final', 0.0)
     data_sal = [
-        [Paragraph("SALDO SEGÚN EXTRACTO BANCARIO", normal_style), f"$ {c_data.get('saldo_extracto', 0):,.2f}"],
-        [Paragraph("SALDO SEGÚN LIBROS", normal_style), f"$ {c_data.get('saldo_libros', 0):,.2f}"],
-        [Paragraph("DIFERENCIA A JUSTIFICAR", normal_style), f"$ {c_data.get('diferencia_inicial', 0):,.2f}"],
-        [Paragraph("DIFERENCIA CONCILIADA", normal_style), f"$ {c_data.get('diferencia_conciliada', 0):,.2f}"],
-        [Paragraph("RESULTADO FINAL", bold_style), Paragraph(f"$ {res_final_val:,.2f}", bold_style)],
+        [Paragraph("SALDO SEGÚN EXTRACTO BANCARIO", normal_style), formatear_moneda(c_data.get('saldo_extracto', 0))],
+        [Paragraph("SALDO SEGÚN LIBROS", normal_style), formatear_moneda(c_data.get('saldo_libros', 0))],
+        [Paragraph("DIFERENCIA A JUSTIFICAR", normal_style), formatear_moneda(c_data.get('diferencia_inicial', 0))],
+        [Paragraph("DIFERENCIA CONCILIADA", normal_style), formatear_moneda(c_data.get('diferencia_conciliada', 0))],
+        [Paragraph("RESULTADO FINAL", bold_style), Paragraph(formatear_moneda(res_final_val), bold_style)],
         [Paragraph("ESTADO", bold_style), Paragraph(str(c_data.get('estado', '')), bold_style)],
     ]
     t_sal = Table(data_sal, colWidths=[320, 220])
@@ -1078,7 +1047,7 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
                 val = reg.get(k, "")
                 if k == "Valor" or k not in ["Fecha", "Beneficiario", "Documento", "Concepto"]:
                     try:
-                        val = f"$ {float(val):,.2f}"
+                        val = formatear_moneda(val)
                     except (ValueError, TypeError):
                         pass
                 r.append(Paragraph(str(val), normal_style))
@@ -1123,14 +1092,7 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
     st.divider()
 
     if pendientes.empty:
-        st.info(
-            "ℹ️ No hay conciliaciones con estado **Pendiente de revisión** "
-            "para la empresa seleccionada."
-        )
-        st.caption(
-            "Para que una conciliación aparezca aquí debe haberse enviado desde "
-            "Nueva Conciliación o desde Historial usando **Enviar a Revisión**."
-        )
+        st.success("🎉 ¡Excelente! No hay conciliaciones pendientes por auditar en este momento.")
     else:
         st.subheader("📋 Conciliaciones Asignadas para Auditoría")
         for idx, fila in pendientes.iterrows():
@@ -1193,25 +1155,34 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
 
                     st.markdown("**SALDOS Y CÁLCULO DE LA CONCILIACIÓN**")
                     df_saldos = pd.DataFrame([
-                        {"Concepto": "SALDO SEGÚN EXTRACTO BANCARIO", "Valor": f"$ {c_data.get('saldo_extracto', 0):,.2f}"},
-                        {"Concepto": "SALDO SEGÚN LIBROS", "Valor": f"$ {c_data.get('saldo_libros', 0):,.2f}"},
-                        {"Concepto": "DIFERENCIA A JUSTIFICAR", "Valor": f"$ {c_data.get('diferencia_inicial', 0):,.2f}"},
-                        {"Concepto": "DIFERENCIA CONCILIADA", "Valor": f"$ {c_data.get('diferencia_conciliada', 0):,.2f}"},
-                        {"Concepto": "RESULTADO FINAL", "Valor": f"$ {c_data.get('resultado_final', 0):,.2f}"},
+                        {"Concepto": "SALDO SEGÚN EXTRACTO BANCARIO", "Valor": c_data.get('saldo_extracto', 0)},
+                        {"Concepto": "SALDO SEGÚN LIBROS", "Valor": c_data.get('saldo_libros', 0)},
+                        {"Concepto": "DIFERENCIA A JUSTIFICAR", "Valor": c_data.get('diferencia_inicial', 0)},
+                        {"Concepto": "DIFERENCIA CONCILIADA", "Valor": c_data.get('diferencia_conciliada', 0)},
+                        {"Concepto": "RESULTADO FINAL", "Valor": c_data.get('resultado_final', 0)},
                         {"Concepto": "ESTADO", "Valor": c_data.get('estado', 'N/A')}
                     ])
-                    st.table(df_saldos)
+                    df_saldos_mostrar = df_saldos.copy()
+                    df_saldos_mostrar.loc[df_saldos_mostrar["Concepto"] != "ESTADO", "Valor"] = df_saldos_mostrar.loc[df_saldos_mostrar["Concepto"] != "ESTADO", "Valor"].apply(formatear_moneda)
+                    st.dataframe(df_saldos_mostrar, use_container_width=True, hide_index=True)
 
                     st.markdown(f"**1. {t1_nombre}**")
-                    st.dataframe(pd.DataFrame(datos.get("salidas_extracto", [])), use_container_width=True, hide_index=True)
+                    df_aud_t1 = pd.DataFrame(datos.get("salidas_extracto", []))
+                    st.dataframe(formatear_columna_valor(df_aud_t1), use_container_width=True, hide_index=True, column_config=config_monetaria(["Valor"]))
                     st.markdown(f"**2. {t2_nombre}**")
-                    st.dataframe(pd.DataFrame(datos.get("salidas_libros", [])), use_container_width=True, hide_index=True)
+                    df_aud_t2 = pd.DataFrame(datos.get("salidas_libros", []))
+                    st.dataframe(formatear_columna_valor(df_aud_t2), use_container_width=True, hide_index=True, column_config=config_monetaria(["Valor"]))
                     st.markdown(f"**3. {t3_nombre}**")
-                    st.dataframe(pd.DataFrame(datos.get("entradas_libros", [])), use_container_width=True, hide_index=True)
+                    df_aud_t3 = pd.DataFrame(datos.get("entradas_libros", []))
+                    st.dataframe(formatear_columna_valor(df_aud_t3), use_container_width=True, hide_index=True, column_config=config_monetaria(["Valor"]))
                     st.markdown(f"**4. {t4_nombre}**")
-                    st.dataframe(pd.DataFrame(datos.get("entradas_extracto", [])), use_container_width=True, hide_index=True)
+                    df_aud_t4 = pd.DataFrame(datos.get("entradas_extracto", []))
+                    st.dataframe(formatear_columna_valor(df_aud_t4), use_container_width=True, hide_index=True, column_config=config_monetaria(["Valor"]))
                     st.markdown("**GASTOS BANCARIOS**")
-                    st.dataframe(pd.DataFrame(datos.get("gastos_bancarios", [])), use_container_width=True, hide_index=True)
+                    df_aud_gastos = pd.DataFrame(datos.get("gastos_bancarios", []))
+                    for _col_monetaria in ["4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]:
+                        df_aud_gastos = formatear_columna_valor(df_aud_gastos, _col_monetaria)
+                    st.dataframe(df_aud_gastos, use_container_width=True, hide_index=True, column_config=config_monetaria(["4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]))
 
                 with tab_aud2:
                     st.subheader("📋 Lista de Verificación de Control Interno")
@@ -1283,67 +1254,35 @@ elif menu_seleccionado == "📊 Dashboard":
         st.info("ℹ️ Aún no hay datos registrados para generar el análisis analítico.")
     else:
         total_conciliaciones = len(historial)
+        exitosas = len(historial[historial["resultado_final"].abs() < 0.005])
+        tasa_exito = (exitosas / total_conciliaciones * 100) if total_conciliaciones > 0 else 0.0
+        monto_diferencias = historial["resultado_final"].abs().sum()
 
-        # Estados del flujo de auditoría
         aprobadas_cnt = len(historial[historial["workflow_status"] == "Aprobada"])
         pendientes_cnt = len(historial[historial["workflow_status"] == "Pendiente de revisión"])
         borradores_cnt = len(historial[historial["workflow_status"] == "Borrador"])
         devueltas_cnt = len(historial[historial["workflow_status"] == "Requiere corrección"])
 
-        # La tasa se presenta como aprobación para que no se confunda con
-        # el resultado contable de la conciliación.
-        tasa_aprobacion = (aprobadas_cnt / total_conciliaciones * 100) if total_conciliaciones > 0 else 0.0
-
-        # Diferencia que todavía pertenece a conciliaciones no aprobadas.
-        no_aprobadas = historial[historial["workflow_status"] != "Aprobada"]
-        monto_diferencias_pendientes = no_aprobadas["resultado_final"].abs().sum() if not no_aprobadas.empty else 0.0
-
-        st.subheader("📈 Resumen Ejecutivo")
-        st.caption("Los indicadores muestran el estado actual del flujo de conciliación y auditoría.")
-
-        # Primera fila: cinco indicadores claramente separados.
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("📋 Total", total_conciliaciones)
-        k2.metric("✅ Aprobadas", aprobadas_cnt)
-        k3.metric("🟠 Pendientes", pendientes_cnt)
-        k4.metric("🔵 Borradores", borradores_cnt)
-        k5.metric("🔴 Devueltas", devueltas_cnt)
+        st.subheader("📈 Indicadores Clave de Desempeño (KPIs)")
+        kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
+        kpi_col1.metric("Total Conciliaciones", total_conciliaciones)
+        kpi_col2.metric("Tasa de Éxito", f"{tasa_exito:.1f}%")
+        kpi_col3.metric("Diferencia Total Pendiente", formatear_moneda(monto_diferencias))
+        kpi_col4.metric("Pendientes por Auditar", pendientes_cnt)
 
         st.divider()
-
-        # Segunda fila: dinero pendiente y porcentaje de aprobación.
-        m1, m2 = st.columns(2)
-        m1.metric("💰 Diferencia Total Pendiente", f"$ {monto_diferencias_pendientes:,.2f}")
-        m2.metric("📊 Tasa de Aprobación", f"{tasa_aprobacion:.1f}%")
-
-        st.divider()
-
-        col_wf, col_pie = st.columns([1.15, 1])
-
+        col_wf, col_pie = st.columns([2, 2])
         with col_wf:
-            st.subheader("🔎 Estado del Flujo")
-            st.caption("Cantidad de conciliaciones en cada etapa.")
-
-            wf1, wf2 = st.columns(2)
-            wf1.metric("✅ Aprobadas", aprobadas_cnt)
-            wf2.metric("🟠 Pendientes de revisión", pendientes_cnt)
-
-            wf3, wf4 = st.columns(2)
-            wf3.metric("🔵 Borradores", borradores_cnt)
-            wf4.metric("🔴 Requieren corrección", devueltas_cnt)
-
-            st.markdown("**Lectura rápida del flujo**")
-            if devueltas_cnt > 0:
-                st.warning(f"🔴 Hay {devueltas_cnt} conciliación(es) devuelta(s) que requieren corrección.")
-            elif pendientes_cnt > 0:
-                st.info(f"🟠 Hay {pendientes_cnt} conciliación(es) esperando revisión.")
-            elif borradores_cnt > 0:
-                st.info(f"🔵 Hay {borradores_cnt} borrador(es) pendientes de envío a revisión.")
-            else:
-                st.success("🟢 No hay conciliaciones pendientes en el flujo de revisión.")
+            st.markdown("**Estado del Flujo de Auditoría**")
+            w1, w2 = st.columns(2)
+            w1.metric("Aprobadas", aprobadas_cnt)
+            w2.metric("Pendientes de Revisión", pendientes_cnt)
+            w3, w4 = st.columns(2)
+            w3.metric("Borradores", borradores_cnt)
+            w4.metric("Devueltas / Corrección", devueltas_cnt)
 
         with col_pie:
-            st.subheader("📊 Distribución por Estado")
+            st.markdown("**Distribución por Estado de Revisión**")
             df_pie = pd.DataFrame({
                 "Estado": ["Aprobada", "Pendiente de revisión", "Borrador", "Requiere corrección"],
                 "Cantidad": [aprobadas_cnt, pendientes_cnt, borradores_cnt, devueltas_cnt]
@@ -1357,22 +1296,10 @@ elif menu_seleccionado == "📊 Dashboard":
                         "Pendiente de revisión": "#F39C12",
                         "Borrador": "#3498DB",
                         "Requiere corrección": "#E74C3C"
-                    }, hole=0.5
+                    }, hole=0.4
                 )
-                fig_pie.update_traces(textposition="inside", textinfo="percent+label")
-                fig_pie.update_layout(
-                    margin=dict(t=10, b=10, l=10, r=10),
-                    height=330,
-                    legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5)
-                )
+                fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=200)
                 st.plotly_chart(fig_pie, use_container_width=True)
-
-        st.divider()
-        st.subheader("💡 Indicadores de Control")
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Pendientes por Auditar", pendientes_cnt)
-        c2.metric("Pendientes + Corrección", pendientes_cnt + devueltas_cnt)
-        c3.metric("Conciliaciones Cerradas", aprobadas_cnt)
 
 elif menu_seleccionado == "🏢 Empresas":
     st.title("🏢 Maestro de Empresas")
@@ -1471,59 +1398,31 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
     st.dataframe(obtener_cuentas(empresa_activa_id), use_container_width=True, hide_index=True)
 
 elif menu_seleccionado == "📝 Nueva Conciliación":
-    id_edicion = st.session_state.get("conciliacion_a_editar") or st.session_state.get("id_conciliacion_activa")
-    if id_edicion is not None:
-        try:
-            id_edicion = int(id_edicion)
-        except (TypeError, ValueError):
-            id_edicion = None
-    # El ID activo se conserva por separado para que un rerun de Streamlit
-    # nunca convierta una edición/corrección en una nueva conciliación.
-    if id_edicion is not None:
-        st.session_state.id_conciliacion_activa = id_edicion
-    modo_correccion = bool(st.session_state.get("modo_correccion", False)) and bool(id_edicion)
-    c_edit = obtener_conciliacion_por_id(id_edicion) if id_edicion else None
-
-    if modo_correccion:
-        st.title("🔧 Corrección de Conciliación Devuelta")
-        consecutivo_edit_str = f"CONC-{int(id_edicion):06d}"
-        st.error(
-            f"🔴 **{consecutivo_edit_str} fue devuelta por Auditoría y requiere corrección.**"
-        )
-        if c_edit:
-            st.warning(
-                f"**Observaciones del Auditor:** {c_edit.get('motivo_correccion') or 'Sin detalle registrado.'}\n\n"
-                f"**Categoría:** {c_edit.get('tipo_hallazgo') or 'General'}\n\n"
-                f"**Revisado por:** {c_edit.get('revisado_por_usuario') or 'N/A'}"
-            )
-        st.caption("Corrige los datos necesarios y utiliza **Enviar Corrección a Revisión** cuando hayas terminado.")
-    else:
-        st.title("📝 Captura / Edición de Conciliación Bancaria")
-
-    if id_edicion and not modo_correccion:
+    st.title("📝 Captura / Edición de Conciliación Bancaria")
+    id_edicion = st.session_state.get("conciliacion_a_editar", None)
+    if id_edicion:
+        c_edit = obtener_conciliacion_por_id(id_edicion)
         consecutivo_edit_str = f"CONC-{int(id_edicion):06d}"
         st.info(f"✏️ **Modo Edición Activado:** Editando Conciliación {consecutivo_edit_str} ({c_edit.get('empresa')} - {c_edit.get('banco')})")
-
-    if id_edicion:
-        if st.button("❌ Cancelar y volver al Historial"):
+        if st.button("❌ Cancelar Edición y Crear Nueva"):
             st.session_state.conciliacion_a_editar = None
-            st.session_state.id_conciliacion_activa = None
-            st.session_state.modo_correccion = False
-            st.session_state.pop("datos_cargados_edit", None)
+            if "datos_cargados_edit" in st.session_state:
+                del st.session_state.datos_cargados_edit
             st.rerun()
 
-    if "tabla1" not in st.session_state:
+    if "tabla1" not in st.session_state or id_edicion:
         st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
-    if "tabla2" not in st.session_state:
+    if "tabla2" not in st.session_state or id_edicion:
         st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla3" not in st.session_state:
+    if "tabla3" not in st.session_state or id_edicion:
         st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla4" not in st.session_state:
+    if "tabla4" not in st.session_state or id_edicion:
         st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla5" not in st.session_state:
+    if "tabla5" not in st.session_state or id_edicion:
         st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
 
     if id_edicion and "datos_cargados_edit" not in st.session_state:
+        c_edit = obtener_conciliacion_por_id(id_edicion)
         if c_edit:
             try:
                 d_js = json.loads(c_edit.get("datos_json", "{}"))
@@ -1542,6 +1441,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         col1, col2 = st.columns(2)
         with col1:
             if id_edicion:
+                c_edit = obtener_conciliacion_por_id(id_edicion)
                 empresa = c_edit.get("empresa", "")
                 nit = c_edit.get("nit", "")
                 mes = c_edit.get("mes", "")
@@ -1576,6 +1476,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
 
         with col2:
             if id_edicion:
+                c_edit = obtener_conciliacion_por_id(id_edicion)
                 banco = c_edit.get("banco", "")
                 cuenta = c_edit.get("cuenta", "")
                 tipo = c_edit.get("tipo", "Cuenta de ahorros")
@@ -1625,19 +1526,20 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.divider()
     st.subheader("Saldos")
     c1, c2 = st.columns(2)
-    val_ext = float(c_edit.get("saldo_extracto", 0.0)) if id_edicion and c_edit else 0.0
-    val_lib = float(c_edit.get("saldo_libros", 0.0)) if id_edicion and c_edit else 0.0
+    val_ext = float(obtener_conciliacion_por_id(id_edicion).get("saldo_extracto", 0.0)) if id_edicion else 0.0
+    val_lib = float(obtener_conciliacion_por_id(id_edicion).get("saldo_libros", 0.0)) if id_edicion else 0.0
     with c1:
         saldo_extracto = st.number_input("Saldo según Extracto", value=val_ext, format="%.2f", key="form_saldo_extracto")
     with c2:
         saldo_libros = st.number_input("Saldo según Libros", value=val_lib, format="%.2f", key="form_saldo_libros")
 
     diferencia_inicial = saldo_extracto - saldo_libros
-    st.metric("Diferencia a Justificar", f"$ {diferencia_inicial:,.2f}")
+    st.metric("Diferencia a Justificar", formatear_moneda(diferencia_inicial))
 
     st.divider()
     st.subheader(f"1. {nombres_titulos['t1']}")
-    salidas_extracto = st.data_editor(st.session_state.tabla1, num_rows="dynamic", use_container_width=True, key="editor_tabla1")
+    salidas_extracto_df = formatear_columna_valor(st.session_state.tabla1)
+    salidas_extracto = st.data_editor(salidas_extracto_df, num_rows="dynamic", use_container_width=True, key="editor_tabla1", column_config=config_monetaria(["Valor"]))
     cols_t1 = ["Fecha", "Beneficiario", "Documento", "Valor"]
     c_p1, c_b1, c_del1 = st.columns([3, 1, 1])
     with c_p1:
@@ -1655,7 +1557,8 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
 
     st.divider()
     st.subheader(f"2. {nombres_titulos['t2']}")
-    salidas_libros = st.data_editor(st.session_state.tabla2, num_rows="dynamic", use_container_width=True, key="editor_tabla2")
+    salidas_libros_df = formatear_columna_valor(st.session_state.tabla2)
+    salidas_libros = st.data_editor(salidas_libros_df, num_rows="dynamic", use_container_width=True, key="editor_tabla2", column_config=config_monetaria(["Valor"]))
     cols_t2 = ["Fecha", "Concepto", "Valor"]
     c_p2, c_b2, c_del2 = st.columns([3, 1, 1])
     with c_p2:
@@ -1673,7 +1576,8 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
 
     st.divider()
     st.subheader(f"3. {nombres_titulos['t3']}")
-    entradas_libros = st.data_editor(st.session_state.tabla3, num_rows="dynamic", use_container_width=True, key="editor_tabla3")
+    entradas_libros_df = formatear_columna_valor(st.session_state.tabla3)
+    entradas_libros = st.data_editor(entradas_libros_df, num_rows="dynamic", use_container_width=True, key="editor_tabla3", column_config=config_monetaria(["Valor"]))
     cols_t3 = ["Fecha", "Concepto", "Valor"]
     c_p3, c_b3, c_del3 = st.columns([3, 1, 1])
     with c_p3:
@@ -1691,7 +1595,8 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
 
     st.divider()
     st.subheader(f"4. {nombres_titulos['t4']}")
-    entradas_extracto = st.data_editor(st.session_state.tabla4, num_rows="dynamic", use_container_width=True, key="editor_tabla4")
+    entradas_extracto_df = formatear_columna_valor(st.session_state.tabla4)
+    entradas_extracto = st.data_editor(entradas_extracto_df, num_rows="dynamic", use_container_width=True, key="editor_tabla4", column_config=config_monetaria(["Valor"]))
     cols_t4 = ["Fecha", "Concepto", "Valor"]
     c_p4, c_b4, c_del4 = st.columns([3, 1, 1])
     with c_p4:
@@ -1709,7 +1614,10 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
 
     st.divider()
     st.subheader("Gastos Bancarios")
-    gastos_bancarios = st.data_editor(st.session_state.tabla5, num_rows="dynamic", use_container_width=True, key="editor_tabla5")
+    gastos_bancarios_df = formatear_columna_valor(st.session_state.tabla5, "4 x 1000")
+    for _col_monetaria in ["Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]:
+        gastos_bancarios_df = formatear_columna_valor(gastos_bancarios_df, _col_monetaria)
+    gastos_bancarios = st.data_editor(gastos_bancarios_df, num_rows="dynamic", use_container_width=True, key="editor_tabla5", column_config=config_monetaria(["4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]))
     cols_t5 = ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
     c_p5, c_b5, c_del5 = st.columns([3, 1, 1])
     with c_p5:
@@ -1740,9 +1648,9 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.divider()
     st.subheader("Resultado de la Conciliación")
     r1, r2, r3 = st.columns(3)
-    r1.metric("Diferencia Inicial", f"$ {diferencia_inicial:,.2f}")
-    r2.metric("Diferencia Conciliada", f"$ {diferencia_conciliada:,.2f}")
-    r3.metric("Resultado Final", f"$ {resultado_final:,.2f}")
+    r1.metric("Diferencia Inicial", formatear_moneda(diferencia_inicial))
+    r2.metric("Diferencia Conciliada", formatear_moneda(diferencia_conciliada))
+    r3.metric("Resultado Final", formatear_moneda(resultado_final))
 
     preparado_por = st.text_input("Preparado por", value=usuario_actual["nombre"], key="form_preparado_por")
     revisado_por = st.text_input("Revisado por", key="form_revisado_por")
@@ -1758,8 +1666,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.divider()
     btn_col_borr, btn_col_env = st.columns(2)
     with btn_col_borr:
-        texto_guardar = "💾 Guardar Corrección" if modo_correccion else "💾 Guardar como Borrador"
-        if st.button(texto_guardar, key="btn_guardar_borrador"):
+        if st.button("💾 Guardar como Borrador", key="btn_guardar_borrador"):
             id_g = guardar_conciliacion_historial(
                 empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
                 saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
@@ -1769,13 +1676,10 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             )
             st.session_state.pop("conciliacion_a_editar", None)
             st.session_state.pop("datos_cargados_edit", None)
-            st.session_state.id_conciliacion_activa = None
-            st.session_state.modo_correccion = False
             st.success(f"💾 Conciliación CONC-{int(id_g):06d} guardada como Borrador.")
 
     with btn_col_env:
-        texto_enviar = "🚀 Enviar Corrección a Revisión" if modo_correccion else "🚀 Enviar a Revisión"
-        if st.button(texto_enviar, key="btn_enviar_revision", type="primary"):
+        if st.button("🚀 Enviar a Revisión", key="btn_enviar_revision", type="primary"):
             id_g = guardar_conciliacion_historial(
                 empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
                 saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
@@ -1785,19 +1689,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             )
             st.session_state.pop("conciliacion_a_editar", None)
             st.session_state.pop("datos_cargados_edit", None)
-            st.session_state.id_conciliacion_activa = None
-            st.session_state.modo_correccion = False
-
-            # Si el usuario puede auditar, lo llevamos directamente a la bandeja
-            # para que vea la conciliación recién enviada sin tener que buscarla.
-            if rol_actual in ["Administrador", "Revisor"]:
-                st.session_state.menu_override = "🔍 Auditoría y Revisiones"
-                st.rerun()
-            else:
-                st.success(
-                    f"🚀 Conciliación CONC-{int(id_g):06d} enviada correctamente a Revisión. "
-                    "Ahora queda disponible para un usuario con rol Revisor o Administrador."
-                )
+            st.success(f"🚀 Conciliación CONC-{int(id_g):06d} enviada correctamente a Revisión.")
 
 elif menu_seleccionado == "📋 Historial":
     st.title("📋 Historial de Conciliaciones")
@@ -1847,34 +1739,10 @@ elif menu_seleccionado == "📋 Historial":
 
                 c_act1, c_act2, c_act3 = st.columns(3)
                 with c_act1:
-                    if wf_status == "Requiere corrección" and rol_actual in ["Preparador", "Administrador"]:
-                        if st.button("🔧 Corregir Conciliación", key=f"btn_corregir_{fila['id']}", type="primary"):
-                            st.session_state.conciliacion_a_editar = int(fila['id'])
-                            st.session_state.id_conciliacion_activa = int(fila['id'])
-                            st.session_state.modo_correccion = True
-                            st.session_state.pop("datos_cargados_edit", None)
-                            st.session_state.menu_override = "📝 Nueva Conciliación"
-                            st.rerun()
-                    elif wf_status != "Aprobada":
-                        if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                            st.session_state.conciliacion_a_editar = int(fila['id'])
-                            st.session_state.id_conciliacion_activa = int(fila['id'])
-                            st.session_state.modo_correccion = False
-                            st.session_state.pop("datos_cargados_edit", None)
-                            st.session_state.menu_override = "📝 Nueva Conciliación"
-                            st.rerun()
-
-                # Permite enviar un Borrador directamente desde el Historial.
-                if wf_status == "Borrador" and rol_actual in ["Preparador", "Administrador"]:
-                    if st.button("🚀 Enviar a Revisión", key=f"btn_hist_enviar_{fila['id']}", type="primary"):
-                        actualizar_estado_auditoria(
-                            fila["id"],
-                            "Pendiente de revisión",
-                            usuario_actual["nombre"]
-                        )
-                        st.success(
-                            f"🚀 {consecutivo_str} fue enviado correctamente a Revisión."
-                        )
+                    if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
+                        st.session_state.conciliacion_a_editar = fila['id']
+                        st.session_state.pop("datos_cargados_edit", None)
+                        st.session_state.menu_override = "📝 Nueva Conciliación"
                         st.rerun()
 
                 with c_act2:
