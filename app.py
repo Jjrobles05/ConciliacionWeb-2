@@ -782,10 +782,24 @@ with st.sidebar:
 
     st.divider()
     opciones_menu = obtener_opciones_menu(rol_actual)
+
+    # Navegación persistente: evita que Streamlit vuelva al Dashboard
+    # cuando una acción de Historial/Edición provoca un rerun.
     if "menu_override" in st.session_state:
-        menu_seleccionado = st.session_state.pop("menu_override")
-    else:
-        menu_seleccionado = st.radio("Navegación principal", opciones_menu)
+        destino = st.session_state.pop("menu_override")
+        if destino in opciones_menu:
+            st.session_state.menu_actual = destino
+
+    if st.session_state.get("menu_actual") not in opciones_menu:
+        st.session_state.menu_actual = opciones_menu[0]
+
+    menu_seleccionado = st.radio(
+        "Navegación principal",
+        opciones_menu,
+        index=opciones_menu.index(st.session_state.menu_actual),
+        key="radio_menu_principal"
+    )
+    st.session_state.menu_actual = menu_seleccionado
 
     st.divider()
     if st.button("🚪 Cerrar sesión"):
