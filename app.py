@@ -1398,7 +1398,16 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
     st.dataframe(obtener_cuentas(empresa_activa_id), use_container_width=True, hide_index=True)
 
 elif menu_seleccionado == "📝 Nueva Conciliación":
-    id_edicion = st.session_state.get("conciliacion_a_editar", None)
+    id_edicion = st.session_state.get("conciliacion_a_editar") or st.session_state.get("id_conciliacion_activa")
+    if id_edicion is not None:
+        try:
+            id_edicion = int(id_edicion)
+        except (TypeError, ValueError):
+            id_edicion = None
+    # El ID activo se conserva por separado para que un rerun de Streamlit
+    # nunca convierta una edición/corrección en una nueva conciliación.
+    if id_edicion is not None:
+        st.session_state.id_conciliacion_activa = id_edicion
     modo_correccion = bool(st.session_state.get("modo_correccion", False)) and bool(id_edicion)
     c_edit = obtener_conciliacion_por_id(id_edicion) if id_edicion else None
 
@@ -1425,19 +1434,20 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     if id_edicion:
         if st.button("❌ Cancelar y volver al Historial"):
             st.session_state.conciliacion_a_editar = None
+            st.session_state.id_conciliacion_activa = None
             st.session_state.modo_correccion = False
             st.session_state.pop("datos_cargados_edit", None)
             st.rerun()
 
-    if "tabla1" not in st.session_state or id_edicion:
+    if "tabla1" not in st.session_state:
         st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
-    if "tabla2" not in st.session_state or id_edicion:
+    if "tabla2" not in st.session_state:
         st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla3" not in st.session_state or id_edicion:
+    if "tabla3" not in st.session_state:
         st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla4" not in st.session_state or id_edicion:
+    if "tabla4" not in st.session_state:
         st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla5" not in st.session_state or id_edicion:
+    if "tabla5" not in st.session_state:
         st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
 
     if id_edicion and "datos_cargados_edit" not in st.session_state:
@@ -1689,6 +1699,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             )
             st.session_state.pop("conciliacion_a_editar", None)
             st.session_state.pop("datos_cargados_edit", None)
+            st.session_state.id_conciliacion_activa = None
             st.session_state.modo_correccion = False
             st.success(f"💾 Conciliación CONC-{int(id_g):06d} guardada como Borrador.")
 
@@ -1704,6 +1715,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             )
             st.session_state.pop("conciliacion_a_editar", None)
             st.session_state.pop("datos_cargados_edit", None)
+            st.session_state.id_conciliacion_activa = None
             st.session_state.modo_correccion = False
 
             # Si el usuario puede auditar, lo llevamos directamente a la bandeja
@@ -1767,14 +1779,16 @@ elif menu_seleccionado == "📋 Historial":
                 with c_act1:
                     if wf_status == "Requiere corrección" and rol_actual in ["Preparador", "Administrador"]:
                         if st.button("🔧 Corregir Conciliación", key=f"btn_corregir_{fila['id']}", type="primary"):
-                            st.session_state.conciliacion_a_editar = fila['id']
+                            st.session_state.conciliacion_a_editar = int(fila['id'])
+                            st.session_state.id_conciliacion_activa = int(fila['id'])
                             st.session_state.modo_correccion = True
                             st.session_state.pop("datos_cargados_edit", None)
                             st.session_state.menu_override = "📝 Nueva Conciliación"
                             st.rerun()
                     elif wf_status != "Aprobada":
                         if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                            st.session_state.conciliacion_a_editar = fila['id']
+                            st.session_state.conciliacion_a_editar = int(fila['id'])
+                            st.session_state.id_conciliacion_activa = int(fila['id'])
                             st.session_state.modo_correccion = False
                             st.session_state.pop("datos_cargados_edit", None)
                             st.session_state.menu_override = "📝 Nueva Conciliación"
