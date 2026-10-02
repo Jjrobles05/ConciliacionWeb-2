@@ -264,6 +264,32 @@ def eliminar_conciliacion_db(conciliacion_id):
     conn.close()
 
 
+def limpiar_datos_operativos():
+    """Elimina bancos, cuentas y conciliaciones, conservando empresas y usuarios."""
+    conn = conectar_db()
+    c = conn.cursor()
+    try:
+        c.execute("DELETE FROM conciliaciones")
+        c.execute("DELETE FROM cuentas_bancarias")
+
+        for tabla in ["conciliaciones", "cuentas_bancarias"]:
+            try:
+                c.execute("DELETE FROM sqlite_sequence WHERE name=?", (tabla,))
+            except Exception:
+                pass
+
+        conn.commit()
+        return True, "Se eliminaron bancos, cuentas y conciliaciones. Empresas y usuarios se conservaron."
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False, f"No fue posible limpiar los datos operativos: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
+
 def reiniciar_datos_aplicativo():
     """Elimina todos los datos operativos y deja la aplicación como instalación nueva.
 
@@ -274,13 +300,11 @@ def reiniciar_datos_aplicativo():
     conn = conectar_db()
     c = conn.cursor()
     try:
-        # Se eliminan primero las tablas hijas para respetar las relaciones.
         c.execute("DELETE FROM conciliaciones")
         c.execute("DELETE FROM cuentas_bancarias")
         c.execute("DELETE FROM usuarios")
         c.execute("DELETE FROM empresas")
 
-        # Reinicia los consecutivos cuando el motor dispone de sqlite_sequence.
         for tabla in ["conciliaciones", "cuentas_bancarias", "usuarios", "empresas"]:
             try:
                 c.execute("DELETE FROM sqlite_sequence WHERE name=?", (tabla,))
@@ -1925,19 +1949,45 @@ elif menu_seleccionado == "👥 Usuarios":
 
 elif menu_seleccionado == "⚙️ Administración":
     st.title("⚙️ Administración")
-    st.subheader("🧹 Reiniciar datos del aplicativo")
+
+    st.subheader("🧹 Limpiar datos operativos")
     st.warning(
-        "⚠️ Esta función elimina TODOS los datos almacenados en la aplicación: "
-        "usuarios, empresas, logos, bancos, cuentas y conciliaciones. "
-        "La estructura del sistema y la conexión a Turso se conservan. "
-        "Esta acción no se puede deshacer."
+        "Esta función elimina únicamente bancos, cuentas bancarias y conciliaciones. "
+        "Las empresas, usuarios, roles y logos se conservarán. Esta acción no se puede deshacer."
     )
 
+    confirmar_operativo = st.checkbox(
+        "Entiendo que voy a borrar bancos, cuentas y conciliaciones",
+        key="confirmar_limpieza_operativa"
+    )
+
+    if st.button(
+        "🧹 BORRAR BANCOS, CUENTAS Y CONCILIACIONES",
+        type="primary",
+        disabled=not confirmar_operativo,
+        use_container_width=True
+    ):
+        ok, mensaje = limpiar_datos_operativos()
+        if ok:
+            for key in ["confirmar_limpieza_operativa"]:
+                st.session_state.pop(key, None)
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+            st.success(mensaje)
+            st.rerun()
+        else:
+            st.error(mensaje)
+
     st.divider()
-    st.write("**Después del reinicio:**")
-    st.write("• El aplicativo quedará como una instalación nueva.")
-    st.write("• Se mostrará nuevamente la pantalla para crear el primer Administrador.")
-    st.write("• Los consecutivos volverán a comenzar desde 1 cuando el motor lo permita.")
+
+    st.subheader("🚨 Reinicio completo")
+    st.warning(
+        "Esta función elimina TODOS los datos: usuarios, empresas, logos, bancos, "
+        "cuentas y conciliaciones. La estructura del sistema y la conexión a Turso se conservan. "
+        "Después será necesario crear nuevamente el primer Administrador."
+    )
 
     confirmar_reset = st.checkbox(
         "Entiendo que voy a borrar permanentemente todos los datos",
@@ -1945,17 +1995,20 @@ elif menu_seleccionado == "⚙️ Administración":
     )
 
     if st.button(
-        "🧹 REINICIAR APLICATIVO Y BORRAR TODOS LOS DATOS",
-        type="primary",
+        "🚨 REINICIAR APLICATIVO Y BORRAR TODO",
+        type="secondary",
         disabled=not confirmar_reset,
         use_container_width=True
     ):
         ok, mensaje = reiniciar_datos_aplicativo()
         if ok:
-            # El usuario actual acaba de ser eliminado de la base de datos.
             st.session_state.usuario_autenticado = None
             st.session_state.pop("menu_override", None)
             st.session_state.pop("confirmar_reinicio_total", None)
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
             st.success(mensaje)
             st.rerun()
         else:
