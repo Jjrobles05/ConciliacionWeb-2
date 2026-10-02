@@ -769,7 +769,9 @@ rol_actual = usuario_actual["rol"]
 # ==========================================
 empresas_df = obtener_empresas()
 with st.sidebar:
-    st.image("https://img.icons8.com/color/96/bank-building.png", width=70)
+    # Reservamos este espacio arriba para mostrar el logo de la empresa activa.
+    logo_sidebar = st.empty()
+
     st.title("Conciliación Web")
     st.markdown(f"👤 **{usuario_actual['nombre']}**")
     st.caption(f"Rol: **{rol_actual}**")
@@ -780,8 +782,9 @@ with st.sidebar:
         opciones_emp = ["Todas las empresas"] + empresas_df["nombre"].tolist() if not empresas_df.empty else ["Todas las empresas"]
         empresa_activa_nombre = st.selectbox("Empresa a Auditar / Revisar", opciones_emp)
         if empresa_activa_nombre != "Todas las empresas" and not empresas_df.empty:
-            empresa_activa_id = empresas_df.loc[empresas_df["nombre"] == empresa_activa_nombre, "id"].values[0]
-            empresa_activa_nit = empresas_df.loc[empresas_df["nombre"] == empresa_activa_nombre, "nit"].values[0]
+            fila_empresa = empresas_df[empresas_df["nombre"] == empresa_activa_nombre].iloc[0]
+            empresa_activa_id = int(fila_empresa["id"])
+            empresa_activa_nit = fila_empresa["nit"]
         else:
             empresa_activa_id = None
             empresa_activa_nit = ""
@@ -790,6 +793,16 @@ with st.sidebar:
         empresa_activa_nit = usuario_actual.get("empresa_nit") or ""
         empresa_activa_id = usuario_actual.get("empresa_id")
         st.info(f"🏢 **Empresa:** {empresa_activa_nombre}")
+
+    # Logo de la empresa activa en lugar del logo genérico de banco.
+    logo_empresa_sidebar = None
+    if empresa_activa_nombre and empresa_activa_nombre not in ["Todas las empresas", "Sin asignar"]:
+        logo_empresa_sidebar = obtener_logo_empresa(empresa_activa_nombre)
+
+    if logo_empresa_sidebar:
+        logo_sidebar.image(logo_empresa_sidebar, width=90)
+    else:
+        logo_sidebar.image("https://img.icons8.com/color/96/bank-building.png", width=70)
 
     st.divider()
     opciones_menu = obtener_opciones_menu(rol_actual)
