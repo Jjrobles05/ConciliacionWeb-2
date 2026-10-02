@@ -136,9 +136,11 @@ def obtener_empresas():
         c.execute("SELECT id, razon_social, nit FROM empresas ORDER BY razon_social")
         rows = c.fetchall()
         conn.close()
-        return pd.DataFrame(rows, columns=['id', 'nombre', 'nit']) if rows else pd.DataFrame(columns=['id', 'nombre', 'nit'])
+        df = pd.DataFrame(rows, columns=['id', 'nombre', 'nit']) if rows else pd.DataFrame(columns=['id', 'nombre', 'nit'])
+        df['logo'] = None
+        return df
     except Exception:
-        return pd.DataFrame(columns=['id', 'nombre', 'nit'])
+        return pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
 
 
 def obtener_empresa_por_id(empresa_id):
@@ -160,62 +162,76 @@ def obtener_logo_empresa(nombre_empresa):
 
 
 def guardar_empresa(nombre, nit, logo_bytes=None):
+    """Registra una empresa y controla NIT duplicado sin mostrar errores técnicos."""
+    nombre = str(nombre or "").strip()
+    nit = str(nit or "").strip()
+    if not nombre or not nit:
+        return False, "El nombre de la empresa y el NIT son obligatorios."
     conn = conectar_db()
     c = conn.cursor()
-
-    nombre = str(nombre).strip()
-    nit = str(nit).strip()
-
-    # Verificar si el NIT ya existe
-    c.execute(
-        "SELECT id, razon_social FROM empresas WHERE nit = ?",
-        (nit,)
-    )
-
-    existente = c.fetchone()
-
-    if existente:
-        conn.close()
-        return False, (
-            f"El NIT {nit} ya está registrado para "
-            f"la empresa {existente[1]}."
-        )
-
     try:
-        c.execute(
-            """
-            INSERT INTO empresas (nit, razon_social)
-            VALUES (?, ?)
-            """,
-            (nit, nombre)
-        )
-
+        c.execute("SELECT id, razon_social FROM empresas WHERE nit=?", (nit,))
+        existente = c.fetchone()
+        if existente:
+            return False, f"El NIT {nit} ya está registrado para la empresa {existente[1]}."
+        c.execute("INSERT INTO empresas (nit, razon_social) VALUES (?, ?)", (nit, nombre))
         conn.commit()
-        conn.close()
-
         return True, "Empresa registrada con éxito."
-
     except Exception as e:
-        conn.rollback()
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible registrar la empresa: {type(e).__name__}: {e}"
+    finally:
         conn.close()
 
-        return False, f"No fue posible registrar la empresa: {e}"
 
 
 def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
-    conn = conectar_db()
-    c = conn.cursor()
-    c.execute("UPDATE empresas SET razon_social=?, nit=? WHERE id=?", (nombre.strip(), nit.strip(), int(empresa_id)))
-    conn.commit()
-    conn.close()
+    nombre = str(nombre or "").strip()
+    nit = str(nit or "").strip()
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("SELECT id, razon_social FROM empresas WHERE nit=? AND id<>?", (nit, int(empresa_id)))
+        existente = c.fetchone()
+        if existente:
+            return False, f"El NIT {nit} ya está registrado para {existente[1]}."
+        c.execute("UPDATE empresas SET razon_social=?, nit=? WHERE id=?", (nombre, nit, int(empresa_id)))
+        conn.commit()
+        return True, "Empresa actualizada con éxito."
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible actualizar la empresa: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
 
 
 def eliminar_empresa_db(empresa_id):
-    conn = conectar_db()
-    c = conn.cursor()
-    c.execute("DELETE FROM empresas WHERE id=?", (int(empresa_id),))
-    conn.commit()
-    conn.close()
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("SELECT COUNT(*) FROM usuarios WHERE empresa_id=?", (int(empresa_id),))
+        usuarios = int(c.fetchone()[0] or 0)
+        c.execute("SELECT COUNT(*) FROM cuentas_bancarias WHERE empresa_id=?", (int(empresa_id),))
+        cuentas = int(c.fetchone()[0] or 0)
+        c.execute("SELECT COUNT(*) FROM conciliaciones WHERE empresa_id=?", (int(empresa_id),))
+        conciliaciones = int(c.fetchone()[0] or 0)
+        if usuarios or cuentas or conciliaciones:
+            partes = []
+            if usuarios: partes.append(f"{usuarios} usuario(s)")
+            if cuentas: partes.append(f"{cuentas} cuenta(s)")
+            if conciliaciones: partes.append(f"{conciliaciones} conciliación(es)")
+            return False, "No se puede eliminar: la empresa tiene " + ", ".join(partes) + "."
+        c.execute("DELETE FROM empresas WHERE id=?", (int(empresa_id),))
+        conn.commit()
+        return True, "Empresa eliminada correctamente."
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible eliminar la empresa: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
 
 
 def eliminar_conciliacion_db(conciliacion_id):
@@ -1259,10 +1275,13 @@ elif menu_seleccionado == "🏢 Empresas":
                 with c_guard:
                     if st.form_submit_button("Guardar Cambios", type="primary"):
                         logo_b = edit_logo.getvalue() if edit_logo else None
-                        actualizar_empresa_db(empresa_edit_id, edit_nom, edit_nit, logo_b)
-                        st.session_state.empresa_a_editar = None
-                        st.success("Empresa actualizada con éxito.")
-                        st.rerun()
+                        ok, mensaje = actualizar_empresa_db(empresa_edit_id, edit_nom, edit_nit, logo_b)
+                        if ok:
+                            st.session_state.empresa_a_editar = None
+                            st.success(mensaje)
+                            st.rerun()
+                        else:
+                            st.warning(mensaje)
                 with c_canc:
                     if st.form_submit_button("❌ Cancelar"):
                         st.session_state.empresa_a_editar = None
@@ -1279,15 +1298,13 @@ elif menu_seleccionado == "🏢 Empresas":
                     if not nom.strip() or not nit.strip():
                         st.error("Por favor completa el nombre y el NIT.")
                     else:
-                       logo_b = logo_file.getvalue() if logo_file else None
-
-ok, mensaje = guardar_empresa(nom, nit, logo_b)
-
-if ok:
-    st.success(mensaje)
-    st.rerun()
-else:
-    st.warning(mensaje)
+                        logo_b = logo_file.getvalue() if logo_file else None
+                        ok, mensaje = guardar_empresa(nom, nit, logo_b)
+                        if ok:
+                            st.success(mensaje)
+                            st.rerun()
+                        else:
+                            st.warning(mensaje)
 
     st.subheader("Empresas Registradas")
     empresas_list = obtener_empresas()
@@ -1313,9 +1330,12 @@ else:
                 with col_act2:
                     if rol_actual == "Administrador":
                         if st.button("🗑️ Eliminar", key=f"btn_del_emp_{emp['id']}"):
-                            eliminar_empresa_db(emp['id'])
-                            st.success("Empresa eliminada.")
-                            st.rerun()
+                            ok, mensaje = eliminar_empresa_db(emp['id'])
+                            if ok:
+                                st.success(mensaje)
+                                st.rerun()
+                            else:
+                                st.warning(mensaje)
             st.divider()
 
 elif menu_seleccionado == "🏦 Bancos y Cuentas":
