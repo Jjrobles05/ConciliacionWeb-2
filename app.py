@@ -788,10 +788,19 @@ with st.sidebar:
     if "menu_override" in st.session_state:
         destino = st.session_state.pop("menu_override")
         if destino in opciones_menu:
+            # Actualizamos AMBOS estados: el destino de navegación y
+            # el valor del widget radio. Si solo cambiamos menu_actual,
+            # Streamlit puede conservar el valor anterior del radio
+            # (por ejemplo Dashboard) y volver a mostrarlo.
             st.session_state.menu_actual = destino
+            st.session_state.radio_menu_principal = destino
 
     if st.session_state.get("menu_actual") not in opciones_menu:
         st.session_state.menu_actual = opciones_menu[0]
+
+    # Mantener sincronizado el radio con la navegación programática.
+    if st.session_state.get("radio_menu_principal") not in opciones_menu:
+        st.session_state.radio_menu_principal = st.session_state.menu_actual
 
     menu_seleccionado = st.radio(
         "Navegación principal",
