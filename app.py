@@ -28,95 +28,42 @@ st.set_page_config(
 )
 
 # ==========================================
-# 2. ADAPTADOR CONEXIÓN TURSO / SQLITE (DEFINITIVO)
+# 2. CONEXIÓN TURSO / SQLITE
 # ==========================================
-class TursoCursorWrapper:
-    def __init__(self, client):
-        self.client = client
-        self.lastrowid = None
-        self._rows = []
-
-    def execute(self, query, params=()):
-        if params and not isinstance(params, (list, tuple)):
-            params = (params,)
-        
-        res = self.client.execute(query, list(params) if params else [])
-        
-        # Extraer filas y convertirlas a tuplas puras de Python para evitar fallos de 'result'
-        filas_raw = []
-        if hasattr(res, "rows") and res.rows is not None:
-            filas_raw = list(res.rows)
-        elif isinstance(res, list):
-            filas_raw = res
-
-        self._rows = []
-        for r in filas_raw:
-            if isinstance(r, (list, tuple)):
-                self._rows.append(tuple(r))
-            elif hasattr(r, "values"):
-                self._rows.append(tuple(r.values()))
-            elif isinstance(r, dict):
-                self._rows.append(tuple(r.values()))
-            else:
-                # Si el objeto r es un Row especial de libsql, iteramos sobre sus elementos
-                try:
-                    self._rows.append(tuple(item for item in r))
-                except Exception:
-                    self._rows.append(tuple(r))
-
-        try:
-            if hasattr(res, "last_insert_rowid") and res.last_insert_rowid is not None:
-                self.lastrowid = res.last_insert_rowid
-        except Exception:
-            pass
-        return self
-
-    def fetchone(self):
-        if self._rows:
-            return self._rows[0]
-        return None
-
-    def fetchall(self):
-        return self._rows
-
-class TursoConnectionWrapper:
-    def __init__(self, client):
-        self.client = client
-
-    def cursor(self):
-        return TursoCursorWrapper(self.client)
-
-    def commit(self):
-        pass
-
-    def close(self):
-        try:
-            self.client.close()
-        except Exception:
-            pass
-
-    def execute(self, query, params=()):
-        c = self.cursor()
-        c.execute(query, params)
-        return c
-
 def conectar_db():
-    """Conecta a Turso si existen las llaves en Secrets, sino usa SQLite local."""
+    """
+    Conecta directamente a Turso cuando existen los Secrets
+    TURSO_DATABASE_URL y TURSO_AUTH_TOKEN.
+
+    Si los Secrets no están configurados, utiliza SQLite local
+    como respaldo para desarrollo.
+    """
     if "TURSO_DATABASE_URL" in st.secrets and "TURSO_AUTH_TOKEN" in st.secrets:
-        url = st.secrets["TURSO_DATABASE_URL"]
-        token = st.secrets["TURSO_AUTH_TOKEN"]
-        
+        url = str(st.secrets["TURSO_DATABASE_URL"]).strip()
+        token = str(st.secrets["TURSO_AUTH_TOKEN"]).strip()
+
+        # Turso Serverless utiliza HTTPS para el acceso remoto.
         if url.startswith("libsql://"):
-            url = url.replace("libsql://", "https://")
-        
+            url = "https://" + url[len("libsql://"): ]
+
         try:
-            import libsql_client
-            client = libsql_client.create_client_sync(url=url, auth_token=token)
-            return TursoConnectionWrapper(client)
+            import turso_serverless
+
+            return turso_serverless.connect(
+                url,
+                auth_token=token
+            )
         except Exception as e:
-            st.warning(f"⚠️ Error conectando a Turso: {e}. Usando respaldo local.")
-            
-    return sqlite3.connect("conciliaciones.db")
+            st.error(
+                "⚠️ No fue posible conectar con Turso. "
+                f"{type(e).__name__}: {e}"
+            )
+            st.stop()
+
+    return sqlite3.connect(
+        "conciliaciones.db",
+        check_same_thread=False
+    )
 
 # ==========================================
 # 3. CREACIÓN Y ESTRUCTURA DE TABLAS
@@ -565,7 +512,8 @@ def autenticar_usuario(usuario, password):
         if not fila:
             return None
 
-        # Al estar convertidas las filas en tuplas por TursoCursorWrapper, accedemos directamente por índice
+        # turso_serverless implementa la interfaz DB-API y devuelve filas
+        # compatibles con el acceso posicional usado por la aplicación.
         p_hash = fila[3]
         p_salt = fila[4]
 
@@ -580,7 +528,10 @@ def autenticar_usuario(usuario, password):
                 "empresa_nit": fila[8]
             }
     except Exception as e:
-        st.error(f"Error técnico durante la autenticación: {e}")
+        st.error(
+            "Error técnico durante la autenticación: "
+            f"{type(e).__name__}: {e}"
+        )
     return None
 
 def obtener_usuarios():
