@@ -550,16 +550,28 @@ def autenticar_usuario(usuario, password):
         
         if not fila:
             return None
-            
-        if verificar_password(str(password).strip(), fila[4], fila[3]):
+
+        # Función auxiliar para acceder a datos tanto si es objeto/dict como tupla/lista
+        def obtener_val(f, idx, clave):
+            if isinstance(f, dict):
+                return f.get(clave)
+            elif hasattr(f, clave):
+                return getattr(f, clave)
+            else:
+                return f[idx]
+
+        p_hash = obtener_val(fila, 3, "password_hash")
+        p_salt = obtener_val(fila, 4, "salt")
+
+        if p_hash and p_salt and verificar_password(str(password).strip(), p_salt, p_hash):
             return {
-                "id": fila[0],
-                "usuario": fila[1],
-                "nombre": fila[2],
-                "rol": fila[5],
-                "empresa_id": fila[6],
-                "empresa_nombre": fila[7],
-                "empresa_nit": fila[8]
+                "id": obtener_val(fila, 0, "id"),
+                "usuario": obtener_val(fila, 1, "usuario"),
+                "nombre": obtener_val(fila, 2, "nombre"),
+                "rol": obtener_val(fila, 5, "rol"),
+                "empresa_id": obtener_val(fila, 6, "empresa_id"),
+                "empresa_nombre": obtener_val(fila, 7, "empresa_nombre"),
+                "empresa_nit": obtener_val(fila, 8, "empresa_nit")
             }
     except Exception as e:
         st.error(f"Error técnico durante la autenticación: {e}")
@@ -1377,7 +1389,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             else:
                 cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(empresa_activa_id, mes_num, usuario_actual["id"])
                 if not cuentas_asig_df.empty:
-                    st.info("ℹ️ **Cuentas asignadas para tu perfil este mes:**")
+                    st.info("ℹ️️ **Cuentas asignadas para tu perfil este mes:**")
                     cta_sel = st.selectbox(
                         "Cuenta / Tarjeta Registrada",
                         cuentas_asig_df["id"].tolist(),
