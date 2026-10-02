@@ -405,6 +405,17 @@ def guardar_conciliacion_historial(
             entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
             workflow_status
         )
+
+        # Cuando se corrige una devolución, conservamos las observaciones de
+        # Auditoría para que no desaparezcan al guardar o reenviar la corrección.
+        if id_edicion:
+            c.execute("SELECT observaciones FROM conciliaciones WHERE id=?", (int(id_edicion),))
+            anterior = c.fetchone()
+            datos_anteriores = _decodificar_observaciones(anterior[0] if anterior else None)
+            for campo in ("motivo_correccion", "tipo_hallazgo", "revisado_por_usuario", "fecha_revision"):
+                if datos_anteriores.get(campo):
+                    datos[campo] = datos_anteriores[campo]
+
         estado = datos["estado"]
         fecha_creacion = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         observaciones = json.dumps(datos, ensure_ascii=False)
@@ -1364,16 +1375,35 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
     st.dataframe(obtener_cuentas(empresa_activa_id), use_container_width=True, hide_index=True)
 
 elif menu_seleccionado == "📝 Nueva Conciliación":
-    st.title("📝 Captura / Edición de Conciliación Bancaria")
     id_edicion = st.session_state.get("conciliacion_a_editar", None)
-    if id_edicion:
-        c_edit = obtener_conciliacion_por_id(id_edicion)
+    modo_correccion = bool(st.session_state.get("modo_correccion", False)) and bool(id_edicion)
+    c_edit = obtener_conciliacion_por_id(id_edicion) if id_edicion else None
+
+    if modo_correccion:
+        st.title("🔧 Corrección de Conciliación Devuelta")
+        consecutivo_edit_str = f"CONC-{int(id_edicion):06d}"
+        st.error(
+            f"🔴 **{consecutivo_edit_str} fue devuelta por Auditoría y requiere corrección.**"
+        )
+        if c_edit:
+            st.warning(
+                f"**Observaciones del Auditor:** {c_edit.get('motivo_correccion') or 'Sin detalle registrado.'}\n\n"
+                f"**Categoría:** {c_edit.get('tipo_hallazgo') or 'General'}\n\n"
+                f"**Revisado por:** {c_edit.get('revisado_por_usuario') or 'N/A'}"
+            )
+        st.caption("Corrige los datos necesarios y utiliza **Enviar Corrección a Revisión** cuando hayas terminado.")
+    else:
+        st.title("📝 Captura / Edición de Conciliación Bancaria")
+
+    if id_edicion and not modo_correccion:
         consecutivo_edit_str = f"CONC-{int(id_edicion):06d}"
         st.info(f"✏️ **Modo Edición Activado:** Editando Conciliación {consecutivo_edit_str} ({c_edit.get('empresa')} - {c_edit.get('banco')})")
-        if st.button("❌ Cancelar Edición y Crear Nueva"):
+
+    if id_edicion:
+        if st.button("❌ Cancelar y volver al Historial"):
             st.session_state.conciliacion_a_editar = None
-            if "datos_cargados_edit" in st.session_state:
-                del st.session_state.datos_cargados_edit
+            st.session_state.modo_correccion = False
+            st.session_state.pop("datos_cargados_edit", None)
             st.rerun()
 
     if "tabla1" not in st.session_state or id_edicion:
@@ -1625,7 +1655,8 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.divider()
     btn_col_borr, btn_col_env = st.columns(2)
     with btn_col_borr:
-        if st.button("💾 Guardar como Borrador", key="btn_guardar_borrador"):
+        texto_guardar = "💾 Guardar Corrección" if modo_correccion else "💾 Guardar como Borrador"
+        if st.button(texto_guardar, key="btn_guardar_borrador"):
             id_g = guardar_conciliacion_historial(
                 empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
                 saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
@@ -1635,10 +1666,12 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             )
             st.session_state.pop("conciliacion_a_editar", None)
             st.session_state.pop("datos_cargados_edit", None)
+            st.session_state.modo_correccion = False
             st.success(f"💾 Conciliación CONC-{int(id_g):06d} guardada como Borrador.")
 
     with btn_col_env:
-        if st.button("🚀 Enviar a Revisión", key="btn_enviar_revision", type="primary"):
+        texto_enviar = "🚀 Enviar Corrección a Revisión" if modo_correccion else "🚀 Enviar a Revisión"
+        if st.button(texto_enviar, key="btn_enviar_revision", type="primary"):
             id_g = guardar_conciliacion_historial(
                 empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
                 saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
@@ -1648,6 +1681,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             )
             st.session_state.pop("conciliacion_a_editar", None)
             st.session_state.pop("datos_cargados_edit", None)
+            st.session_state.modo_correccion = False
 
             # Si el usuario puede auditar, lo llevamos directamente a la bandeja
             # para que vea la conciliación recién enviada sin tener que buscarla.
@@ -1708,11 +1742,20 @@ elif menu_seleccionado == "📋 Historial":
 
                 c_act1, c_act2, c_act3 = st.columns(3)
                 with c_act1:
-                    if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                        st.session_state.conciliacion_a_editar = fila['id']
-                        st.session_state.pop("datos_cargados_edit", None)
-                        st.session_state.menu_override = "📝 Nueva Conciliación"
-                        st.rerun()
+                    if wf_status == "Requiere corrección" and rol_actual in ["Preparador", "Administrador"]:
+                        if st.button("🔧 Corregir Conciliación", key=f"btn_corregir_{fila['id']}", type="primary"):
+                            st.session_state.conciliacion_a_editar = fila['id']
+                            st.session_state.modo_correccion = True
+                            st.session_state.pop("datos_cargados_edit", None)
+                            st.session_state.menu_override = "📝 Nueva Conciliación"
+                            st.rerun()
+                    elif wf_status != "Aprobada":
+                        if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
+                            st.session_state.conciliacion_a_editar = fila['id']
+                            st.session_state.modo_correccion = False
+                            st.session_state.pop("datos_cargados_edit", None)
+                            st.session_state.menu_override = "📝 Nueva Conciliación"
+                            st.rerun()
 
                 # Permite enviar un Borrador directamente desde el Historial.
                 if wf_status == "Borrador" and rol_actual in ["Preparador", "Administrador"]:
