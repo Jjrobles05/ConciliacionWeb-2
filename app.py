@@ -68,6 +68,7 @@ def conectar_db():
 # ==========================================
 # 3. CREACIÓN Y ESTRUCTURA DE TABLAS
 # ==========================================
+@st.cache_resource(show_spinner=False)
 def inicializar_db():
     """Crea únicamente las tablas si no existen usando el esquema Turso actual."""
     conn = conectar_db()
@@ -129,6 +130,7 @@ inicializar_db()
 # ==========================================
 # 4. CONSULTAS A LA BASE DE DATOS
 # ==========================================
+@st.cache_data(ttl=30, show_spinner=False)
 def obtener_empresas():
     try:
         conn = conectar_db()
@@ -143,6 +145,7 @@ def obtener_empresas():
         return pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def obtener_empresa_por_id(empresa_id):
     try:
         conn = conectar_db()
@@ -161,6 +164,18 @@ def obtener_logo_empresa(nombre_empresa):
     return None
 
 
+def limpiar_cache_consultas():
+    """Limpia solo las consultas cacheadas cuando hay cambios en Turso."""
+    for nombre in (
+        "obtener_empresas", "obtener_empresa_por_id", "obtener_cuentas",
+        "obtener_cuentas_rotadas_por_usuario", "obtener_historial",
+        "obtener_conciliacion_por_id", "obtener_usuarios"
+    ):
+        fn = globals().get(nombre)
+        if fn is not None and hasattr(fn, "clear"):
+            fn.clear()
+
+
 def guardar_empresa(nombre, nit, logo_bytes=None):
     """Registra una empresa y controla NIT duplicado sin mostrar errores técnicos."""
     nombre = str(nombre or "").strip()
@@ -176,6 +191,7 @@ def guardar_empresa(nombre, nit, logo_bytes=None):
             return False, f"El NIT {nit} ya está registrado para la empresa {existente[1]}."
         c.execute("INSERT INTO empresas (nit, razon_social) VALUES (?, ?)", (nit, nombre))
         conn.commit()
+        limpiar_cache_consultas()
         return True, "Empresa registrada con éxito."
     except Exception as e:
         try: conn.rollback()
@@ -197,6 +213,7 @@ def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
             return False, f"El NIT {nit} ya está registrado para {existente[1]}."
         c.execute("UPDATE empresas SET razon_social=?, nit=? WHERE id=?", (nombre, nit, int(empresa_id)))
         conn.commit()
+        limpiar_cache_consultas()
         return True, "Empresa actualizada con éxito."
     except Exception as e:
         try: conn.rollback()
@@ -224,6 +241,7 @@ def eliminar_empresa_db(empresa_id):
             return False, "No se puede eliminar: la empresa tiene " + ", ".join(partes) + "."
         c.execute("DELETE FROM empresas WHERE id=?", (int(empresa_id),))
         conn.commit()
+        limpiar_cache_consultas()
         return True, "Empresa eliminada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -239,9 +257,11 @@ def eliminar_conciliacion_db(conciliacion_id):
     c = conn.cursor()
     c.execute("DELETE FROM conciliaciones WHERE id=?", (int(conciliacion_id),))
     conn.commit()
+    limpiar_cache_consultas()
     conn.close()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def obtener_cuentas(empresa_id=None):
     try:
         conn = conectar_db()
@@ -274,10 +294,12 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
               (banco.strip(), numero_cuenta.strip(), tipo_cuenta, empresa_id))
     conn.commit()
     last_id = c.lastrowid
+    limpiar_cache_consultas()
     conn.close()
     return last_id
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
     if not empresa_id:
         return pd.DataFrame()
@@ -439,6 +461,7 @@ def guardar_conciliacion_historial(
                      observaciones))
             last_id = int(c.lastrowid)
         conn.commit()
+        limpiar_cache_consultas()
         return last_id
     finally:
         conn.close()
@@ -454,6 +477,7 @@ def _decodificar_observaciones(texto):
         return {}
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def obtener_historial(empresa_nombre=None):
     try:
         conn = conectar_db()
@@ -499,6 +523,7 @@ def obtener_historial(empresa_nombre=None):
         return pd.DataFrame()
 
 
+@st.cache_data(ttl=30, show_spinner=False)
 def obtener_conciliacion_por_id(id_conciliacion):
     try:
         conn = conectar_db()
@@ -572,7 +597,7 @@ def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, mot
                   'motivo_correccion': motivo_correccion, 'tipo_hallazgo': tipo_hallazgo, 'checklist_json': checklist})
     c.execute("UPDATE conciliaciones SET revisado_por=?, dictamen=?, observaciones=? WHERE id=?",
               (revisado_por, nuevo_estado, json.dumps(datos,ensure_ascii=False), int(id_conciliacion)))
-    conn.commit(); conn.close()
+    conn.commit(); limpiar_cache_consultas(); conn.close()
 
 # ==========================================
 # 5. AUTENTICACIÓN FLEXIBLE Y SEGURA
@@ -609,6 +634,7 @@ def crear_usuario(usuario, nombre, password, rol, empresa_id=None):
     ''', (str(usuario).strip().lower(), nombre.strip(), password_hash, salt, rol, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), empresa_id))
     conn.commit()
     last_id = c.lastrowid
+    limpiar_cache_consultas()
     conn.close()
     return last_id
 
@@ -617,6 +643,7 @@ def actualizar_empresa_usuario(usuario_id, empresa_id):
     c = conn.cursor()
     c.execute("UPDATE usuarios SET empresa_id=? WHERE id=?", (empresa_id, int(usuario_id)))
     conn.commit()
+    limpiar_cache_consultas()
     conn.close()
 
 def actualizar_rol_usuario(usuario_id, nuevo_rol):
@@ -624,6 +651,7 @@ def actualizar_rol_usuario(usuario_id, nuevo_rol):
     c = conn.cursor()
     c.execute("UPDATE usuarios SET rol=? WHERE id=?", (nuevo_rol, int(usuario_id)))
     conn.commit()
+    limpiar_cache_consultas()
     conn.close()
 
 def autenticar_usuario(usuario, password):
@@ -644,6 +672,7 @@ def autenticar_usuario(usuario, password):
         st.error("Error técnico durante la autenticación: " + f"{type(e).__name__}: {e}")
     return None
 
+@st.cache_data(ttl=30, show_spinner=False)
 def obtener_usuarios():
     try:
         conn = conectar_db(); c = conn.cursor()
@@ -1495,7 +1524,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
 
     if id_edicion and "datos_cargados_edit" not in st.session_state:
-        c_edit = obtener_conciliacion_por_id(id_edicion)
         if c_edit:
             try:
                 d_js = json.loads(c_edit.get("datos_json", "{}"))
@@ -1514,7 +1542,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         col1, col2 = st.columns(2)
         with col1:
             if id_edicion:
-                c_edit = obtener_conciliacion_por_id(id_edicion)
                 empresa = c_edit.get("empresa", "")
                 nit = c_edit.get("nit", "")
                 mes = c_edit.get("mes", "")
@@ -1549,7 +1576,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
 
         with col2:
             if id_edicion:
-                c_edit = obtener_conciliacion_por_id(id_edicion)
                 banco = c_edit.get("banco", "")
                 cuenta = c_edit.get("cuenta", "")
                 tipo = c_edit.get("tipo", "Cuenta de ahorros")
@@ -1599,8 +1625,8 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.divider()
     st.subheader("Saldos")
     c1, c2 = st.columns(2)
-    val_ext = float(obtener_conciliacion_por_id(id_edicion).get("saldo_extracto", 0.0)) if id_edicion else 0.0
-    val_lib = float(obtener_conciliacion_por_id(id_edicion).get("saldo_libros", 0.0)) if id_edicion else 0.0
+    val_ext = float(c_edit.get("saldo_extracto", 0.0)) if id_edicion and c_edit else 0.0
+    val_lib = float(c_edit.get("saldo_libros", 0.0)) if id_edicion and c_edit else 0.0
     with c1:
         saldo_extracto = st.number_input("Saldo según Extracto", value=val_ext, format="%.2f", key="form_saldo_extracto")
     with c2:
