@@ -1254,35 +1254,67 @@ elif menu_seleccionado == "📊 Dashboard":
         st.info("ℹ️ Aún no hay datos registrados para generar el análisis analítico.")
     else:
         total_conciliaciones = len(historial)
-        exitosas = len(historial[historial["resultado_final"].abs() < 0.005])
-        tasa_exito = (exitosas / total_conciliaciones * 100) if total_conciliaciones > 0 else 0.0
-        monto_diferencias = historial["resultado_final"].abs().sum()
 
+        # Estados del flujo de auditoría
         aprobadas_cnt = len(historial[historial["workflow_status"] == "Aprobada"])
         pendientes_cnt = len(historial[historial["workflow_status"] == "Pendiente de revisión"])
         borradores_cnt = len(historial[historial["workflow_status"] == "Borrador"])
         devueltas_cnt = len(historial[historial["workflow_status"] == "Requiere corrección"])
 
-        st.subheader("📈 Indicadores Clave de Desempeño (KPIs)")
-        kpi_col1, kpi_col2, kpi_col3, kpi_col4 = st.columns(4)
-        kpi_col1.metric("Total Conciliaciones", total_conciliaciones)
-        kpi_col2.metric("Tasa de Éxito", f"{tasa_exito:.1f}%")
-        kpi_col3.metric("Diferencia Total Pendiente", f"$ {monto_diferencias:,.2f}")
-        kpi_col4.metric("Pendientes por Auditar", pendientes_cnt)
+        # La tasa se presenta como aprobación para que no se confunda con
+        # el resultado contable de la conciliación.
+        tasa_aprobacion = (aprobadas_cnt / total_conciliaciones * 100) if total_conciliaciones > 0 else 0.0
+
+        # Diferencia que todavía pertenece a conciliaciones no aprobadas.
+        no_aprobadas = historial[historial["workflow_status"] != "Aprobada"]
+        monto_diferencias_pendientes = no_aprobadas["resultado_final"].abs().sum() if not no_aprobadas.empty else 0.0
+
+        st.subheader("📈 Resumen Ejecutivo")
+        st.caption("Los indicadores muestran el estado actual del flujo de conciliación y auditoría.")
+
+        # Primera fila: cinco indicadores claramente separados.
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("📋 Total", total_conciliaciones)
+        k2.metric("✅ Aprobadas", aprobadas_cnt)
+        k3.metric("🟠 Pendientes", pendientes_cnt)
+        k4.metric("🔵 Borradores", borradores_cnt)
+        k5.metric("🔴 Devueltas", devueltas_cnt)
 
         st.divider()
-        col_wf, col_pie = st.columns([2, 2])
+
+        # Segunda fila: dinero pendiente y porcentaje de aprobación.
+        m1, m2 = st.columns(2)
+        m1.metric("💰 Diferencia Total Pendiente", f"$ {monto_diferencias_pendientes:,.2f}")
+        m2.metric("📊 Tasa de Aprobación", f"{tasa_aprobacion:.1f}%")
+
+        st.divider()
+
+        col_wf, col_pie = st.columns([1.15, 1])
+
         with col_wf:
-            st.markdown("**Estado del Flujo de Auditoría**")
-            w1, w2 = st.columns(2)
-            w1.metric("Aprobadas", aprobadas_cnt)
-            w2.metric("Pendientes de Revisión", pendientes_cnt)
-            w3, w4 = st.columns(2)
-            w3.metric("Borradores", borradores_cnt)
-            w4.metric("Devueltas / Corrección", devueltas_cnt)
+            st.subheader("🔎 Estado del Flujo")
+            st.caption("Cantidad de conciliaciones en cada etapa.")
+
+            wf1, wf2 = st.columns(2)
+            wf1.metric("✅ Aprobadas", aprobadas_cnt)
+            wf2.metric("🟠 Pendientes de revisión", pendientes_cnt)
+
+            wf3, wf4 = st.columns(2)
+            wf3.metric("🔵 Borradores", borradores_cnt)
+            wf4.metric("🔴 Requieren corrección", devueltas_cnt)
+
+            st.markdown("**Lectura rápida del flujo**")
+            if devueltas_cnt > 0:
+                st.warning(f"🔴 Hay {devueltas_cnt} conciliación(es) devuelta(s) que requieren corrección.")
+            elif pendientes_cnt > 0:
+                st.info(f"🟠 Hay {pendientes_cnt} conciliación(es) esperando revisión.")
+            elif borradores_cnt > 0:
+                st.info(f"🔵 Hay {borradores_cnt} borrador(es) pendientes de envío a revisión.")
+            else:
+                st.success("🟢 No hay conciliaciones pendientes en el flujo de revisión.")
 
         with col_pie:
-            st.markdown("**Distribución por Estado de Revisión**")
+            st.subheader("📊 Distribución por Estado")
             df_pie = pd.DataFrame({
                 "Estado": ["Aprobada", "Pendiente de revisión", "Borrador", "Requiere corrección"],
                 "Cantidad": [aprobadas_cnt, pendientes_cnt, borradores_cnt, devueltas_cnt]
@@ -1296,10 +1328,22 @@ elif menu_seleccionado == "📊 Dashboard":
                         "Pendiente de revisión": "#F39C12",
                         "Borrador": "#3498DB",
                         "Requiere corrección": "#E74C3C"
-                    }, hole=0.4
+                    }, hole=0.5
                 )
-                fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0), height=200)
+                fig_pie.update_traces(textposition="inside", textinfo="percent+label")
+                fig_pie.update_layout(
+                    margin=dict(t=10, b=10, l=10, r=10),
+                    height=330,
+                    legend=dict(orientation="h", yanchor="bottom", y=-0.15, xanchor="center", x=0.5)
+                )
                 st.plotly_chart(fig_pie, use_container_width=True)
+
+        st.divider()
+        st.subheader("💡 Indicadores de Control")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Pendientes por Auditar", pendientes_cnt)
+        c2.metric("Pendientes + Corrección", pendientes_cnt + devueltas_cnt)
+        c3.metric("Conciliaciones Cerradas", aprobadas_cnt)
 
 elif menu_seleccionado == "🏢 Empresas":
     st.title("🏢 Maestro de Empresas")
