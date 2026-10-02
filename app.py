@@ -1060,7 +1060,14 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
     st.divider()
 
     if pendientes.empty:
-        st.success("🎉 ¡Excelente! No hay conciliaciones pendientes por auditar en este momento.")
+        st.info(
+            "ℹ️ No hay conciliaciones con estado **Pendiente de revisión** "
+            "para la empresa seleccionada."
+        )
+        st.caption(
+            "Para que una conciliación aparezca aquí debe haberse enviado desde "
+            "Nueva Conciliación o desde Historial usando **Enviar a Revisión**."
+        )
     else:
         st.subheader("📋 Conciliaciones Asignadas para Auditoría")
         for idx, fila in pendientes.iterrows():
@@ -1641,7 +1648,17 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             )
             st.session_state.pop("conciliacion_a_editar", None)
             st.session_state.pop("datos_cargados_edit", None)
-            st.success(f"🚀 Conciliación CONC-{int(id_g):06d} enviada correctamente a Revisión.")
+
+            # Si el usuario puede auditar, lo llevamos directamente a la bandeja
+            # para que vea la conciliación recién enviada sin tener que buscarla.
+            if rol_actual in ["Administrador", "Revisor"]:
+                st.session_state.menu_override = "🔍 Auditoría y Revisiones"
+                st.rerun()
+            else:
+                st.success(
+                    f"🚀 Conciliación CONC-{int(id_g):06d} enviada correctamente a Revisión. "
+                    "Ahora queda disponible para un usuario con rol Revisor o Administrador."
+                )
 
 elif menu_seleccionado == "📋 Historial":
     st.title("📋 Historial de Conciliaciones")
@@ -1695,6 +1712,19 @@ elif menu_seleccionado == "📋 Historial":
                         st.session_state.conciliacion_a_editar = fila['id']
                         st.session_state.pop("datos_cargados_edit", None)
                         st.session_state.menu_override = "📝 Nueva Conciliación"
+                        st.rerun()
+
+                # Permite enviar un Borrador directamente desde el Historial.
+                if wf_status == "Borrador" and rol_actual in ["Preparador", "Administrador"]:
+                    if st.button("🚀 Enviar a Revisión", key=f"btn_hist_enviar_{fila['id']}", type="primary"):
+                        actualizar_estado_auditoria(
+                            fila["id"],
+                            "Pendiente de revisión",
+                            usuario_actual["nombre"]
+                        )
+                        st.success(
+                            f"🚀 {consecutivo_str} fue enviado correctamente a Revisión."
+                        )
                         st.rerun()
 
                 with c_act2:
