@@ -12,6 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.drawing.image import Image as XLImage
 from reportlab.lib.pagesizes import letter, portrait
 from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
@@ -79,6 +80,12 @@ def inicializar_db():
             razon_social TEXT NOT NULL
         )
     """)
+    # Agrega el campo de logo si la tabla empresas ya existía sin él.
+    try:
+        c.execute("ALTER TABLE empresas ADD COLUMN logo BLOB")
+    except Exception:
+        pass
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS cuentas_bancarias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -133,11 +140,10 @@ def obtener_empresas():
     try:
         conn = conectar_db()
         c = conn.cursor()
-        c.execute("SELECT id, razon_social, nit FROM empresas ORDER BY razon_social")
+        c.execute("SELECT id, razon_social, nit, logo FROM empresas ORDER BY razon_social")
         rows = c.fetchall()
         conn.close()
-        df = pd.DataFrame(rows, columns=['id', 'nombre', 'nit']) if rows else pd.DataFrame(columns=['id', 'nombre', 'nit'])
-        df['logo'] = None
+        df = pd.DataFrame(rows, columns=['id', 'nombre', 'nit', 'logo']) if rows else pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
         return df
     except Exception:
         return pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
@@ -147,17 +153,30 @@ def obtener_empresa_por_id(empresa_id):
     try:
         conn = conectar_db()
         c = conn.cursor()
-        c.execute("SELECT id, razon_social, nit FROM empresas WHERE id=?", (int(empresa_id),))
+        c.execute("SELECT id, razon_social, nit, logo FROM empresas WHERE id=?", (int(empresa_id),))
         res = c.fetchone()
         conn.close()
         if res:
-            return {"id": res[0], "nombre": res[1], "nit": res[2], "logo": None}
+            return {"id": res[0], "nombre": res[1], "nit": res[2], "logo": res[3]}
     except Exception:
         pass
     return None
 
 
 def obtener_logo_empresa(nombre_empresa):
+    """Obtiene el logo BLOB de la empresa para mostrarlo en la app y reportes."""
+    if not nombre_empresa:
+        return None
+    try:
+        conn = conectar_db()
+        c = conn.cursor()
+        c.execute("SELECT logo FROM empresas WHERE razon_social=? LIMIT 1", (str(nombre_empresa).strip(),))
+        row = c.fetchone()
+        conn.close()
+        if row and row[0]:
+            return bytes(row[0])
+    except Exception:
+        pass
     return None
 
 
@@ -174,7 +193,7 @@ def guardar_empresa(nombre, nit, logo_bytes=None):
         existente = c.fetchone()
         if existente:
             return False, f"El NIT {nit} ya está registrado para la empresa {existente[1]}."
-        c.execute("INSERT INTO empresas (nit, razon_social) VALUES (?, ?)", (nit, nombre))
+        c.execute("INSERT INTO empresas (nit, razon_social, logo) VALUES (?, ?, ?)", (nit, nombre, logo_bytes))
         conn.commit()
         return True, "Empresa registrada con éxito."
     except Exception as e:
@@ -195,7 +214,10 @@ def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
         existente = c.fetchone()
         if existente:
             return False, f"El NIT {nit} ya está registrado para {existente[1]}."
-        c.execute("UPDATE empresas SET razon_social=?, nit=? WHERE id=?", (nombre, nit, int(empresa_id)))
+        if logo_bytes is not None:
+            c.execute("UPDATE empresas SET razon_social=?, nit=?, logo=? WHERE id=?", (nombre, nit, logo_bytes, int(empresa_id)))
+        else:
+            c.execute("UPDATE empresas SET razon_social=?, nit=? WHERE id=?", (nombre, nit, int(empresa_id)))
         conn.commit()
         return True, "Empresa actualizada con éxito."
     except Exception as e:
@@ -940,6 +962,25 @@ def preparar_excel(
     estilo_titulo(ws["A1"], 16)
 
     fila = escribir_seccion(ws, 3, "INFORMACIÓN GENERAL", 7)
+
+    # Logo de la empresa en el encabezado del Excel.
+    # El logo se recupera desde Turso/SQLite usando la empresa seleccionada.
+    logo_bytes = obtener_logo_empresa(empresa)
+    if logo_bytes:
+        try:
+            logo_stream = io.BytesIO(logo_bytes)
+            logo_excel = XLImage(logo_stream)
+            # Tamaño visual del logo; Excel conservará la imagen dentro del libro.
+            logo_excel.width = 120
+            logo_excel.height = 65
+            logo_excel.anchor = "E4"
+            ws.add_image(logo_excel)
+            ws.row_dimensions[4].height = max(ws.row_dimensions[4].height or 15, 50)
+        except Exception:
+            # Si el archivo almacenado no es una imagen válida, el Excel se genera
+            # normalmente sin logo y el PDF seguirá usando su propio manejo.
+            pass
+
     datos_generales = [
         ("Empresa", empresa), ("NIT", nit), ("Mes y Año", mes),
         ("Fecha de elaboración", fecha_elaboracion), ("Banco", banco),
