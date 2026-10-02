@@ -69,63 +69,27 @@ def conectar_db():
 # 3. CREACIÓN Y ESTRUCTURA DE TABLAS
 # ==========================================
 def inicializar_db():
+    """Crea únicamente las tablas si no existen usando el esquema Turso actual."""
     conn = conectar_db()
     c = conn.cursor()
-    
-    # Tabla Conciliaciones
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS conciliaciones (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha_guardado TEXT NOT NULL,
-            empresa TEXT,
-            nit TEXT,
-            mes TEXT,
-            fecha_elaboracion TEXT,
-            banco TEXT,
-            cuenta TEXT,
-            tipo TEXT,
-            saldo_extracto REAL NOT NULL,
-            saldo_libros REAL NOT NULL,
-            diferencia_inicial REAL NOT NULL,
-            diferencia_conciliada REAL NOT NULL,
-            resultado_final REAL NOT NULL,
-            estado TEXT NOT NULL,
-            datos_json TEXT NOT NULL,
-            excel BLOB NOT NULL,
-            workflow_status TEXT NOT NULL DEFAULT 'Pendiente de revisión',
-            revisado_por_usuario TEXT,
-            fecha_revision TEXT,
-            motivo_correccion TEXT,
-            tipo_hallazgo TEXT,
-            checklist_json TEXT,
-            usuario_ultima_accion TEXT
-        )
-    ''')
-    
-    # Tabla Empresas
-    c.execute('''
+    c.execute("""
         CREATE TABLE IF NOT EXISTS empresas (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            nombre TEXT NOT NULL UNIQUE,
-            nit TEXT NOT NULL,
-            logo BLOB
+            nit TEXT NOT NULL UNIQUE,
+            razon_social TEXT NOT NULL
         )
-    ''')
-    
-    # Tabla Cuentas Bancarias
-    c.execute('''
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS cuentas_bancarias (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             banco TEXT NOT NULL,
             numero_cuenta TEXT NOT NULL,
             tipo_cuenta TEXT NOT NULL,
             empresa_id INTEGER,
-            FOREIGN KEY(empresa_id) REFERENCES empresas (id)
+            FOREIGN KEY(empresa_id) REFERENCES empresas(id)
         )
-    ''')
-    
-    # Tabla Usuarios
-    c.execute('''
+    """)
+    c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             usuario TEXT NOT NULL UNIQUE,
@@ -136,10 +100,27 @@ def inicializar_db():
             activo INTEGER NOT NULL DEFAULT 1,
             fecha_creacion TEXT NOT NULL,
             empresa_id INTEGER,
-            FOREIGN KEY(empresa_id) REFERENCES empresas (id)
+            FOREIGN KEY(empresa_id) REFERENCES empresas(id)
         )
-    ''')
-    
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS conciliaciones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            empresa_id INTEGER NOT NULL,
+            cuenta_id INTEGER NOT NULL,
+            periodo TEXT NOT NULL,
+            saldo_libro REAL NOT NULL,
+            saldo_banco REAL NOT NULL,
+            estado TEXT NOT NULL,
+            preparado_por TEXT,
+            revisado_por TEXT,
+            fecha_creacion TEXT,
+            dictamen TEXT,
+            observaciones TEXT,
+            FOREIGN KEY(empresa_id) REFERENCES empresas(id),
+            FOREIGN KEY(cuenta_id) REFERENCES cuentas_bancarias(id)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -152,60 +133,49 @@ def obtener_empresas():
     try:
         conn = conectar_db()
         c = conn.cursor()
-        c.execute("SELECT id, nombre, nit, logo FROM empresas ORDER BY nombre")
+        c.execute("SELECT id, razon_social, nit FROM empresas ORDER BY razon_social")
         rows = c.fetchall()
         conn.close()
-        if rows:
-            return pd.DataFrame(rows, columns=['id', 'nombre', 'nit', 'logo'])
+        return pd.DataFrame(rows, columns=['id', 'nombre', 'nit']) if rows else pd.DataFrame(columns=['id', 'nombre', 'nit'])
     except Exception:
-        pass
-    return pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
+        return pd.DataFrame(columns=['id', 'nombre', 'nit'])
+
 
 def obtener_empresa_por_id(empresa_id):
     try:
         conn = conectar_db()
         c = conn.cursor()
-        c.execute("SELECT id, nombre, nit, logo FROM empresas WHERE id=?", (int(empresa_id),))
+        c.execute("SELECT id, razon_social, nit FROM empresas WHERE id=?", (int(empresa_id),))
         res = c.fetchone()
         conn.close()
         if res:
-            return {"id": res[0], "nombre": res[1], "nit": res[2], "logo": res[3]}
+            return {"id": res[0], "nombre": res[1], "nit": res[2], "logo": None}
     except Exception:
         pass
     return None
 
+
 def obtener_logo_empresa(nombre_empresa):
-    try:
-        conn = conectar_db()
-        c = conn.cursor()
-        c.execute("SELECT logo FROM empresas WHERE nombre=?", (nombre_empresa,))
-        res = c.fetchone()
-        conn.close()
-        if res and res[0]:
-            return res[0]
-    except Exception:
-        pass
     return None
+
 
 def guardar_empresa(nombre, nit, logo_bytes=None):
     conn = conectar_db()
     c = conn.cursor()
-    if logo_bytes:
-        c.execute("INSERT INTO empresas (nombre, nit, logo) VALUES (?, ?, ?)", (nombre.strip(), nit.strip(), sqlite3.Binary(logo_bytes)))
-    else:
-        c.execute("INSERT INTO empresas (nombre, nit) VALUES (?, ?)", (nombre.strip(), nit.strip()))
+    c.execute("INSERT INTO empresas (nit, razon_social) VALUES (?, ?)", (nit.strip(), nombre.strip()))
     conn.commit()
+    last_id = c.lastrowid
     conn.close()
+    return last_id
+
 
 def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
     conn = conectar_db()
     c = conn.cursor()
-    if logo_bytes:
-        c.execute("UPDATE empresas SET nombre=?, nit=?, logo=? WHERE id=?", (nombre.strip(), nit.strip(), sqlite3.Binary(logo_bytes), int(empresa_id)))
-    else:
-        c.execute("UPDATE empresas SET nombre=?, nit=? WHERE id=?", (nombre.strip(), nit.strip(), int(empresa_id)))
+    c.execute("UPDATE empresas SET razon_social=?, nit=? WHERE id=?", (nombre.strip(), nit.strip(), int(empresa_id)))
     conn.commit()
     conn.close()
+
 
 def eliminar_empresa_db(empresa_id):
     conn = conectar_db()
@@ -214,6 +184,7 @@ def eliminar_empresa_db(empresa_id):
     conn.commit()
     conn.close()
 
+
 def eliminar_conciliacion_db(conciliacion_id):
     conn = conectar_db()
     c = conn.cursor()
@@ -221,26 +192,22 @@ def eliminar_conciliacion_db(conciliacion_id):
     conn.commit()
     conn.close()
 
+
 def obtener_cuentas(empresa_id=None):
     try:
         conn = conectar_db()
         c = conn.cursor()
-        if empresa_id:
-            query = """
-            SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta, c.empresa_id, e.nombre as empresa_nombre
+        query = """
+            SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta,
+                   c.empresa_id, e.razon_social AS empresa_nombre
             FROM cuentas_bancarias c
             LEFT JOIN empresas e ON c.empresa_id = e.id
-            WHERE c.empresa_id = ?
-            ORDER BY c.banco, c.numero_cuenta
-            """
+        """
+        if empresa_id:
+            query += " WHERE c.empresa_id = ? ORDER BY c.banco, c.numero_cuenta"
             c.execute(query, (int(empresa_id),))
         else:
-            query = """
-            SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta, c.empresa_id, e.nombre as empresa_nombre
-            FROM cuentas_bancarias c
-            LEFT JOIN empresas e ON c.empresa_id = e.id
-            ORDER BY c.banco, c.numero_cuenta
-            """
+            query += " ORDER BY c.banco, c.numero_cuenta"
             c.execute(query)
         rows = c.fetchall()
         conn.close()
@@ -250,46 +217,42 @@ def obtener_cuentas(empresa_id=None):
         pass
     return pd.DataFrame(columns=['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre'])
 
+
 def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
     conn = conectar_db()
     c = conn.cursor()
     c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id) VALUES (?, ?, ?, ?)",
               (banco.strip(), numero_cuenta.strip(), tipo_cuenta, empresa_id))
     conn.commit()
+    last_id = c.lastrowid
     conn.close()
+    return last_id
+
 
 def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
     if not empresa_id:
         return pd.DataFrame()
     conn = conectar_db()
     c = conn.cursor()
-    
     c.execute("SELECT id, nombre FROM usuarios WHERE empresa_id = ? AND activo = 1 AND rol = 'Preparador' ORDER BY id", (int(empresa_id),))
     usr_rows = c.fetchall()
-    
     c.execute("SELECT id, banco, numero_cuenta, tipo_cuenta FROM cuentas_bancarias WHERE empresa_id = ? ORDER BY id", (int(empresa_id),))
     cta_rows = c.fetchall()
     conn.close()
-    
     if not cta_rows:
         return pd.DataFrame()
-    
     cuentas = pd.DataFrame(cta_rows, columns=['id', 'banco', 'numero_cuenta', 'tipo_cuenta'])
     if not usr_rows or usuario_id not in [u[0] for u in usr_rows]:
         return cuentas
-        
     num_usuarios = len(usr_rows)
     ids_usuarios = [u[0] for u in usr_rows]
     cuentas_asignadas = []
-    
     for idx_cuenta, fila_cuenta in cuentas.iterrows():
         idx_usuario_asignado = (idx_cuenta + mes_num) % num_usuarios
         if ids_usuarios[idx_usuario_asignado] == usuario_id:
             cuentas_asignadas.append(fila_cuenta)
-            
-    if cuentas_asignadas:
-        return pd.DataFrame(cuentas_asignadas)
-    return pd.DataFrame(columns=cuentas.columns)
+    return pd.DataFrame(cuentas_asignadas) if cuentas_asignadas else pd.DataFrame(columns=cuentas.columns)
+
 
 def parsear_texto_pegado(texto, columnas_esperadas):
     if not texto or not texto.strip():
@@ -303,7 +266,6 @@ def parsear_texto_pegado(texto, columnas_esperadas):
             parts += [""] * (len(columnas_esperadas) - len(parts))
         else:
             parts = parts[:len(columnas_esperadas)]
-            
         row_dict = {}
         for idx, col in enumerate(columnas_esperadas):
             val = parts[idx]
@@ -318,6 +280,62 @@ def parsear_texto_pegado(texto, columnas_esperadas):
         rows.append(row_dict)
     return pd.DataFrame(rows)
 
+
+def _json_datos_conciliacion(empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
+                              saldo_extracto, saldo_libros, diferencia_inicial,
+                              diferencia_conciliada, resultado_final, salidas_extracto,
+                              salidas_libros, entradas_libros, entradas_extracto,
+                              gastos_bancarios, preparado_por, revisado_por,
+                              workflow_status):
+    def dataframe_a_registros(df):
+        limpio = limpiar_dataframe(df)
+        if limpio is None or limpio.empty:
+            return []
+        return json.loads(limpio.to_json(orient="records", date_format="iso"))
+    fecha_elaboracion_texto = fecha_elaboracion.isoformat() if hasattr(fecha_elaboracion, "isoformat") else str(fecha_elaboracion)
+    return {
+        "empresa": empresa, "nit": nit, "mes": mes,
+        "fecha_elaboracion": fecha_elaboracion_texto, "banco": banco,
+        "cuenta": cuenta, "tipo": tipo,
+        "saldo_extracto": float(saldo_extracto), "saldo_libros": float(saldo_libros),
+        "diferencia_inicial": float(diferencia_inicial),
+        "diferencia_conciliada": float(diferencia_conciliada),
+        "resultado_final": float(resultado_final),
+        "estado": "CONCILIACIÓN BANCARIA CORRECTA" if abs(float(resultado_final)) < 0.005 else "CONCILIACIÓN CON DIFERENCIA",
+        "salidas_extracto": dataframe_a_registros(salidas_extracto),
+        "salidas_libros": dataframe_a_registros(salidas_libros),
+        "entradas_libros": dataframe_a_registros(entradas_libros),
+        "entradas_extracto": dataframe_a_registros(entradas_extracto),
+        "gastos_bancarios": dataframe_a_registros(gastos_bancarios),
+        "preparado_por": preparado_por, "revisado_por": revisado_por,
+        "workflow_status": workflow_status,
+    }
+
+
+def _buscar_empresa_id(c, empresa, nit):
+    c.execute("SELECT id FROM empresas WHERE nit=?", (str(nit).strip(),))
+    row = c.fetchone()
+    if row:
+        return int(row[0])
+    c.execute("SELECT id FROM empresas WHERE razon_social=?", (str(empresa).strip(),))
+    row = c.fetchone()
+    if row:
+        return int(row[0])
+    c.execute("INSERT INTO empresas (nit, razon_social) VALUES (?, ?)", (str(nit).strip(), str(empresa).strip()))
+    return int(c.lastrowid)
+
+
+def _buscar_cuenta_id(c, empresa_id, banco, cuenta, tipo):
+    c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? AND banco=? AND numero_cuenta=? ORDER BY id LIMIT 1",
+              (int(empresa_id), str(banco).strip(), str(cuenta).strip()))
+    row = c.fetchone()
+    if row:
+        return int(row[0])
+    c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id) VALUES (?, ?, ?, ?)",
+              (str(banco).strip(), str(cuenta).strip(), str(tipo).strip(), int(empresa_id)))
+    return int(c.lastrowid)
+
+
 def guardar_conciliacion_historial(
     empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
     saldo_extracto, saldo_libros, diferencia_inicial,
@@ -326,122 +344,175 @@ def guardar_conciliacion_historial(
     gastos_bancarios, preparado_por, revisado_por, excel_data,
     workflow_status="Pendiente de revisión", id_edicion=None
 ):
-    estado = "CONCILIACIÓN BANCARIA CORRECTA" if abs(resultado_final) < 0.005 else "CONCILIACIÓN CON DIFERENCIA"
-    
-    def dataframe_a_registros(df):
-        limpio = limpiar_dataframe(df)
-        if limpio is None or limpio.empty:
-            return []
-        return json.loads(limpio.to_json(orient="records", date_format="iso"))
-
-    datos = {
-        "salidas_extracto": dataframe_a_registros(salidas_extracto),
-        "salidas_libros": dataframe_a_registros(salidas_libros),
-        "entradas_libros": dataframe_a_registros(entradas_libros),
-        "entradas_extracto": dataframe_a_registros(entradas_extracto),
-        "gastos_bancarios": dataframe_a_registros(gastos_bancarios),
-        "preparado_por": preparado_por,
-        "revisado_por": revisado_por,
-    }
-    
-    fecha_guardado = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    fecha_elaboracion_texto = fecha_elaboracion.isoformat() if hasattr(fecha_elaboracion, "isoformat") else str(fecha_elaboracion)
-
     conn = conectar_db()
     c = conn.cursor()
-    if id_edicion:
-        c.execute('''
-            UPDATE conciliaciones
-            SET fecha_guardado=?, empresa=?, nit=?, mes=?, fecha_elaboracion=?,
-                banco=?, cuenta=?, tipo=?, saldo_extracto=?, saldo_libros=?,
-                diferencia_inicial=?, diferencia_conciliada=?, resultado_final=?,
-                estado=?, datos_json=?, excel=?, workflow_status=?, usuario_ultima_accion=?
-            WHERE id=?
-        ''', (
-            fecha_guardado, empresa, nit, mes, fecha_elaboracion_texto,
-            banco, cuenta, tipo, float(saldo_extracto), float(saldo_libros),
-            float(diferencia_inicial), float(diferencia_conciliada),
-            float(resultado_final), estado, json.dumps(datos, ensure_ascii=False),
-            sqlite3.Binary(excel_data), workflow_status, preparado_por or None, int(id_edicion)
-        ))
+    try:
+        empresa_id = _buscar_empresa_id(c, empresa, nit)
+        cuenta_id = _buscar_cuenta_id(c, empresa_id, banco, cuenta, tipo)
+        datos = _json_datos_conciliacion(
+            empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
+            saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
+            resultado_final, salidas_extracto, salidas_libros, entradas_libros,
+            entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
+            workflow_status
+        )
+        estado = datos["estado"]
+        fecha_creacion = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        observaciones = json.dumps(datos, ensure_ascii=False)
+        if id_edicion:
+            c.execute("""
+                UPDATE conciliaciones SET empresa_id=?, cuenta_id=?, periodo=?, saldo_libro=?, saldo_banco=?,
+                    estado=?, preparado_por=?, revisado_por=?, fecha_creacion=?, dictamen=?, observaciones=?
+                WHERE id=?
+            """, (empresa_id, cuenta_id, mes, float(saldo_libros), float(saldo_extracto), estado,
+                     preparado_por or None, revisado_por or None, fecha_creacion, workflow_status,
+                     observaciones, int(id_edicion)))
+            last_id = int(id_edicion)
+        else:
+            c.execute("""
+                INSERT INTO conciliaciones (
+                    empresa_id, cuenta_id, periodo, saldo_libro, saldo_banco, estado,
+                    preparado_por, revisado_por, fecha_creacion, dictamen, observaciones
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (empresa_id, cuenta_id, mes, float(saldo_libros), float(saldo_extracto), estado,
+                     preparado_por or None, revisado_por or None, fecha_creacion, workflow_status,
+                     observaciones))
+            last_id = int(c.lastrowid)
         conn.commit()
-        conn.close()
-        return id_edicion
-    else:
-        c.execute('''
-            INSERT INTO conciliaciones (
-                fecha_guardado, empresa, nit, mes, fecha_elaboracion,
-                banco, cuenta, tipo, saldo_extracto, saldo_libros,
-                diferencia_inicial, diferencia_conciliada, resultado_final,
-                estado, datos_json, excel, workflow_status, usuario_ultima_accion
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            fecha_guardado, empresa, nit, mes, fecha_elaboracion_texto,
-            banco, cuenta, tipo, float(saldo_extracto), float(saldo_libros),
-            float(diferencia_inicial), float(diferencia_conciliada),
-            float(resultado_final), estado, json.dumps(datos, ensure_ascii=False),
-            sqlite3.Binary(excel_data), workflow_status, preparado_por or None
-        ))
-        conn.commit()
-        last_id = c.lastrowid
-        conn.close()
         return last_id
+    finally:
+        conn.close()
+
+
+def _decodificar_observaciones(texto):
+    if not texto:
+        return {}
+    try:
+        data = json.loads(texto)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
 
 def obtener_historial(empresa_nombre=None):
     try:
         conn = conectar_db()
         c = conn.cursor()
-        cols = ["id", "fecha_guardado", "empresa", "nit", "mes", "banco", "cuenta", "tipo",
-                "saldo_extracto", "saldo_libros", "diferencia_inicial", "diferencia_conciliada",
-                "resultado_final", "estado", "workflow_status", "revisado_por_usuario",
-                "fecha_revision", "motivo_correccion", "tipo_hallazgo", "checklist_json", "datos_json", "fecha_elaboracion"]
-        
-        query = f"SELECT {', '.join(cols)} FROM conciliaciones "
+        query = """
+            SELECT co.id, co.fecha_creacion, e.razon_social, e.nit, co.periodo,
+                   cb.banco, cb.numero_cuenta, cb.tipo_cuenta, co.saldo_banco,
+                   co.saldo_libro, co.estado, co.preparado_por, co.revisado_por,
+                   co.dictamen, co.observaciones
+            FROM conciliaciones co
+            LEFT JOIN empresas e ON co.empresa_id=e.id
+            LEFT JOIN cuentas_bancarias cb ON co.cuenta_id=cb.id
+        """
+        params = ()
         if empresa_nombre and empresa_nombre != "Todas las empresas":
-            query += "WHERE empresa = ? ORDER BY id DESC"
-            c.execute(query, (empresa_nombre,))
-        else:
-            query += "ORDER BY id DESC"
-            c.execute(query)
-            
+            query += " WHERE e.razon_social=?"
+            params = (empresa_nombre,)
+        query += " ORDER BY co.id DESC"
+        c.execute(query, params)
         rows = c.fetchall()
         conn.close()
-        if rows:
-            return pd.DataFrame(rows, columns=cols)
+        if not rows:
+            return pd.DataFrame()
+        salida = []
+        for row in rows:
+            d = _decodificar_observaciones(row[14])
+            salida.append({
+                'id': row[0], 'fecha_guardado': row[1], 'empresa': row[2] or d.get('empresa', ''),
+                'nit': row[3] or d.get('nit', ''), 'mes': row[4] or d.get('mes', ''),
+                'banco': row[5] or d.get('banco', ''), 'cuenta': row[6] or d.get('cuenta', ''),
+                'tipo': row[7] or d.get('tipo', ''), 'saldo_extracto': row[8], 'saldo_libros': row[9],
+                'diferencia_inicial': d.get('diferencia_inicial', float(row[8] or 0)-float(row[9] or 0)),
+                'diferencia_conciliada': d.get('diferencia_conciliada', 0.0),
+                'resultado_final': d.get('resultado_final', 0.0), 'estado': row[10] or d.get('estado', ''),
+                'workflow_status': row[13] or d.get('workflow_status', 'Pendiente de revisión'),
+                'revisado_por_usuario': row[12] or d.get('revisado_por_usuario', ''),
+                'fecha_revision': d.get('fecha_revision'), 'motivo_correccion': d.get('motivo_correccion'),
+                'tipo_hallazgo': d.get('tipo_hallazgo'), 'checklist_json': d.get('checklist_json'),
+                'datos_json': json.dumps(d, ensure_ascii=False), 'fecha_elaboracion': d.get('fecha_elaboracion', row[1])
+            })
+        return pd.DataFrame(salida)
     except Exception:
-        pass
-    return pd.DataFrame()
+        return pd.DataFrame()
+
 
 def obtener_conciliacion_por_id(id_conciliacion):
     try:
         conn = conectar_db()
         c = conn.cursor()
-        c.execute("SELECT * FROM conciliaciones WHERE id=?", (int(id_conciliacion),))
+        c.execute("""
+            SELECT co.id, co.empresa_id, co.cuenta_id, co.periodo, co.saldo_libro, co.saldo_banco,
+                   co.estado, co.preparado_por, co.revisado_por, co.fecha_creacion, co.dictamen,
+                   co.observaciones, e.razon_social, e.nit, cb.banco, cb.numero_cuenta, cb.tipo_cuenta
+            FROM conciliaciones co
+            LEFT JOIN empresas e ON co.empresa_id=e.id
+            LEFT JOIN cuentas_bancarias cb ON co.cuenta_id=cb.id
+            WHERE co.id=?
+        """, (int(id_conciliacion),))
         row = c.fetchone()
         conn.close()
-        if row:
-            cols = ["id", "fecha_guardado", "empresa", "nit", "mes", "fecha_elaboracion", "banco", "cuenta", "tipo",
-                    "saldo_extracto", "saldo_libros", "diferencia_inicial", "diferencia_conciliada", "resultado_final",
-                    "estado", "datos_json", "excel", "workflow_status", "revisado_por_usuario", "fecha_revision",
-                    "motivo_correccion", "tipo_hallazgo", "checklist_json", "usuario_ultima_accion"]
-            return dict(zip(cols, row))
+        if not row:
+            return None
+        datos = _decodificar_observaciones(row[11])
+        empresa, nit = row[12] or datos.get('empresa',''), row[13] or datos.get('nit','')
+        banco, cuenta = row[14] or datos.get('banco',''), row[15] or datos.get('cuenta','')
+        tipo = row[16] or datos.get('tipo','')
+        saldo_extracto = float(row[5] or datos.get('saldo_extracto',0))
+        saldo_libros = float(row[4] or datos.get('saldo_libros',0))
+        datos.setdefault('empresa', empresa); datos.setdefault('nit', nit); datos.setdefault('mes', row[3])
+        datos.setdefault('banco', banco); datos.setdefault('cuenta', cuenta); datos.setdefault('tipo', tipo)
+        datos.setdefault('saldo_extracto', saldo_extracto); datos.setdefault('saldo_libros', saldo_libros)
+        datos.setdefault('diferencia_inicial', saldo_extracto-saldo_libros); datos.setdefault('estado', row[6])
+        datos.setdefault('preparado_por', row[7]); datos.setdefault('revisado_por', row[8])
+        datos.setdefault('workflow_status', row[10] or 'Pendiente de revisión')
+        excel_bytes = None
+        try:
+            from datetime import date
+            fecha_elab = datos.get('fecha_elaboracion', datetime.now().date().isoformat())
+            try: fecha_elab = date.fromisoformat(str(fecha_elab)[:10])
+            except Exception: pass
+            excel_bytes, _ = preparar_excel(
+                empresa, nit, datos.get('mes', row[3]), fecha_elab, banco, cuenta, tipo,
+                saldo_extracto, saldo_libros, datos.get('diferencia_inicial', saldo_extracto-saldo_libros),
+                datos.get('diferencia_conciliada',0), datos.get('resultado_final',0),
+                pd.DataFrame(datos.get('salidas_extracto',[])), pd.DataFrame(datos.get('salidas_libros',[])),
+                pd.DataFrame(datos.get('entradas_libros',[])), pd.DataFrame(datos.get('entradas_extracto',[])),
+                pd.DataFrame(datos.get('gastos_bancarios',[])), datos.get('preparado_por',row[7] or ''),
+                datos.get('revisado_por',row[8] or ''),
+                {'t1':'SALIDAS NO REGISTRADAS EN EXTRACTO','t2':'SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS',
+                 't3':'ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS','t4':'ENTRADAS NO EVIDENCIADAS EN EXTRACTOS'}
+            )
+        except Exception:
+            pass
+        return {
+            'id': row[0], 'empresa': empresa, 'nit': nit, 'mes': datos.get('mes',row[3]),
+            'fecha_elaboracion': datos.get('fecha_elaboracion',row[9]), 'banco': banco, 'cuenta': cuenta, 'tipo': tipo,
+            'saldo_extracto': saldo_extracto, 'saldo_libros': saldo_libros,
+            'diferencia_inicial': datos.get('diferencia_inicial',saldo_extracto-saldo_libros),
+            'diferencia_conciliada': datos.get('diferencia_conciliada',0), 'resultado_final': datos.get('resultado_final',0),
+            'estado': row[6], 'datos_json': json.dumps(datos,ensure_ascii=False), 'excel': excel_bytes,
+            'workflow_status': row[10] or datos.get('workflow_status','Pendiente de revisión'),
+            'revisado_por_usuario': row[8] or datos.get('revisado_por_usuario',''),
+            'fecha_revision': datos.get('fecha_revision'), 'motivo_correccion': datos.get('motivo_correccion'),
+            'tipo_hallazgo': datos.get('tipo_hallazgo'), 'checklist_json': datos.get('checklist_json')
+        }
     except Exception:
-        pass
-    return None
+        return None
+
 
 def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, motivo_correccion=None, tipo_hallazgo=None, checklist=None):
     fecha_rev = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    checklist_txt = json.dumps(checklist) if checklist else None
-    conn = conectar_db()
-    c = conn.cursor()
-    c.execute('''
-        UPDATE conciliaciones
-        SET workflow_status=?, revisado_por_usuario=?, fecha_revision=?,
-            motivo_correccion=?, tipo_hallazgo=?, checklist_json=?
-        WHERE id=?
-    ''', (nuevo_estado, revisado_por, fecha_rev, motivo_correccion, tipo_hallazgo, checklist_txt, int(id_conciliacion)))
-    conn.commit()
-    conn.close()
+    conn = conectar_db(); c = conn.cursor()
+    c.execute("SELECT observaciones FROM conciliaciones WHERE id=?", (int(id_conciliacion),))
+    row = c.fetchone(); datos = _decodificar_observaciones(row[0] if row else None)
+    datos.update({'workflow_status': nuevo_estado, 'revisado_por_usuario': revisado_por, 'fecha_revision': fecha_rev,
+                  'motivo_correccion': motivo_correccion, 'tipo_hallazgo': tipo_hallazgo, 'checklist_json': checklist})
+    c.execute("UPDATE conciliaciones SET revisado_por=?, dictamen=?, observaciones=? WHERE id=?",
+              (revisado_por, nuevo_estado, json.dumps(datos,ensure_ascii=False), int(id_conciliacion)))
+    conn.commit(); conn.close()
 
 # ==========================================
 # 5. AUTENTICACIÓN FLEXIBLE Y SEGURA
@@ -497,61 +568,31 @@ def actualizar_rol_usuario(usuario_id, nuevo_rol):
 
 def autenticar_usuario(usuario, password):
     try:
-        conn = conectar_db()
-        c = conn.cursor()
+        conn = conectar_db(); c = conn.cursor()
         query = """
-        SELECT u.id, u.usuario, u.nombre, u.password_hash, u.salt, u.rol, u.empresa_id, e.nombre as empresa_nombre, e.nit as empresa_nit
+        SELECT u.id, u.usuario, u.nombre, u.password_hash, u.salt, u.rol, u.empresa_id,
+               e.razon_social AS empresa_nombre, e.nit AS empresa_nit
         FROM usuarios u
         LEFT JOIN empresas e ON u.empresa_id = e.id
         WHERE LOWER(u.usuario) = LOWER(?) AND u.activo = 1
         """
-        c.execute(query, (str(usuario).strip(),))
-        fila = c.fetchone()
-        conn.close()
-        
-        if not fila:
-            return None
-
-        # turso_serverless implementa la interfaz DB-API y devuelve filas
-        # compatibles con el acceso posicional usado por la aplicación.
-        p_hash = fila[3]
-        p_salt = fila[4]
-
-        if p_hash and p_salt and verificar_password(str(password).strip(), p_salt, p_hash):
-            return {
-                "id": fila[0],
-                "usuario": fila[1],
-                "nombre": fila[2],
-                "rol": fila[5],
-                "empresa_id": fila[6],
-                "empresa_nombre": fila[7],
-                "empresa_nit": fila[8]
-            }
+        c.execute(query, (str(usuario).strip(),)); fila = c.fetchone(); conn.close()
+        if not fila: return None
+        if fila[3] and fila[4] and verificar_password(str(password).strip(), fila[4], fila[3]):
+            return {"id":fila[0],"usuario":fila[1],"nombre":fila[2],"rol":fila[5],"empresa_id":fila[6],"empresa_nombre":fila[7],"empresa_nit":fila[8]}
     except Exception as e:
-        st.error(
-            "Error técnico durante la autenticación: "
-            f"{type(e).__name__}: {e}"
-        )
+        st.error("Error técnico durante la autenticación: " + f"{type(e).__name__}: {e}")
     return None
 
 def obtener_usuarios():
     try:
-        conn = conectar_db()
-        c = conn.cursor()
-        query = """
-        SELECT u.id, u.usuario, u.nombre, u.rol, u.activo, u.fecha_creacion, e.nombre as empresa_nombre
-        FROM usuarios u
-        LEFT JOIN empresas e ON u.empresa_id = e.id
-        ORDER BY u.id
-        """
-        c.execute(query)
-        rows = c.fetchall()
-        conn.close()
-        if rows:
-            return pd.DataFrame(rows, columns=['id', 'usuario', 'nombre', 'rol', 'activo', 'fecha_creacion', 'empresa_nombre'])
-    except Exception:
-        pass
-    return pd.DataFrame(columns=['id', 'usuario', 'nombre', 'rol', 'activo', 'fecha_creacion', 'empresa_nombre'])
+        conn = conectar_db(); c = conn.cursor()
+        c.execute("""SELECT u.id, u.usuario, u.nombre, u.rol, u.activo, u.fecha_creacion, e.razon_social AS empresa_nombre
+                     FROM usuarios u LEFT JOIN empresas e ON u.empresa_id=e.id ORDER BY u.id""")
+        rows = c.fetchall(); conn.close()
+        if rows: return pd.DataFrame(rows, columns=['id','usuario','nombre','rol','activo','fecha_creacion','empresa_nombre'])
+    except Exception: pass
+    return pd.DataFrame(columns=['id','usuario','nombre','rol','activo','fecha_creacion','empresa_nombre'])
 
 def obtener_opciones_menu(rol):
     if rol == "Preparador":
