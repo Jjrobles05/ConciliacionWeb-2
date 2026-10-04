@@ -1612,26 +1612,26 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
 
                 if rol_actual == "Administrador":
                     with col_editar:
-                        st.button(
+                        if st.button(
                             "✏️ Editar",
                             key=f"editar_cuenta_{cuenta_id}",
                             type="primary",
-                            use_container_width=True,
-                            disabled=False,
-                            on_click=seleccionar_cuenta_para_editar,
-                            args=(cuenta_id,)
-                        )
+                            use_container_width=True
+                        ):
+                            st.session_state["cuenta_a_editar"] = int(cuenta_id)
+                            st.session_state["cuenta_a_eliminar"] = None
+                            st.rerun()
 
                     with col_eliminar:
-                        st.button(
+                        if st.button(
                             "🗑️ Eliminar",
                             key=f"eliminar_cuenta_{cuenta_id}",
                             type="secondary",
-                            use_container_width=True,
-                            disabled=False,
-                            on_click=seleccionar_cuenta_para_eliminar,
-                            args=(cuenta_id,)
-                        )
+                            use_container_width=True
+                        ):
+                            st.session_state["cuenta_a_eliminar"] = int(cuenta_id)
+                            st.session_state["cuenta_a_editar"] = None
+                            st.rerun()
 
     # ==========================================================
     # FORMULARIO REAL DE EDICIÓN
