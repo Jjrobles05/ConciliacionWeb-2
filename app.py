@@ -1563,26 +1563,29 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                     st.caption(f"Tipo: {cuenta_fila['tipo_cuenta']}  |  Empresa: {cuenta_fila['empresa_nombre'] or 'Sin asignar'}")
 
                 if rol_actual == "Administrador":
+                    # Los botones se manejan directamente con session_state.
+                    # No se fuerza st.rerun() aquí: Streamlit vuelve a ejecutar
+                    # automáticamente al pulsar un botón y así el formulario
+                    # aparece en la misma ejecución sin perder el evento.
                     with col_edit:
-                        if st.button(
+                        editar_pulsado = st.button(
                             "✏️ Editar",
                             key=f"editar_cuenta_{cuenta_id}",
-                            type="primary",
                             use_container_width=True
-                        ):
+                        )
+                        if editar_pulsado:
                             st.session_state["cuenta_a_editar"] = cuenta_id
                             st.session_state["cuenta_a_eliminar"] = None
-                            st.rerun()
+
                     with col_delete:
-                        if st.button(
+                        eliminar_pulsado = st.button(
                             "🗑️ Eliminar",
                             key=f"eliminar_cuenta_{cuenta_id}",
-                            type="secondary",
                             use_container_width=True
-                        ):
+                        )
+                        if eliminar_pulsado:
                             st.session_state["cuenta_a_eliminar"] = cuenta_id
                             st.session_state["cuenta_a_editar"] = None
-                            st.rerun()
 
     cuenta_edit_id = st.session_state.get("cuenta_a_editar")
     if cuenta_edit_id:
