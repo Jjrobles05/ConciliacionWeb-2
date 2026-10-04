@@ -1564,12 +1564,24 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
 
                 if rol_actual == "Administrador":
                     with col_edit:
-                        if st.button("✏️ Editar", key=f"editar_cuenta_{cuenta_id}"):
-                            st.session_state.cuenta_a_editar = cuenta_id
+                        if st.button(
+                            "✏️ Editar",
+                            key=f"editar_cuenta_{cuenta_id}",
+                            type="primary",
+                            use_container_width=True
+                        ):
+                            st.session_state["cuenta_a_editar"] = cuenta_id
+                            st.session_state["cuenta_a_eliminar"] = None
                             st.rerun()
                     with col_delete:
-                        if st.button("🗑️ Eliminar", key=f"eliminar_cuenta_{cuenta_id}"):
-                            st.session_state.cuenta_a_eliminar = cuenta_id
+                        if st.button(
+                            "🗑️ Eliminar",
+                            key=f"eliminar_cuenta_{cuenta_id}",
+                            type="secondary",
+                            use_container_width=True
+                        ):
+                            st.session_state["cuenta_a_eliminar"] = cuenta_id
+                            st.session_state["cuenta_a_editar"] = None
                             st.rerun()
 
     cuenta_edit_id = st.session_state.get("cuenta_a_editar")
