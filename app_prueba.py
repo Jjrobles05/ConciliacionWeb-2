@@ -1699,21 +1699,17 @@ def preparar_excel(
     fila = escribir_seccion(ws, 3, "INFORMACIÓN GENERAL", 7)
 
     # Logo de la empresa en el encabezado del Excel.
-    # El logo se recupera desde Turso/SQLite usando la empresa seleccionada.
     logo_bytes = obtener_logo_empresa(empresa)
     if logo_bytes:
         try:
             logo_stream = io.BytesIO(logo_bytes)
             logo_excel = XLImage(logo_stream)
-            # Tamaño visual del logo; Excel conservará la imagen dentro del libro.
             logo_excel.width = 120
             logo_excel.height = 65
             logo_excel.anchor = "E4"
             ws.add_image(logo_excel)
             ws.row_dimensions[4].height = max(ws.row_dimensions[4].height or 15, 50)
         except Exception:
-            # Si el archivo almacenado no es una imagen válida, el Excel se genera
-            # normalmente sin logo y el PDF seguirá usando su propio manejo.
             pass
 
     datos_generales = [
@@ -1748,7 +1744,6 @@ def preparar_excel(
     fila = escribir_tabla(ws, fila, nombres_titulos["t4"], entradas_extracto)
     fila = escribir_gastos_bancarios(ws, fila, gastos_bancarios)
 
-    # Firmas y trazabilidad. Aplica también a Tarjeta de Crédito.
     fila += 1
     fila = escribir_seccion(ws, fila, "FIRMAS Y TRAZABILIDAD", 6)
     for idx, titulo in enumerate(["PREPARÓ", "REVISÓ", "APROBÓ"], start=0):
@@ -2570,7 +2565,6 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         st.divider(); st.subheader("💰 CONCILIACIÓN DE CRÉDITO BANCARIO")
         st.caption("El crédito se registra primero como una cuenta bancaria. Los datos del crédito se diligencian aquí, únicamente al realizar la conciliación.")
 
-        # Datos de identificación del crédito
         c1,c2=st.columns(2)
         with c1:
             entidad_credito=st.text_input("Entidad financiera",value=banco,key="credito_entidad")
@@ -2584,4 +2578,91 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         st.markdown("### 1. Comparación de saldos")
         c1,c2=st.columns(2)
         with c1:
-            saldo_libros_cb=
+            saldo_libros_cb=st.number_input("Saldo según libros",min_value=0.0,format="%.2f",key="credito_saldo_libros")
+        with c2:
+            saldo_extracto_cb=st.number_input("Saldo según extracto bancario del crédito",min_value=0.0,format="%.2f",key="credito_saldo_extracto")
+
+        diferencia_cb=float(saldo_libros_cb)-float(saldo_extracto_cb)
+        resultado_cb="CONCILIADO" if abs(diferencia_cb)<0.005 else "NO CONCILIADO"
+        m1,m2=st.columns(2)
+        m1.metric("Diferencia (Libros - Extracto)",formatear_moneda(diferencia_cb))
+        (m2.success if resultado_cb=="CONCILIADO" else m2.warning)(f"Resultado: **{resultado_cb}**")
+
+        st.markdown("### 2. Partidas que explican la diferencia")
+        if "credito_diferencias" not in st.session_state or id_edicion:
+            st.session_state.credito_diferencias=pd.DataFrame([
+                {"Concepto":"Abono a capital registrado en libros y no en banco","Valor":0.0,"Observación":""},
+                {"Concepto":"Abono a capital registrado en banco y no en libros","Valor":0.0,"Observación":""},
+                {"Concepto":"Intereses registrados en banco y no en libros","Valor":0.0,"Observación":""},
+                {"Concepto":"Seguros","Valor":0.0,"Observación":""},
+                {"Concepto":"Comisiones y otros cargos bancarios","Valor":0.0,"Observación":""},
+                {"Concepto":"Pagos/cuotas pendientes de registrar","Valor":0.0,"Observación":""},
+                {"Concepto":"Abonos extraordinarios","Valor":0.0,"Observación":""},
+                {"Concepto":"Reclasificaciones contables","Valor":0.0,"Observación":""},
+                {"Concepto":"Diferencia pendiente de identificar","Valor":0.0,"Observación":""},
+                {"Concepto":"Otro","Valor":0.0,"Observación":""}
+            ])
+        diferencias_cb_df=st.data_editor(
+            st.session_state.credito_diferencias,
+            num_rows="dynamic",use_container_width=True,key="editor_credito_diferencias",
+            column_config={
+                "Concepto":st.column_config.TextColumn("Concepto",width="large"),
+                "Valor":st.column_config.NumberColumn("Valor",min_value=0.0,step=1000.0,format="$ %,.2f"),
+                "Observación":st.column_config.TextColumn("Observación",width="large")
+            }
+        )
+        obs_cb=st.text_area("Observaciones",key="credito_observaciones")
+        preparado_cb=usuario_actual["nombre"]
+        revisado_cb=""
+        renderizar_bloque_firmas_ui(preparado_cb, "Se registra al guardar", "", "Pendiente", "", "Pendiente", "Borrador / Pendiente de revisión")
+
+        logo_bytes=obtener_logo_empresa(empresa)
+        excel_cb,nombre_excel_cb=preparar_excel_credito_bancario(empresa,mes,fecha_elaboracion,entidad_credito,numero_credito,fecha_inicio,fecha_vencimiento,tasa,saldo_libros_cb,saldo_extracto_cb,diferencias_cb_df,obs_cb,logo_bytes,preparado_cb,"","","Se registra al guardar","","","Borrador / Pendiente de revisión")
+        pdf_cb,nombre_pdf_cb=generar_pdf_credito_bancario(empresa,mes,fecha_elaboracion,entidad_credito,numero_credito,fecha_inicio,fecha_vencimiento,tasa,saldo_libros_cb,saldo_extracto_cb,diferencias_cb_df,obs_cb,logo_bytes,preparado_cb,"","","Se registra al guardar","","","Borrador / Pendiente de revisión")
+        d1,d2=st.columns(2)
+        d1.download_button("📊 Descargar Excel",data=excel_cb,file_name=nombre_excel_cb,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+        d2.download_button("📄 Descargar PDF",data=pdf_cb,file_name=nombre_pdf_cb,mime="application/pdf",use_container_width=True)
+
+        datos_extra={"especial":"credito_bancario","entidad_financiera":entidad_credito,"numero_credito":numero_credito,"fecha_inicio":str(fecha_inicio),"fecha_vencimiento":str(fecha_vencimiento),"tasa":tasa,"cuota":cuota,"diferencia_formula":"saldo_libros - saldo_extracto","diferencias":json.loads(diferencias_cb_df.to_json(orient="records")),"observaciones_credito":obs_cb}
+        st.divider(); q1,q2=st.columns(2)
+        with q1:
+            if st.button("💾 Guardar Crédito como Borrador",key="guardar_credito_borrador"):
+                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,entidad_credito,numero_credito,tipo,saldo_libros_cb,saldo_extracto_cb,diferencia_cb,datos_extra,preparado_cb,revisado_cb,"Borrador",id_edicion)
+                st.success(f"💾 Conciliación CONC-{id_g:06d} guardada como Borrador."); st.session_state.pop("conciliacion_a_editar",None); st.session_state["historial_id_destacado"] = int(id_g); st.session_state.menu_override = "📋 Historial"; st.rerun()
+        with q2:
+            if st.button("🚀 Enviar Crédito a Revisión",key="enviar_credito_revision",type="primary"):
+                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,entidad_credito,numero_credito,tipo,saldo_libros_cb,saldo_extracto_cb,diferencia_cb,datos_extra,preparado_cb,revisado_cb,"Pendiente de revisión",id_edicion)
+                st.success(f"🚀 Conciliación CONC-{id_g:06d} enviada a Revisión."); st.session_state.pop("conciliacion_a_editar",None); st.session_state["historial_id_destacado"] = int(id_g); st.session_state.menu_override = "📋 Historial"; st.rerun()
+        st.stop()
+
+    if es_tc:
+        st.info("💳 Modo activado: Conciliación de Tarjeta de Crédito.")
+        nombres_titulos = {
+            "t1": "COMPRAS NO EVIDENCIADAS EN EXTRACTOS",
+            "t2": "COMPRAS NO CONTABILIZADAS EN LIBROS",
+            "t3": "DÉBITOS BANCARIOS NO CONTABILIZADOS EN LIBROS",
+            "t4": "ABONOS NO REGISTRADOS EN EXTRACTO"
+        }
+    else:
+        nombres_titulos = {
+            "t1": "SALIDAS NO REGISTRADAS EN EXTRACTO",
+            "t2": "SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
+            "t3": "ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
+            "t4": "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
+        }
+
+    st.divider()
+    st.subheader("Saldos")
+    c1, c2 = st.columns(2)
+    val_ext = float(obtener_conciliacion_por_id(id_edicion).get("saldo_extracto", 0.0)) if id_edicion else 0.0
+    val_lib = float(obtener_conciliacion_por_id(id_edicion).get("saldo_libros", 0.0)) if id_edicion else 0.0
+    with c1:
+        saldo_extracto = st.number_input("Saldo según Extracto", value=val_ext, format="%.2f", key="form_saldo_extracto")
+    with c2:
+        saldo_libros = st.number_input("Saldo según Libros", value=val_lib, format="%.2f", key="form_saldo_libros")
+
+    diferencia_inicial = saldo_extracto - saldo_libros
+    st.metric("Diferencia a Justificar", formatear_moneda(diferencia_inicial))
+
+    st.divider()
+    st
