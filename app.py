@@ -348,57 +348,6 @@ def obtener_cuentas(empresa_id=None):
     return pd.DataFrame(columns=['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre'])
 
 
-def actualizar_cuenta_db(cuenta_id, banco, numero_cuenta, tipo_cuenta, empresa_id):
-    conn = conectar_db()
-    c = conn.cursor()
-    try:
-        c.execute("SELECT id FROM cuentas_bancarias WHERE banco=? AND numero_cuenta=? AND id<>? AND empresa_id=?",
-                  (str(banco).strip(), str(numero_cuenta).strip(), int(cuenta_id), empresa_id))
-        if c.fetchone():
-            return False, "Ya existe una cuenta con ese número para esta empresa."
-        c.execute("UPDATE cuentas_bancarias SET banco=?, numero_cuenta=?, tipo_cuenta=?, empresa_id=? WHERE id=?",
-                  (str(banco).strip(), str(numero_cuenta).strip(), str(tipo_cuenta), empresa_id, int(cuenta_id)))
-        conn.commit()
-        return True, "Cuenta bancaria actualizada correctamente."
-    except Exception as e:
-        try: conn.rollback()
-        except Exception: pass
-        return False, f"No fue posible actualizar la cuenta: {type(e).__name__}: {e}"
-    finally:
-        conn.close()
-
-
-def eliminar_cuenta_db(cuenta_id):
-    conn = conectar_db()
-    c = conn.cursor()
-    try:
-        c.execute("SELECT COUNT(*) FROM conciliaciones WHERE cuenta_id=?", (int(cuenta_id),))
-        conciliaciones = int(c.fetchone()[0] or 0)
-        if conciliaciones:
-            return False, f"No se puede eliminar esta cuenta porque tiene {conciliaciones} conciliación(es) asociada(s). Primero elimina las conciliaciones."
-        c.execute("DELETE FROM cuentas_bancarias WHERE id=?", (int(cuenta_id),))
-        conn.commit()
-        return True, "Cuenta bancaria eliminada correctamente."
-    except Exception as e:
-        try: conn.rollback()
-        except Exception: pass
-        return False, f"No fue posible eliminar la cuenta: {type(e).__name__}: {e}"
-    finally:
-        conn.close()
-
-
-def seleccionar_cuenta_para_editar(cuenta_id):
-    """Callback de Streamlit: activa exclusivamente el modo edición."""
-    st.session_state["cuenta_a_editar"] = int(cuenta_id)
-    st.session_state["cuenta_a_eliminar"] = None
-
-
-def seleccionar_cuenta_para_eliminar(cuenta_id):
-    """Callback de Streamlit: activa exclusivamente la confirmación de eliminación."""
-    st.session_state["cuenta_a_eliminar"] = int(cuenta_id)
-    st.session_state["cuenta_a_editar"] = None
-
-
 def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
     conn = conectar_db()
     c = conn.cursor()
@@ -764,6 +713,92 @@ def autenticar_usuario(usuario, password):
     except Exception as e:
         st.error("Error técnico durante la autenticación: " + f"{type(e).__name__}: {e}")
     return None
+
+def cambiar_contrasena_usuario(usuario_id, contrasena_actual, nueva_contrasena):
+    """Cambia la contraseña del usuario autenticado verificando la contraseña actual."""
+    if not nueva_contrasena or len(str(nueva_contrasena)) < 8:
+        return False, "La nueva contraseña debe tener al menos 8 caracteres."
+    conn = conectar_db()
+    c = conn.cursor()
+    try:
+        c.execute("SELECT salt, password_hash FROM usuarios WHERE id=? AND activo=1", (int(usuario_id),))
+        fila = c.fetchone()
+        if not fila:
+            return False, "El usuario no existe o está inactivo."
+        if not verificar_password(str(contrasena_actual or "").strip(), fila[0], fila[1]):
+            return False, "La contraseña actual es incorrecta."
+        nuevo_salt, nuevo_hash = hash_password(str(nueva_contrasena).strip())
+        c.execute("UPDATE usuarios SET password_hash=?, salt=? WHERE id=?",
+                  (nuevo_hash, nuevo_salt, int(usuario_id)))
+        conn.commit()
+        return True, "Contraseña cambiada correctamente."
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible cambiar la contraseña: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
+
+
+def actualizar_usuario_db(usuario_id, usuario, nombre, rol, activo, empresa_id=None, nueva_contrasena=None):
+    """Actualiza los datos de un usuario. La contraseña solo se reemplaza si se proporciona una nueva."""
+    usuario = str(usuario or "").strip().lower()
+    nombre = str(nombre or "").strip()
+    rol = str(rol or "").strip()
+    if not usuario or not nombre or not rol:
+        return False, "Usuario, nombre y rol son obligatorios."
+    if nueva_contrasena is not None and str(nueva_contrasena).strip() and len(str(nueva_contrasena).strip()) < 8:
+        return False, "La nueva contraseña debe tener al menos 8 caracteres."
+
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("SELECT id FROM usuarios WHERE LOWER(usuario)=LOWER(?) AND id<>?", (usuario, int(usuario_id)))
+        if c.fetchone():
+            return False, "Ese nombre de usuario ya está registrado."
+
+        if nueva_contrasena is not None and str(nueva_contrasena).strip():
+            nuevo_salt, nuevo_hash = hash_password(str(nueva_contrasena).strip())
+            c.execute("""UPDATE usuarios SET usuario=?, nombre=?, password_hash=?, salt=?, rol=?, activo=?, empresa_id=? WHERE id=?""",
+                      (usuario, nombre, nuevo_hash, nuevo_salt, rol, 1 if activo else 0, empresa_id, int(usuario_id)))
+        else:
+            c.execute("""UPDATE usuarios SET usuario=?, nombre=?, rol=?, activo=?, empresa_id=? WHERE id=?""",
+                      (usuario, nombre, rol, 1 if activo else 0, empresa_id, int(usuario_id)))
+        if c.rowcount == 0:
+            return False, "No se encontró el usuario."
+        conn.commit()
+        return True, "Usuario actualizado correctamente."
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible actualizar el usuario: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
+
+def eliminar_usuario_db(usuario_id, usuario_actual_id=None):
+    """Elimina un usuario, evitando que el administrador borre su propia cuenta."""
+    if usuario_actual_id is not None and int(usuario_id) == int(usuario_actual_id):
+        return False, "No puedes eliminar el usuario con el que estás conectado."
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("SELECT usuario, rol, activo FROM usuarios WHERE id=?", (int(usuario_id),))
+        fila = c.fetchone()
+        if not fila:
+            return False, "El usuario no existe."
+        if fila[1] == "Administrador" and int(fila[2] or 0) == 1:
+            c.execute("SELECT COUNT(*) FROM usuarios WHERE rol='Administrador' AND activo=1")
+            if int(c.fetchone()[0] or 0) <= 1:
+                return False, "No se puede eliminar al único Administrador activo."
+        c.execute("DELETE FROM usuarios WHERE id=?", (int(usuario_id),))
+        conn.commit()
+        return True, f"Usuario '{fila[0]}' eliminado correctamente."
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible eliminar el usuario: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
 
 def obtener_usuarios():
     try:
@@ -1545,226 +1580,21 @@ elif menu_seleccionado == "🏢 Empresas":
 
 elif menu_seleccionado == "🏦 Bancos y Cuentas":
     st.title("🏦 Maestro de Bancos y Cuentas Bancarias")
-
-    # ==========================================================
-    # REGISTRAR CUENTA
-    # ==========================================================
     if rol_actual == "Administrador":
         with st.expander("➕ Registrar nueva cuenta bancaria"):
             with st.form("form_cuenta_maestro"):
                 banco = st.text_input("Banco")
                 num = st.text_input("Número de Cuenta / Tarjeta")
-                tipo = st.selectbox(
-                    "Tipo de Cuenta",
-                    ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"]
-                )
+                tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"])
                 emp_id = None
                 if not empresas_df.empty:
-                    emp_id = st.selectbox(
-                        "Asociar a Empresa",
-                        empresas_df["id"].tolist(),
-                        format_func=lambda x: empresas_df.loc[
-                            empresas_df["id"] == x, "nombre"
-                        ].values[0]
-                    )
-
+                    emp_id = st.selectbox("Asociar a Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0])
                 if st.form_submit_button("Guardar Cuenta", type="primary"):
-                    if not banco.strip() or not num.strip():
-                        st.error("Debes indicar el banco y el número de cuenta.")
-                    elif emp_id is None:
-                        st.error("Debes asociar la cuenta a una empresa.")
-                    else:
-                        try:
-                            guardar_cuenta(banco, num, tipo, emp_id)
-                            st.success("Cuenta guardada exitosamente.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"No fue posible guardar la cuenta: {e}")
-
-    # ==========================================================
-    # ESTADO DE EDICIÓN / ELIMINACIÓN
-    # ==========================================================
-    if "cuenta_a_editar" not in st.session_state:
-        st.session_state["cuenta_a_editar"] = None
-    if "cuenta_a_eliminar" not in st.session_state:
-        st.session_state["cuenta_a_eliminar"] = None
-
-    cuentas_df = obtener_cuentas(empresa_activa_id)
-
-    st.subheader("📋 Cuentas registradas")
-
-    if cuentas_df.empty:
-        st.info("No hay cuentas bancarias registradas para la empresa seleccionada.")
-    else:
-        for _, cuenta_fila in cuentas_df.iterrows():
-            cuenta_id = int(cuenta_fila["id"])
-            banco_txt = str(cuenta_fila["banco"] or "")
-            numero_txt = str(cuenta_fila["numero_cuenta"] or "")
-            tipo_txt = str(cuenta_fila["tipo_cuenta"] or "")
-            empresa_txt = str(cuenta_fila["empresa_nombre"] or "Sin asignar")
-
-            with st.container(border=True):
-                col_info, col_editar, col_eliminar = st.columns([6, 1.2, 1.2])
-
-                with col_info:
-                    st.markdown(f"**🏦 {banco_txt} — {numero_txt}**")
-                    st.caption(f"Tipo: {tipo_txt} | Empresa: {empresa_txt}")
-
-                if rol_actual == "Administrador":
-                    with col_editar:
-                        if st.button(
-                            "✏️ Editar",
-                            key=f"editar_cuenta_{cuenta_id}",
-                            type="primary",
-                            use_container_width=True
-                        ):
-                            st.session_state["cuenta_a_editar"] = int(cuenta_id)
-                            st.session_state["cuenta_a_eliminar"] = None
-                            st.rerun()
-
-                    with col_eliminar:
-                        if st.button(
-                            "🗑️ Eliminar",
-                            key=f"eliminar_cuenta_{cuenta_id}",
-                            type="secondary",
-                            use_container_width=True
-                        ):
-                            st.session_state["cuenta_a_eliminar"] = int(cuenta_id)
-                            st.session_state["cuenta_a_editar"] = None
-                            st.rerun()
-
-    # ==========================================================
-    # FORMULARIO REAL DE EDICIÓN
-    # ==========================================================
-    cuenta_edit_id = st.session_state.get("cuenta_a_editar")
-
-    if cuenta_edit_id is not None and rol_actual == "Administrador":
-        cuenta_edit_df = cuentas_df[cuentas_df["id"] == int(cuenta_edit_id)] if not cuentas_df.empty else pd.DataFrame()
-
-        if cuenta_edit_df.empty:
-            st.session_state["cuenta_a_editar"] = None
-        else:
-            cuenta_edit = cuenta_edit_df.iloc[0]
-            st.divider()
-            st.subheader("✏️ Editar cuenta bancaria")
-
-            with st.form(f"form_editar_cuenta_{int(cuenta_edit_id)}"):
-                edit_banco = st.text_input(
-                    "Banco",
-                    value=str(cuenta_edit["banco"] or "")
-                )
-                edit_num = st.text_input(
-                    "Número de Cuenta / Tarjeta",
-                    value=str(cuenta_edit["numero_cuenta"] or "")
-                )
-
-                tipos = [
-                    "Cuenta de ahorros",
-                    "Cuenta corriente",
-                    "Tarjeta de crédito"
-                ]
-                tipo_actual = str(cuenta_edit["tipo_cuenta"] or "")
-                indice_tipo = tipos.index(tipo_actual) if tipo_actual in tipos else 0
-                edit_tipo = st.selectbox(
-                    "Tipo de Cuenta",
-                    tipos,
-                    index=indice_tipo
-                )
-
-                if empresas_df.empty:
-                    st.error("No existen empresas registradas para asociar esta cuenta.")
-                    edit_empresa = None
-                else:
-                    empresa_ids = [int(x) for x in empresas_df["id"].tolist()]
-                    empresa_actual = int(cuenta_edit["empresa_id"]) if pd.notna(cuenta_edit["empresa_id"]) else empresa_ids[0]
-                    if empresa_actual not in empresa_ids:
-                        empresa_actual = empresa_ids[0]
-
-                    edit_empresa = st.selectbox(
-                        "Asociar a Empresa",
-                        empresa_ids,
-                        index=empresa_ids.index(empresa_actual),
-                        format_func=lambda x: empresas_df.loc[
-                            empresas_df["id"] == x, "nombre"
-                        ].values[0]
-                    )
-
-                col_guardar, col_cancelar = st.columns(2)
-                with col_guardar:
-                    guardar_edit = st.form_submit_button(
-                        "💾 Guardar cambios",
-                        type="primary"
-                    )
-                with col_cancelar:
-                    cancelar_edit = st.form_submit_button("❌ Cancelar")
-
-                if cancelar_edit:
-                    st.session_state["cuenta_a_editar"] = None
+                    guardar_cuenta(banco, num, tipo, emp_id)
+                    st.success("Cuenta guardada exitosamente.")
                     st.rerun()
 
-                if guardar_edit:
-                    if not edit_banco.strip() or not edit_num.strip():
-                        st.error("El banco y el número de cuenta son obligatorios.")
-                    elif edit_empresa is None:
-                        st.error("Debes asociar la cuenta a una empresa.")
-                    else:
-                        ok, mensaje = actualizar_cuenta_db(
-                            int(cuenta_edit_id),
-                            edit_banco,
-                            edit_num,
-                            edit_tipo,
-                            int(edit_empresa)
-                        )
-                        if ok:
-                            st.session_state["cuenta_a_editar"] = None
-                            st.success(mensaje)
-                            st.rerun()
-                        else:
-                            st.error(mensaje)
-
-    # ==========================================================
-    # CONFIRMACIÓN REAL DE ELIMINACIÓN
-    # ==========================================================
-    cuenta_delete_id = st.session_state.get("cuenta_a_eliminar")
-
-    if cuenta_delete_id is not None and rol_actual == "Administrador":
-        cuenta_delete_df = cuentas_df[cuentas_df["id"] == int(cuenta_delete_id)] if not cuentas_df.empty else pd.DataFrame()
-
-        if cuenta_delete_df.empty:
-            st.session_state["cuenta_a_eliminar"] = None
-        else:
-            cuenta_delete = cuenta_delete_df.iloc[0]
-            st.divider()
-            st.warning(
-                f"⚠️ Vas a eliminar la cuenta **{cuenta_delete['banco']} — "
-                f"{cuenta_delete['numero_cuenta']}**. Esta acción no se puede deshacer."
-            )
-
-            col_confirmar, col_cancelar = st.columns(2)
-
-            with col_confirmar:
-                if st.button(
-                    "🗑️ Sí, eliminar cuenta",
-                    type="primary",
-                    key=f"confirmar_eliminar_cuenta_{int(cuenta_delete_id)}",
-                    use_container_width=True
-                ):
-                    ok, mensaje = eliminar_cuenta_db(int(cuenta_delete_id))
-                    if ok:
-                        st.session_state["cuenta_a_eliminar"] = None
-                        st.success(mensaje)
-                        st.rerun()
-                    else:
-                        st.error(mensaje)
-
-            with col_cancelar:
-                if st.button(
-                    "❌ Cancelar eliminación",
-                    key=f"cancelar_eliminar_cuenta_{int(cuenta_delete_id)}",
-                    use_container_width=True
-                ):
-                    st.session_state["cuenta_a_eliminar"] = None
-                    st.rerun()
+    st.dataframe(obtener_cuentas(empresa_activa_id), use_container_width=True, hide_index=True)
 
 elif menu_seleccionado == "📝 Nueva Conciliación":
     st.title("📝 Captura / Edición de Conciliación Bancaria")
@@ -2128,10 +1958,111 @@ elif menu_seleccionado == "📋 Historial":
 elif menu_seleccionado == "👥 Usuarios":
     st.title("👥 Gestión de Usuarios y Roles")
     usuarios_df = obtener_usuarios()
-    st.subheader("Lista de Usuarios Registrados")
-    st.dataframe(usuarios_df, use_container_width=True, hide_index=True)
 
     if rol_actual == "Administrador":
+        st.subheader("👥 Usuarios registrados")
+        if usuarios_df.empty:
+            st.info("No hay usuarios registrados.")
+        else:
+            for _, usr in usuarios_df.iterrows():
+                uid = int(usr["id"])
+                estado_txt = "🟢 Activo" if int(usr["activo"] or 0) == 1 else "🔴 Inactivo"
+                with st.container(border=True):
+                    c_info, c_edit, c_del = st.columns([5, 1.3, 1.3])
+                    with c_info:
+                        st.markdown(f"**{usr['nombre']}**  ·  `@{usr['usuario']}`")
+                        st.caption(f"Rol: **{usr['rol']}** · Empresa: **{usr['empresa_nombre'] or 'Sin asignar'}** · {estado_txt}")
+                    with c_edit:
+                        if st.button("✏️ Editar", key=f"editar_usuario_{uid}", use_container_width=True):
+                            st.session_state.usuario_a_editar = uid
+                            st.rerun()
+                    with c_del:
+                        if st.button("🗑️ Eliminar", key=f"eliminar_usuario_{uid}", use_container_width=True, disabled=(uid == int(usuario_actual["id"]))):
+                            st.session_state.usuario_a_eliminar = uid
+                            st.rerun()
+
+            edit_id = st.session_state.get("usuario_a_editar")
+            if edit_id:
+                fila_edit = usuarios_df[usuarios_df["id"] == int(edit_id)]
+                if not fila_edit.empty:
+                    usr_edit = fila_edit.iloc[0]
+                    st.divider()
+                    st.subheader(f"✏️ Editar usuario: {usr_edit['nombre']}")
+                    empresas_ids = [None] + (empresas_df["id"].tolist() if not empresas_df.empty else [])
+                    empresa_actual = None if pd.isna(usr_edit.get("empresa_nombre")) else None
+                    if not empresas_df.empty:
+                        m = empresas_df[empresas_df["nombre"] == usr_edit.get("empresa_nombre")]
+                        empresa_actual = int(m.iloc[0]["id"]) if not m.empty else None
+                    try:
+                        idx_emp = empresas_ids.index(empresa_actual)
+                    except ValueError:
+                        idx_emp = 0
+                    with st.form("form_editar_usuario"):
+                        e1, e2 = st.columns(2)
+                        with e1:
+                            edit_nombre = st.text_input("Nombre completo", value=str(usr_edit["nombre"]))
+                            edit_usuario = st.text_input("Usuario", value=str(usr_edit["usuario"]))
+                            edit_rol = st.selectbox("Rol", ["Preparador", "Revisor", "Administrador"], index=["Preparador", "Revisor", "Administrador"].index(str(usr_edit["rol"])) if str(usr_edit["rol"]) in ["Preparador", "Revisor", "Administrador"] else 0)
+                        with e2:
+                            edit_activo = st.checkbox("Usuario activo", value=bool(int(usr_edit["activo"] or 0)))
+                            edit_empresa = st.selectbox("Empresa asignada", empresas_ids, index=idx_emp, format_func=lambda x: "Sin asignar" if x is None else empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0])
+                            edit_pass = st.text_input("Nueva contraseña (opcional)", type="password", help="Déjala vacía para conservar la contraseña actual.")
+                            edit_pass2 = st.text_input("Confirmar nueva contraseña", type="password")
+                        b1, b2 = st.columns(2)
+                        with b1:
+                            guardar_edit = st.form_submit_button("💾 Guardar cambios", type="primary", use_container_width=True)
+                        with b2:
+                            cancelar_edit = st.form_submit_button("❌ Cancelar", use_container_width=True)
+
+                    if cancelar_edit:
+                        st.session_state.pop("usuario_a_editar", None)
+                        st.rerun()
+                    if guardar_edit:
+                        if edit_pass and edit_pass != edit_pass2:
+                            st.error("Las nuevas contraseñas no coinciden.")
+                        else:
+                            ok, mensaje = actualizar_usuario_db(uid, edit_usuario, edit_nombre, edit_rol, edit_activo, edit_empresa, edit_pass or None)
+                            if ok:
+                                if uid == int(usuario_actual["id"]):
+                                    actualizado = autenticar_usuario(edit_usuario, edit_pass if edit_pass else "") if edit_pass else None
+                                    if actualizado:
+                                        st.session_state.usuario_autenticado = actualizado
+                                    else:
+                                        datos_actuales = dict(usuario_actual)
+                                        datos_actuales.update({"usuario": edit_usuario, "nombre": edit_nombre, "rol": edit_rol, "empresa_id": edit_empresa})
+                                        st.session_state.usuario_autenticado = datos_actuales
+                                st.session_state.pop("usuario_a_editar", None)
+                                try: st.cache_data.clear()
+                                except Exception: pass
+                                st.success(mensaje)
+                                st.rerun()
+                            else:
+                                st.error(mensaje)
+
+            del_id = st.session_state.get("usuario_a_eliminar")
+            if del_id:
+                fila_del = usuarios_df[usuarios_df["id"] == int(del_id)]
+                if not fila_del.empty:
+                    usr_del = fila_del.iloc[0]
+                    st.divider()
+                    st.warning(f"⚠️ Vas a eliminar al usuario **{usr_del['nombre']} (@{usr_del['usuario']})**. Esta acción no se puede deshacer.")
+                    d1, d2 = st.columns(2)
+                    with d1:
+                        if st.button("🚨 Confirmar eliminación", type="primary", key="confirmar_eliminar_usuario", use_container_width=True):
+                            ok, mensaje = eliminar_usuario_db(int(del_id), int(usuario_actual["id"]))
+                            if ok:
+                                st.session_state.pop("usuario_a_eliminar", None)
+                                try: st.cache_data.clear()
+                                except Exception: pass
+                                st.success(mensaje)
+                                st.rerun()
+                            else:
+                                st.error(mensaje)
+                    with d2:
+                        if st.button("❌ Cancelar eliminación", key="cancelar_eliminar_usuario", use_container_width=True):
+                            st.session_state.pop("usuario_a_eliminar", None)
+                            st.rerun()
+
         st.divider()
         col_crear, col_link = st.columns(2)
         with col_crear:
@@ -2143,11 +2074,7 @@ elif menu_seleccionado == "👥 Usuarios":
                     nuevo_rol = st.selectbox("Rol de Acceso", ["Preparador", "Revisor", "Administrador"])
                     emp_id_crear = None
                     if not empresas_df.empty:
-                        emp_id_crear = st.selectbox(
-                            "Empresa Asignada",
-                            [None] + empresas_df["id"].tolist(),
-                            format_func=lambda x: "Sin asignar (Todas)" if x is None else empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0]
-                        )
+                        emp_id_crear = st.selectbox("Empresa Asignada", [None] + empresas_df["id"].tolist(), format_func=lambda x: "Sin asignar (Todas)" if x is None else empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0])
                     if st.form_submit_button("Crear Usuario", type="primary"):
                         if not nuevo_nombre.strip() or not nuevo_usuario.strip() or not nueva_pass:
                             st.error("Completa todos los campos obligatorios.")
@@ -2167,41 +2094,31 @@ elif menu_seleccionado == "👥 Usuarios":
                 rol_link = st.selectbox("Rol para el nuevo usuario", ["Preparador", "Revisor", "Administrador"], key="link_rol")
                 emp_id_link = None
                 if not empresas_df.empty:
-                    emp_id_link = st.selectbox(
-                        "Empresa predeterminada",
-                        [None] + empresas_df["id"].tolist(),
-                        format_func=lambda x: "Sin asignar" if x is None else empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0],
-                        key="link_empresa"
-                    )
+                    emp_id_link = st.selectbox("Empresa predeterminada", [None] + empresas_df["id"].tolist(), format_func=lambda x: "Sin asignar" if x is None else empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0], key="link_empresa")
                 url_base = st.query_params.get("base_url", "https://conciliacionweb.streamlit.app/")
                 link_generado = f"{url_base}?registro=true&rol={rol_link}"
                 if emp_id_link:
                     link_generado += f"&empresa_id={emp_id_link}"
                 st.code(link_generado, language="text")
 
-        if not usuarios_df.empty:
-            st.divider()
-            c_rol, c_emp = st.columns(2)
-            with c_rol:
-                st.subheader("🔄 Cambiar Rol de Usuario")
-                with st.form("form_cambiar_rol"):
-                    usr_sel_r = st.selectbox("Usuario", usuarios_df["id"].tolist(), format_func=lambda x: f"{usuarios_df.loc[usuarios_df['id'] == x, 'nombre'].values[0]} ({usuarios_df.loc[usuarios_df['id'] == x, 'usuario'].values[0]})")
-                    nuevo_rol_sel = st.selectbox("Nuevo Rol", ["Preparador", "Revisor", "Administrador"])
-                    if st.form_submit_button("Actualizar Rol", type="primary"):
-                        actualizar_rol_usuario(usr_sel_r, nuevo_rol_sel)
-                        st.success("Rol actualizado con éxito.")
-                        st.rerun()
-
-            with c_emp:
-                if not empresas_df.empty:
-                    st.subheader("🏢 Cambiar Empresa Asignada")
-                    with st.form("form_asignar_empresa"):
-                        usr_sel_e = st.selectbox("Usuario", usuarios_df["id"].tolist(), format_func=lambda x: f"{usuarios_df.loc[usuarios_df['id'] == x, 'nombre'].values[0]} ({usuarios_df.loc[usuarios_df['id'] == x, 'usuario'].values[0]})")
-                        emp_sel = st.selectbox("Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0])
-                        if st.form_submit_button("Asignar Empresa", type="primary"):
-                            actualizar_empresa_usuario(usr_sel_e, emp_sel)
-                            st.success("Empresa asignada correctamente.")
-                            st.rerun()
+    else:
+        st.subheader("🔐 Cambiar mi contraseña")
+        st.caption("Si no recuerdas tu contraseña, solicita al Administrador que te asigne una nueva.")
+        with st.form("form_cambiar_mi_contrasena"):
+            contrasena_actual = st.text_input("Contraseña actual", type="password")
+            nueva_contrasena = st.text_input("Nueva contraseña", type="password")
+            confirmar_nueva = st.text_input("Confirmar nueva contraseña", type="password")
+            if st.form_submit_button("🔑 Cambiar mi contraseña", type="primary"):
+                if not contrasena_actual or not nueva_contrasena or not confirmar_nueva:
+                    st.error("Completa todos los campos.")
+                elif nueva_contrasena != confirmar_nueva:
+                    st.error("Las nuevas contraseñas no coinciden.")
+                else:
+                    ok, mensaje = cambiar_contrasena_usuario(usuario_actual["id"], contrasena_actual, nueva_contrasena)
+                    if ok:
+                        st.success(mensaje)
+                    else:
+                        st.error(mensaje)
 
 elif menu_seleccionado == "⚙️ Administración":
     st.title("⚙️ Administración")
