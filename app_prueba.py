@@ -2729,65 +2729,196 @@ elif menu_seleccionado == "📋 Historial":
     if empresa_activa_nombre != "Todas las empresas":
         st.caption(f"Mostrando conciliaciones de: **{empresa_activa_nombre}**")
 
-    historial = obtener_historial(empresa_activa_nombre)
-    filtro_estado = st.selectbox("Filtrar por Estado de Revisión:", ["Todos los Estados", "Borrador", "Pendiente de revisión", "Aprobada", "Requiere corrección"])
+    tab_b, tab_c, tab_k = st.tabs([
+        "🏦 Conciliación bancaria",
+        "💳 Conciliación de créditos",
+        "💵 Cuadre de cajas"
+    ])
 
-    if filtro_estado != "Todos los Estados" and not historial.empty:
-        historial = historial[historial["workflow_status"] == filtro_estado]
+    # ==========================================================
+    # HISTORIAL BANCARIO
+    # ==========================================================
+    with tab_b:
+        historial = obtener_historial(empresa_activa_nombre)
+        filtro_estado_b = st.selectbox(
+            "Filtrar por Estado de Revisión:",
+            ["Todos los Estados", "Borrador", "Pendiente de revisión", "Aprobada", "Requiere corrección"],
+            key="historial_estado_bancario"
+        )
 
-    if historial.empty:
-        st.info("No hay conciliaciones guardadas para el filtro seleccionado.")
-    else:
-        for idx, fila in historial.iterrows():
-            cuenta_txt = fila.get("cuenta") or "N/A"
-            banco_txt = fila.get("banco") or "N/A"
-            wf_status = fila.get("workflow_status", "Pendiente de revisión")
-            consecutivo_str = f"CONC-{int(fila['id']):06d}"
+        if filtro_estado_b != "Todos los Estados" and not historial.empty:
+            historial = historial[historial["workflow_status"] == filtro_estado_b]
 
-            with st.expander(f"📌 {consecutivo_str} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']} - Estado: {wf_status}"):
-                c_data = obtener_conciliacion_por_id(fila["id"])
-                try:
-                    datos = json.loads(c_data.get("datos_json", "{}"))
-                except Exception:
-                    datos = {}
+        if historial.empty:
+            st.info("No hay conciliaciones bancarias guardadas para el filtro seleccionado.")
+        else:
+            for _, fila in historial.iterrows():
+                cuenta_txt = fila.get("cuenta") or "N/A"
+                banco_txt = fila.get("banco") or "N/A"
+                wf_status = fila.get("workflow_status", "Pendiente de revisión")
+                consecutivo_str = f"CONC-{int(fila['id']):06d}"
 
-                if wf_status == "Requiere corrección" and c_data.get("motivo_correccion"):
-                    st.error(f"⚠️️ **Observaciones del Auditor ({c_data.get('revisado_por_usuario', 'N/A')}):**\n"
-                             f"• **Categoría:** {c_data.get('tipo_hallazgo', 'General')}\n"
-                             f"• **Detalle:** {c_data.get('motivo_correccion')}")
+                with st.expander(
+                    f"📌 {consecutivo_str} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | "
+                    f"Mes: {fila['mes']} - Estado: {wf_status}"
+                ):
+                    c_data = obtener_conciliacion_por_id(fila["id"])
+                    try:
+                        datos = json.loads(c_data.get("datos_json", "{}"))
+                    except Exception:
+                        datos = {}
 
-                tipo_cta = c_data.get("tipo") or "Cuenta de ahorros"
-                es_tc = "tarjeta" in tipo_cta.lower() or "crédito" in tipo_cta.lower() or "credito" in tipo_cta.lower()
+                    if wf_status == "Requiere corrección" and c_data.get("motivo_correccion"):
+                        st.error(
+                            f"⚠️ **Observaciones del Auditor ({c_data.get('revisado_por_usuario', 'N/A')}):**\n"
+                            f"• **Categoría:** {c_data.get('tipo_hallazgo', 'General')}\n"
+                            f"• **Detalle:** {c_data.get('motivo_correccion')}"
+                        )
 
-                if es_tc:
-                    t1_nombre, t2_nombre, t3_nombre, t4_nombre = (
-                        "COMPRAS NO EVIDENCIADAS EN EXTRACTOS", "COMPRAS NO CONTABILIZADAS EN LIBROS",
-                        "DÉBITOS BANCARIOS NO CONTABILIZADOS EN LIBROS", "ABONOS NO REGISTRADOS EN EXTRACTO"
-                    )
-                else:
-                    t1_nombre, t2_nombre, t3_nombre, t4_nombre = (
-                        "SALIDAS NO REGISTRADAS EN EXTRACTO", "SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
-                        "ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS", "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
-                    )
+                    tipo_cta = c_data.get("tipo") or "Cuenta de ahorros"
+                    es_tc = "tarjeta" in tipo_cta.lower() or "crédito" in tipo_cta.lower() or "credito" in tipo_cta.lower()
+                    if es_tc:
+                        t1_nombre, t2_nombre, t3_nombre, t4_nombre = (
+                            "COMPRAS NO EVIDENCIADAS EN EXTRACTOS", "COMPRAS NO CONTABILIZADAS EN LIBROS",
+                            "DÉBITOS BANCARIOS NO CONTABILIZADOS EN LIBROS", "ABONOS NO REGISTRADOS EN EXTRACTO"
+                        )
+                    else:
+                        t1_nombre, t2_nombre, t3_nombre, t4_nombre = (
+                            "SALIDAS NO REGISTRADAS EN EXTRACTO", "SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
+                            "ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS", "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
+                        )
 
-                c_act1, c_act2, c_act3 = st.columns(3)
-                with c_act1:
-                    if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                        st.session_state.conciliacion_a_editar = fila['id']
-                        st.session_state.pop("datos_cargados_edit", None)
-                        st.session_state.menu_override = "🏦 Conciliación"
-                        st.rerun()
+                    c_act1, c_act2, c_act3 = st.columns(3)
+                    with c_act1:
+                        if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
+                            st.session_state.conciliacion_a_editar = fila['id']
+                            st.session_state.pop("datos_cargados_edit", None)
+                            st.session_state.menu_override = "🏦 Conciliación"
+                            st.rerun()
+                    with c_act2:
+                        if c_data.get("excel"):
+                            nombre_ex = f"CONCILIACION_{consecutivo_str}_{limpiar_nombre_archivo(c_data.get('empresa'))}.xlsx"
+                            st.download_button("📊 Descargar Excel", data=bytes(c_data["excel"]), file_name=nombre_ex, key=f"hist_excel_{fila['id']}")
+                    with c_act3:
+                        nombres_titulos = {"t1": t1_nombre, "t2": t2_nombre, "t3": t3_nombre, "t4": t4_nombre}
+                        pdf_bytes = generar_pdf_conciliacion(c_data, datos, nombres_titulos)
+                        nombre_pdf = f"CONCILIACION_{consecutivo_str}_{limpiar_nombre_archivo(c_data.get('empresa'))}.pdf"
+                        st.download_button("📄 Descargar PDF", data=pdf_bytes, file_name=nombre_pdf, mime="application/pdf", key=f"hist_pdf_{fila['id']}")
 
-                with c_act2:
-                    if c_data.get("excel"):
-                        nombre_ex = f"CONCILIACION_{consecutivo_str}_{limpiar_nombre_archivo(c_data.get('empresa'))}.xlsx"
-                        st.download_button("📊 Descargar Excel", data=bytes(c_data["excel"]), file_name=nombre_ex)
+    # ==========================================================
+    # HISTORIAL DE CRÉDITOS
+    # ==========================================================
+    with tab_c:
+        hist_creditos = obtener_conciliaciones_creditos(empresa_activa_nombre)
+        filtro_estado_c = st.selectbox(
+            "Filtrar por Estado de Revisión:",
+            ["Todos los Estados", "Borrador", "Pendiente de revisión", "Aprobada", "Requiere corrección"],
+            key="historial_estado_creditos"
+        )
+        if filtro_estado_c != "Todos los Estados" and not hist_creditos.empty:
+            hist_creditos = hist_creditos[hist_creditos["workflow_status"] == filtro_estado_c]
 
-                with c_act3:
-                    nombres_titulos = {"t1": t1_nombre, "t2": t2_nombre, "t3": t3_nombre, "t4": t4_nombre}
-                    pdf_bytes = generar_pdf_conciliacion(c_data, datos, nombres_titulos)
-                    nombre_pdf = f"CONCILIACION_{consecutivo_str}_{limpiar_nombre_archivo(c_data.get('empresa'))}.pdf"
-                    st.download_button("📄 Descargar PDF", data=pdf_bytes, file_name=nombre_pdf, mime="application/pdf")
+        if hist_creditos.empty:
+            st.info("No hay conciliaciones de crédito guardadas para el filtro seleccionado.")
+        else:
+            st.dataframe(
+                hist_creditos[["id", "empresa", "banco", "numero_cuenta", "entidad_financiera", "numero_credito", "periodo", "diferencia", "resultado", "workflow_status"]],
+                use_container_width=True,
+                hide_index=True
+            )
+            for _, fila in hist_creditos.iterrows():
+                cid = int(fila["id"])
+                estado = fila.get("workflow_status", "Borrador")
+                with st.expander(
+                    f"💳 CRED-{cid:06d} | {fila.get('empresa','')} | "
+                    f"{fila.get('banco','')} - {fila.get('numero_cuenta','')} | "
+                    f"{fila.get('entidad_financiera','')} - {fila.get('numero_credito','')} | "
+                    f"Período: {fila.get('periodo','')} | Estado: {estado}"
+                ):
+                    d = obtener_detalle_conciliacion_credito(cid)
+                    if d:
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Saldo libros", formatear_moneda(d.get("saldo_libros", 0)))
+                        m2.metric("Saldo extracto", formatear_moneda(d.get("saldo_extracto", 0)))
+                        m3.metric("Diferencia", formatear_moneda(d.get("diferencia", 0)))
+                        st.write(f"**Resultado:** {d.get('resultado','')} | **Preparado por:** {d.get('preparado_por','N/A')}")
+                        if d.get("motivo_correccion"):
+                            st.error(f"⚠️ Observación del auditor: {d['motivo_correccion']}")
+
+                        r1, r2 = st.columns(2)
+                        with r1:
+                            st.download_button(
+                                "📊 Descargar Excel",
+                                data=generar_excel_credito_reporte(d),
+                                file_name=f"CREDITO_{cid:06d}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"hist_cred_excel_{cid}"
+                            )
+                        with r2:
+                            st.download_button(
+                                "📄 Descargar PDF",
+                                data=generar_pdf_credito_reporte(d),
+                                file_name=f"CREDITO_{cid:06d}.pdf",
+                                mime="application/pdf",
+                                key=f"hist_cred_pdf_{cid}"
+                            )
+
+    # ==========================================================
+    # HISTORIAL DE CAJAS
+    # ==========================================================
+    with tab_k:
+        hist_cajas = obtener_arqueos_caja(empresa_activa_nombre)
+        filtro_estado_k = st.selectbox(
+            "Filtrar por Estado de Revisión:",
+            ["Todos los Estados", "Borrador", "Pendiente de revisión", "Aprobada", "Requiere corrección"],
+            key="historial_estado_cajas"
+        )
+        if filtro_estado_k != "Todos los Estados" and not hist_cajas.empty:
+            hist_cajas = hist_cajas[hist_cajas["workflow_status"] == filtro_estado_k]
+
+        if hist_cajas.empty:
+            st.info("No hay cuadres de caja guardados para el filtro seleccionado.")
+        else:
+            st.dataframe(
+                hist_cajas[["id", "empresa", "caja", "fecha_arqueo", "periodo", "total_compras", "saldo_teorico", "efectivo_fisico", "diferencia", "resultado", "workflow_status"]],
+                use_container_width=True,
+                hide_index=True
+            )
+            for _, fila in hist_cajas.iterrows():
+                aid = int(fila["id"])
+                estado = fila.get("workflow_status", "Borrador")
+                with st.expander(
+                    f"💵 CAJA-{aid:06d} | {fila.get('empresa','')} | {fila.get('caja','')} | "
+                    f"Período: {fila.get('periodo','')} | Estado: {estado}"
+                ):
+                    d = obtener_detalle_arqueo_caja(aid)
+                    if d:
+                        m1, m2, m3, m4 = st.columns(4)
+                        m1.metric("Saldo teórico", formatear_moneda(d.get("saldo_teorico", 0)))
+                        m2.metric("Efectivo físico", formatear_moneda(d.get("efectivo_fisico", 0)))
+                        m3.metric("Diferencia", formatear_moneda(d.get("diferencia", 0)))
+                        m4.metric("Resultado", d.get("resultado", ""))
+                        st.write(f"**Responsable:** {d.get('responsable','N/A')} | **Preparado por:** {d.get('preparado_por','N/A')}")
+                        if d.get("motivo_correccion"):
+                            st.error(f"⚠️ Observación del auditor: {d['motivo_correccion']}")
+
+                        r1, r2 = st.columns(2)
+                        with r1:
+                            st.download_button(
+                                "📊 Descargar Excel",
+                                data=generar_excel_caja_reporte(d),
+                                file_name=f"CAJA_{aid:06d}.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key=f"hist_caja_excel_{aid}"
+                            )
+                        with r2:
+                            st.download_button(
+                                "📄 Descargar PDF",
+                                data=generar_pdf_caja_reporte(d),
+                                file_name=f"CAJA_{aid:06d}.pdf",
+                                mime="application/pdf",
+                                key=f"hist_caja_pdf_{aid}"
+                            )
 
 elif menu_seleccionado == "👥 Usuarios":
     st.title("👥 Gestión de Usuarios y Roles")
