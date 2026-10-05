@@ -494,6 +494,16 @@ def preparar_excel_asignaciones(asignaciones_df, empresa, anio, mes_num):
         fila += 1
     for col, ancho in enumerate([22, 24, 22, 28, 22], 1):
         ws.column_dimensions[chr(64+col)].width = ancho
+    fila += 2
+    fila = escribir_seccion(ws, fila, "FIRMAS Y TRAZABILIDAD", 7)
+    sig = [("PREPARÓ", preparado_por or "Pendiente", "Fecha: Se registra al guardar"), ("REVISÓ", revisado_por or "Pendiente de revisión", "Fecha: Pendiente"), ("APROBÓ", "Pendiente de aprobación", "Fecha: Pendiente")]
+    for idx,(rol,nombre,fecha_txt) in enumerate(sig):
+        col=1+idx*2
+        ws.cell(fila,col).value=rol; ws.cell(fila,col).font=Font(bold=True)
+        ws.merge_cells(start_row=fila+1,start_column=col,end_row=fila+3,end_column=min(col+1,7))
+        ws.cell(fila+1,col).value=f"{nombre}\n{fecha_txt}\nFirma: ____________________"; ws.cell(fila+1,col).alignment=Alignment(wrap_text=True,vertical="top")
+    ws.merge_cells(start_row=fila+5,start_column=1,end_row=fila+5,end_column=7); ws.cell(fila+5,1).value="Estado: Pendiente de revisión"
+
     output = io.BytesIO()
     workbook.save(output)
     output.seek(0)
@@ -819,6 +829,40 @@ def _buscar_cuenta_id(c, empresa_id, banco, cuenta, tipo):
     return int(c.lastrowid)
 
 
+def construir_firmas_conciliacion(preparado_por="", revisado_por="", aprobado_por="",
+                                  fecha_preparacion="", fecha_revision="", fecha_aprobacion=""):
+    """Metadatos de firma electrónica/trazabilidad. No requiere columnas nuevas en la BD."""
+    return {
+        "preparado_por_usuario": preparado_por or "",
+        "fecha_preparacion": fecha_preparacion or "",
+        "revisado_por_usuario": revisado_por or "",
+        "fecha_revision": fecha_revision or "",
+        "aprobado_por_usuario": aprobado_por or "",
+        "fecha_aprobacion": fecha_aprobacion or ""
+    }
+
+def renderizar_bloque_firmas_ui(preparado_por, preparado_fecha="", revisado_por="", revisado_fecha="", aprobado_por="", aprobado_fecha="", estado="Pendiente de revisión"):
+    st.divider()
+    st.subheader("✍️ Firmas y trazabilidad")
+    st.caption("Las firmas se generan automáticamente con el usuario autenticado y la fecha/hora de cada acción.")
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        st.markdown("**PREPARÓ**")
+        st.write(f"👤 {preparado_por or 'Pendiente'}")
+        st.caption(f"Fecha: {preparado_fecha or 'Se registra al guardar'}")
+        st.markdown("Firma: ____________________")
+    with f2:
+        st.markdown("**REVISÓ**")
+        st.write(f"👤 {revisado_por or 'Pendiente de revisión'}")
+        st.caption(f"Fecha: {revisado_fecha or 'Pendiente'}")
+        st.markdown("Firma: ____________________")
+    with f3:
+        st.markdown("**APROBÓ**")
+        st.write(f"👤 {aprobado_por or 'Pendiente de aprobación'}")
+        st.caption(f"Fecha: {aprobado_fecha or 'Pendiente'}")
+        st.markdown("Firma: ____________________")
+    st.info(f"Estado actual: **{estado}**")
+
 def guardar_conciliacion_historial(
     empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
     saldo_extracto, saldo_libros, diferencia_inicial,
@@ -839,6 +883,15 @@ def guardar_conciliacion_historial(
             entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
             workflow_status
         )
+        ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        datos.update(construir_firmas_conciliacion(
+            preparado_por=preparado_por,
+            preparado_fecha=datos.get('fecha_preparacion') or ahora,
+            revisado_por=datos.get('revisado_por_usuario') or revisado_por,
+            revisado_fecha=datos.get('fecha_revision') or '',
+            aprobado_por=datos.get('aprobado_por_usuario') or '',
+            aprobado_fecha=datos.get('fecha_aprobacion') or ''
+        ))
         estado = datos["estado"]
         fecha_creacion = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         observaciones = json.dumps(datos, ensure_ascii=False)
@@ -993,6 +1046,12 @@ def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, mot
     row = c.fetchone(); datos = _decodificar_observaciones(row[0] if row else None)
     datos.update({'workflow_status': nuevo_estado, 'revisado_por_usuario': revisado_por, 'fecha_revision': fecha_rev,
                   'motivo_correccion': motivo_correccion, 'tipo_hallazgo': tipo_hallazgo, 'checklist_json': checklist})
+    if nuevo_estado == 'Aprobada':
+        datos['aprobado_por_usuario'] = revisado_por
+        datos['fecha_aprobacion'] = fecha_rev
+    else:
+        datos.setdefault('aprobado_por_usuario', '')
+        datos.setdefault('fecha_aprobacion', '')
     c.execute("UPDATE conciliaciones SET revisado_por=?, dictamen=?, observaciones=? WHERE id=?",
               (revisado_por, nuevo_estado, json.dumps(datos,ensure_ascii=False), int(id_conciliacion)))
     conn.commit(); conn.close()
@@ -1011,6 +1070,7 @@ def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, c
         empresa_id = _buscar_empresa_id(c, empresa, nit)
         cuenta_id = _buscar_cuenta_id(c, empresa_id, banco, cuenta, tipo)
         payload = dict(datos_extra or {})
+        ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         payload.update({
             "empresa": empresa, "nit": nit, "mes": mes,
             "fecha_elaboracion": fecha_elaboracion.isoformat() if hasattr(fecha_elaboracion, "isoformat") else str(fecha_elaboracion),
@@ -1020,7 +1080,8 @@ def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, c
             "resultado_final": float(resultado_final),
             "estado": "CONCILIACIÓN CORRECTA" if abs(float(resultado_final)) < 0.005 else "CONCILIACIÓN CON DIFERENCIA",
             "preparado_por": preparado_por, "revisado_por": revisado_por,
-            "workflow_status": workflow_status
+            "workflow_status": workflow_status,
+            **construir_firmas_conciliacion(preparado_por=preparado_por, preparado_fecha=payload.get("fecha_preparacion") or ahora, revisado_por=payload.get("revisado_por_usuario") or revisado_por, revisado_fecha=payload.get("fecha_revision") or "", aprobado_por=payload.get("aprobado_por_usuario") or "", aprobado_fecha=payload.get("fecha_aprobacion") or "")
         })
         observaciones=json.dumps(payload, ensure_ascii=False)
         fecha_creacion=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1051,7 +1112,7 @@ def _filas_caja_default():
                           "Forma de pago":"","Valor compra":0.0,"IVA / otros":0.0,"Total pagado":0.0,"Observaciones":""} for i in range(1,21)])
 
 
-def preparar_excel_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, compras_df, efectivo_df, observaciones, logo_bytes=None):
+def preparar_excel_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, compras_df, efectivo_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
     wb=Workbook(); ws=wb.active; ws.title="Arqueo de Caja"
     ws.merge_cells("A1:J1"); ws["A1"]="ARQUEO DE CAJA GENERAL – COMPRAS"; ws["A1"].font=Font(bold=True,size=14); ws["A1"].alignment=Alignment(horizontal="center")
     ws["A3"]="Empresa:"; ws["B3"]=empresa; ws["D3"]="Responsable:"; ws["E3"]=responsable; ws["G3"]="Período:"; ws["H3"]=mes
@@ -1081,12 +1142,21 @@ def preparar_excel_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, 
     ws.cell(rr+4,8,"Resultado del arqueo:"); ws.cell(rr+4,10,"CUADRA" if abs(total_ef-teorico)<0.005 else ("SOBRANTE" if total_ef-teorico>0 else "FALTANTE"))
     ws.cell(rr+6,2,"Observaciones:"); ws.cell(rr+7,2,observaciones or "")
     for col,w in enumerate([7,13,22,28,24,16,16,14,16,34],1): ws.column_dimensions[chr(64+col)].width=w
+    sig_row = rr + 9
+    ws.merge_cells(start_row=sig_row, start_column=1, end_row=sig_row, end_column=10)
+    ws.cell(sig_row,1).value = "FIRMAS Y TRAZABILIDAD"; ws.cell(sig_row,1).font = Font(bold=True, size=12)
+    sig_headers=["PREPARÓ","REVISÓ","APROBÓ"]
+    sig_values=[f"{preparado_por or 'Pendiente'}\nFecha: {fecha_preparacion or 'Pendiente'}\nFirma: ____________________", f"{revisado_por or 'Pendiente de revisión'}\nFecha: {fecha_revision or 'Pendiente'}\nFirma: ____________________", f"{aprobado_por or 'Pendiente de aprobación'}\nFecha: {fecha_aprobacion or 'Pendiente'}\nFirma: ____________________"]
+    for i in range(3):
+        c1=1+i*3; ws.merge_cells(start_row=sig_row+1,start_column=c1,end_row=sig_row+1,end_column=c1+2); ws.cell(sig_row+1,c1).value=sig_headers[i]; ws.cell(sig_row+1,c1).font=Font(bold=True)
+        ws.merge_cells(start_row=sig_row+2,start_column=c1,end_row=sig_row+4,end_column=c1+2); ws.cell(sig_row+2,c1).value=sig_values[i]; ws.cell(sig_row+2,c1).alignment=Alignment(wrap_text=True,vertical="top")
+    ws.merge_cells(start_row=sig_row+6,start_column=1,end_row=sig_row+6,end_column=10); ws.cell(sig_row+6,1).value=f"Estado: {estado}"
     for row in ws.iter_rows():
         for cell in row: cell.alignment=Alignment(vertical="top",wrap_text=True)
     out=io.BytesIO(); wb.save(out); return out.getvalue(), f"ARQUEO_CAJA_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
 
 
-def generar_pdf_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, compras_df, efectivo_df, observaciones, logo_bytes=None):
+def generar_pdf_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, compras_df, efectivo_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
     out=io.BytesIO(); doc=SimpleDocTemplate(out,pagesize=portrait(letter),rightMargin=25,leftMargin=25,topMargin=25,bottomMargin=25); styles=getSampleStyleSheet(); story=[]
     if logo_bytes:
         try: story.append(Image(io.BytesIO(logo_bytes),width=75,height=45)); story.append(Spacer(1,4))
@@ -1098,10 +1168,13 @@ def generar_pdf_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, com
     t=Table(data,repeatRows=1,colWidths=[20,45,60,70,55,40,48,45,50,80]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.lightgrey),("GRID",(0,0),(-1,-1),0.4,colors.grey),("FONTSIZE",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"TOP")])); story += [t,Spacer(1,8)]
     total_compras=total_columna(compras_df,"Total pagado"); teorico=float(saldo_inicial)-total_compras; fisico=total_columna(efectivo_df,"Monto"); diff=fisico-teorico
     story += [Paragraph(f"<b>Total compras:</b> {formatear_moneda(total_compras)}",styles["Normal"]),Paragraph(f"<b>Saldo teórico final:</b> {formatear_moneda(teorico)}",styles["Normal"]),Paragraph(f"<b>Efectivo físico final:</b> {formatear_moneda(fisico)}",styles["Normal"]),Paragraph(f"<b>Diferencia:</b> {formatear_moneda(diff)} &nbsp;&nbsp; <b>{'CUADRA' if abs(diff)<0.005 else ('SOBRANTE' if diff>0 else 'FALTANTE')}</b>",styles["Normal"]),Spacer(1,8),Paragraph(f"<b>Observaciones:</b> {observaciones or ''}",styles["Normal"])]
+    story += [Spacer(1,12), Paragraph("<b>FIRMAS Y TRAZABILIDAD</b>", styles["Heading3"])]
+    sig_data=[[Paragraph("<b>PREPARÓ</b>",styles["Normal"]),Paragraph("<b>REVISÓ</b>",styles["Normal"]),Paragraph("<b>APROBÓ</b>",styles["Normal"])], [Paragraph(f"{preparado_por or 'Pendiente'}<br/>Fecha: {fecha_preparacion or 'Pendiente'}<br/><br/>Firma: ____________________",styles["Normal"]), Paragraph(f"{revisado_por or 'Pendiente de revisión'}<br/>Fecha: {fecha_revision or 'Pendiente'}<br/><br/>Firma: ____________________",styles["Normal"]), Paragraph(f"{aprobado_por or 'Pendiente de aprobación'}<br/>Fecha: {fecha_aprobacion or 'Pendiente'}<br/><br/>Firma: ____________________",styles["Normal"] )]]
+    tf=Table(sig_data,colWidths=[170,170,170]); tf.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP")])); story += [tf, Paragraph(f"Estado: <b>{estado}</b>",styles["Normal"])]
     doc.build(story); return out.getvalue(), f"ARQUEO_CAJA_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.pdf"
 
 
-def preparar_excel_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_inicio, fecha_vencimiento, tasa, saldo_libros, saldo_extracto, diferencias_df, observaciones, logo_bytes=None):
+def preparar_excel_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_inicio, fecha_vencimiento, tasa, saldo_libros, saldo_extracto, diferencias_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
     wb=Workbook(); ws=wb.active; ws.title="Crédito Bancario"; ws.merge_cells("A1:F1"); ws["A1"]="CONCILIACIÓN DE CRÉDITO BANCARIO"; ws["A1"].font=Font(bold=True,size=14); ws["A1"].alignment=Alignment(horizontal="center")
     ws["A3"]="Empresa:"; ws["B3"]=empresa; ws["D3"]="Período:"; ws["E3"]=mes; ws["A4"]="Entidad financiera:"; ws["B4"]=entidad; ws["D4"]="Número de crédito:"; ws["E4"]=numero; ws["A5"]="Fecha inicio:"; ws["B5"]=str(fecha_inicio); ws["D5"]="Vencimiento:"; ws["E5"]=str(fecha_vencimiento); ws["A6"]="Tasa:"; ws["B6"]=tasa
     ws["A8"]="Saldo según libros:"; ws["B8"]=float(saldo_libros); ws["D8"]="Saldo según extracto:"; ws["E8"]=float(saldo_extracto); ws["A9"]="Diferencia:"; ws["B9"]=float(saldo_extracto)-float(saldo_libros)
@@ -1113,10 +1186,15 @@ def preparar_excel_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_
     if logo_bytes:
         try: img=XLImage(io.BytesIO(logo_bytes)); img.width=110; img.height=60; img.anchor="F2"; ws.add_image(img)
         except Exception: pass
+    sig_row=rr+8; ws.merge_cells(start_row=sig_row,start_column=1,end_row=sig_row,end_column=6); ws.cell(sig_row,1).value="FIRMAS Y TRAZABILIDAD"; ws.cell(sig_row,1).font=Font(bold=True,size=12)
+    vals=[f"PREPARÓ\n{preparado_por or 'Pendiente'}\nFecha: {fecha_preparacion or 'Pendiente'}\nFirma: ____________________",f"REVISÓ\n{revisado_por or 'Pendiente de revisión'}\nFecha: {fecha_revision or 'Pendiente'}\nFirma: ____________________",f"APROBÓ\n{aprobado_por or 'Pendiente de aprobación'}\nFecha: {fecha_aprobacion or 'Pendiente'}\nFirma: ____________________"]
+    for i,v in enumerate(vals):
+        col=1+i*2; ws.merge_cells(start_row=sig_row+1,start_column=col,end_row=sig_row+3,end_column=col+1); ws.cell(sig_row+1,col).value=v; ws.cell(sig_row+1,col).alignment=Alignment(wrap_text=True,vertical="top")
+    ws.merge_cells(start_row=sig_row+5,start_column=1,end_row=sig_row+5,end_column=6); ws.cell(sig_row+5,1).value=f"Estado: {estado}"
     out=io.BytesIO(); wb.save(out); return out.getvalue(), f"CREDITO_BANCARIO_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
 
 
-def generar_pdf_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_inicio, fecha_vencimiento, tasa, saldo_libros, saldo_extracto, diferencias_df, observaciones, logo_bytes=None):
+def generar_pdf_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_inicio, fecha_vencimiento, tasa, saldo_libros, saldo_extracto, diferencias_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
     out=io.BytesIO(); doc=SimpleDocTemplate(out,pagesize=portrait(letter),rightMargin=35,leftMargin=35,topMargin=30,bottomMargin=30); styles=getSampleStyleSheet(); story=[]
     if logo_bytes:
         try: story.append(Image(io.BytesIO(logo_bytes),width=75,height=45)); story.append(Spacer(1,4))
@@ -1126,6 +1204,9 @@ def generar_pdf_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_ini
     t=Table(data,colWidths=[220,180]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.lightgrey),("GRID",(0,0),(-1,-1),0.5,colors.grey),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold")])); story += [t,Spacer(1,10),Paragraph("<b>Diferencias / partidas identificadas</b>",styles["Heading3"])]
     det=[["Concepto","Valor","Observación"]]+[[r.get("Concepto",""),formatear_moneda(r.get("Valor",0)),r.get("Observación","")] for _,r in diferencias_df.iterrows()]
     t2=Table(det,colWidths=[170,90,190],repeatRows=1); t2.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.lightgrey),("GRID",(0,0),(-1,-1),0.4,colors.grey),("FONTSIZE",(0,0),(-1,-1),8)])); story += [t2,Spacer(1,10),Paragraph(f"<b>Observaciones:</b> {observaciones or ''}",styles["Normal"])]
+    story += [Spacer(1,12),Paragraph("<b>FIRMAS Y TRAZABILIDAD</b>",styles["Heading3"])]
+    sig_data=[[Paragraph("<b>PREPARÓ</b>",styles["Normal"]),Paragraph("<b>REVISÓ</b>",styles["Normal"]),Paragraph("<b>APROBÓ</b>",styles["Normal"])],[Paragraph(f"{preparado_por or 'Pendiente'}<br/>Fecha: {fecha_preparacion or 'Pendiente'}<br/><br/>Firma: ____________________",styles["Normal"]),Paragraph(f"{revisado_por or 'Pendiente de revisión'}<br/>Fecha: {fecha_revision or 'Pendiente'}<br/><br/>Firma: ____________________",styles["Normal"]),Paragraph(f"{aprobado_por or 'Pendiente de aprobación'}<br/>Fecha: {fecha_aprobacion or 'Pendiente'}<br/><br/>Firma: ____________________",styles["Normal"])]]
+    tf=Table(sig_data,colWidths=[170,170,170]); tf.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP")])); story += [tf,Paragraph(f"Estado: <b>{estado}</b>",styles["Normal"])]
     doc.build(story); return out.getvalue(), f"CREDITO_BANCARIO_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.pdf"
 
 
@@ -1599,7 +1680,7 @@ def preparar_excel(
     saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
     resultado_final, salidas_extracto, salidas_libros, entradas_libros,
     entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
-    nombres_titulos
+    nombres_titulos, aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"
 ):
     workbook = Workbook()
     ws = workbook.active
@@ -1664,6 +1745,35 @@ def preparar_excel(
     fila = escribir_tabla(ws, fila, nombres_titulos["t3"], entradas_libros)
     fila = escribir_tabla(ws, fila, nombres_titulos["t4"], entradas_extracto)
     fila = escribir_gastos_bancarios(ws, fila, gastos_bancarios)
+
+    # Firmas y trazabilidad. Aplica también a Tarjeta de Crédito.
+    fila += 1
+    fila = escribir_seccion(ws, fila, "FIRMAS Y TRAZABILIDAD", 6)
+    for idx, titulo in enumerate(["PREPARÓ", "REVISÓ", "APROBÓ"], start=0):
+        col = idx * 2 + 1
+        ws.merge_cells(start_row=fila, start_column=col, end_row=fila, end_column=col + 1)
+        celda = ws.cell(row=fila, column=col)
+        celda.value = titulo
+        celda.font = Font(bold=True)
+        celda.alignment = Alignment(horizontal="center")
+    fila += 1
+    firmas_excel = [
+        (preparado_por or "Pendiente", fecha_preparacion or "Se registra al guardar"),
+        (revisado_por or "Pendiente de revisión", fecha_revision or "Pendiente"),
+        (aprobado_por or "Pendiente de aprobación", fecha_aprobacion or "Pendiente"),
+    ]
+    for idx, (nombre_firma, fecha_firma) in enumerate(firmas_excel, start=0):
+        col = idx * 2 + 1
+        ws.merge_cells(start_row=fila, start_column=col, end_row=fila, end_column=col + 1)
+        celda = ws.cell(row=fila, column=col)
+        celda.value = f"Usuario: {nombre_firma}\nFecha: {fecha_firma}\nFirma: ____________________"
+        celda.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.row_dimensions[fila].height = 58
+    fila += 1
+    ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=6)
+    ws.cell(row=fila, column=1).value = f"Estado de aprobación: {estado or 'Pendiente de revisión'}"
+    ws.cell(row=fila, column=1).font = Font(bold=True)
+    fila += 2
 
     output = io.BytesIO()
     workbook.save(output)
@@ -1757,12 +1867,20 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     agregar_tabla_pdf("GASTOS BANCARIOS", datos.get("gastos_bancarios", []), ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"], ["Fecha", "4x1000", "Cuota", "IVA", "Rte", "Comisión", "Intereses"], [60, 80, 80, 80, 80, 80, 80])
 
     story.append(Spacer(1, 12))
-    firmas = [
-        [Paragraph(f"<b>Preparado por:</b> {datos.get('preparado_por', 'N/A')}", normal_style), Paragraph(f"<b>Revisado por:</b> {c_data.get('revisado_por_usuario', 'N/A')}", normal_style)]
-    ]
-    t_firmas = Table(firmas, colWidths=[270, 270])
-    t_firmas.setStyle(TableStyle([('LINEABOVE', (0, 0), (-1, -1), 1, colors.HexColor("#1F4E78"))]))
+    story.append(Paragraph("FIRMAS Y TRAZABILIDAD", sec_style))
+    firmas = [[
+        Paragraph("<b>PREPARÓ</b>", normal_style),
+        Paragraph("<b>REVISÓ</b>", normal_style),
+        Paragraph("<b>APROBÓ</b>", normal_style)
+    ],[
+        Paragraph(f"{datos.get('preparado_por_usuario') or datos.get('preparado_por') or 'Pendiente'}<br/>Fecha: {datos.get('fecha_preparacion') or 'Pendiente'}<br/><br/>Firma: ____________________", normal_style),
+        Paragraph(f"{datos.get('revisado_por_usuario') or c_data.get('revisado_por_usuario') or 'Pendiente de revisión'}<br/>Fecha: {datos.get('fecha_revision') or 'Pendiente'}<br/><br/>Firma: ____________________", normal_style),
+        Paragraph(f"{datos.get('aprobado_por_usuario') or 'Pendiente de aprobación'}<br/>Fecha: {datos.get('fecha_aprobacion') or 'Pendiente'}<br/><br/>Firma: ____________________", normal_style)
+    ]]
+    t_firmas = Table(firmas, colWidths=[180, 180, 180])
+    t_firmas.setStyle(TableStyle([('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D9D9D9")), ('BACKGROUND',(0,0),(-1,0),colors.HexColor("#D9EAF7")), ('VALIGN',(0,0),(-1,-1),'TOP')]))
     story.append(t_firmas)
+    story.append(Paragraph(f"Estado de aprobación: <b>{c_data.get('workflow_status') or datos.get('workflow_status') or 'Pendiente de revisión'}</b>", normal_style))
 
     doc.build(story)
     buffer.seek(0)
@@ -1811,12 +1929,12 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                     datos_especiales = datos
                     if es_caja_hist:
                         compras_h=pd.DataFrame(datos_especiales.get("compras",[])); efectivo_h=pd.DataFrame(datos_especiales.get("efectivo",[]))
-                        excel_h,nombre_h=preparar_excel_caja(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("responsable",c_data.get("preparado_por","")),datos_especiales.get("saldo_inicial",0),datos_especiales.get("fondo_autorizado",0),compras_h,efectivo_h,datos_especiales.get("observaciones_caja",""),obtener_logo_empresa(c_data.get("empresa")))
+                        excel_h,nombre_h=preparar_excel_caja(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("responsable",c_data.get("preparado_por","")),datos_especiales.get("saldo_inicial",0),datos_especiales.get("fondo_autorizado",0),compras_h,efectivo_h,datos_especiales.get("observaciones_caja",""),obtener_logo_empresa(c_data.get("empresa")),datos_especiales.get("preparado_por_usuario",c_data.get("preparado_por","")),datos_especiales.get("revisado_por_usuario",c_data.get("revisado_por","")),datos_especiales.get("aprobado_por_usuario",""),datos_especiales.get("fecha_preparacion",""),datos_especiales.get("fecha_revision",""),datos_especiales.get("fecha_aprobacion",""),c_data.get("workflow_status","Pendiente de revisión"))
                         pdf_h,_=generar_pdf_caja(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("responsable",c_data.get("preparado_por","")),datos_especiales.get("saldo_inicial",0),datos_especiales.get("fondo_autorizado",0),compras_h,efectivo_h,datos_especiales.get("observaciones_caja",""),obtener_logo_empresa(c_data.get("empresa")))
                     else:
                         dif_h=pd.DataFrame(datos_especiales.get("diferencias",[]))
                         excel_h,nombre_h=preparar_excel_credito_bancario(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("entidad_financiera",c_data.get("banco","")),datos_especiales.get("numero_credito",c_data.get("cuenta","")),datos_especiales.get("fecha_inicio",""),datos_especiales.get("fecha_vencimiento",""),datos_especiales.get("tasa",""),c_data.get("saldo_libros",0),c_data.get("saldo_extracto",0),dif_h,datos_especiales.get("observaciones_credito",""),obtener_logo_empresa(c_data.get("empresa")))
-                        pdf_h,_=generar_pdf_credito_bancario(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("entidad_financiera",c_data.get("banco","")),datos_especiales.get("numero_credito",c_data.get("cuenta","")),datos_especiales.get("fecha_inicio",""),datos_especiales.get("fecha_vencimiento",""),datos_especiales.get("tasa",""),c_data.get("saldo_libros",0),c_data.get("saldo_extracto",0),dif_h,datos_especiales.get("observaciones_credito",""),obtener_logo_empresa(c_data.get("empresa")))
+                        pdf_h,_=generar_pdf_credito_bancario(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("entidad_financiera",c_data.get("banco","")),datos_especiales.get("numero_credito",c_data.get("cuenta","")),datos_especiales.get("fecha_inicio",""),datos_especiales.get("fecha_vencimiento",""),datos_especiales.get("tasa",""),c_data.get("saldo_libros",0),c_data.get("saldo_extracto",0),dif_h,datos_especiales.get("observaciones_credito",""),obtener_logo_empresa(c_data.get("empresa")),datos_especiales.get("preparado_por_usuario",c_data.get("preparado_por","")),datos_especiales.get("revisado_por_usuario",c_data.get("revisado_por","")),datos_especiales.get("aprobado_por_usuario",""),datos_especiales.get("fecha_preparacion",""),datos_especiales.get("fecha_revision",""),datos_especiales.get("fecha_aprobacion",""),c_data.get("workflow_status","Pendiente de revisión"))
                     h1,h2,h3=st.columns(3)
                     with h1:
                         if st.button("✏️ Editar Conciliación",key=f"btn_edit_{fila['id']}"):
@@ -2424,10 +2542,11 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         resultado_caja="CUADRA" if abs(diferencia_caja)<0.005 else ("SOBRANTE" if diferencia_caja>0 else "FALTANTE")
         a,b,c=st.columns(3); a.metric("Saldo teórico final",formatear_moneda(saldo_teorico)); b.metric("Efectivo físico final",formatear_moneda(efectivo_fisico)); c.metric("Diferencia",formatear_moneda(diferencia_caja))
         st.success(f"Resultado del arqueo: **{resultado_caja}**" if resultado_caja=="CUADRA" else f"Resultado del arqueo: **{resultado_caja}**")
-        preparado_por=st.text_input("Preparado por",value=usuario_actual["nombre"],key="caja_preparado_por"); revisado_por=st.text_input("Revisado por",key="caja_revisado_por")
+        preparado_por=usuario_actual["nombre"]; revisado_por=""
+        renderizar_bloque_firmas_ui(preparado_por, "Se registra al guardar", "", "Pendiente", "", "Pendiente", "Borrador / Pendiente de revisión")
         logo_bytes=obtener_logo_empresa(empresa)
-        excel_caja,nombre_excel_caja=preparar_excel_caja(empresa,mes,fecha_elaboracion,caja_responsable,caja_saldo_inicial,caja_fondo,compras,efectivo,caja_obs,logo_bytes)
-        pdf_caja,nombre_pdf_caja=generar_pdf_caja(empresa,mes,fecha_elaboracion,caja_responsable,caja_saldo_inicial,caja_fondo,compras,efectivo,caja_obs,logo_bytes)
+        excel_caja,nombre_excel_caja=preparar_excel_caja(empresa,mes,fecha_elaboracion,caja_responsable,caja_saldo_inicial,caja_fondo,compras,efectivo,caja_obs,logo_bytes,preparado_por,"","","Se registra al guardar","","","Borrador / Pendiente de revisión")
+        pdf_caja,nombre_pdf_caja=generar_pdf_caja(empresa,mes,fecha_elaboracion,caja_responsable,caja_saldo_inicial,caja_fondo,compras,efectivo,caja_obs,logo_bytes,preparado_por,"","","Se registra al guardar","","","Borrador / Pendiente de revisión")
         d1,d2=st.columns(2); d1.download_button("📊 Descargar Excel",data=excel_caja,file_name=nombre_excel_caja,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True); d2.download_button("📄 Descargar PDF",data=pdf_caja,file_name=nombre_pdf_caja,mime="application/pdf",use_container_width=True)
         datos_extra={"especial":"caja","responsable":caja_responsable,"saldo_inicial":caja_saldo_inicial,"fondo_autorizado":caja_fondo,"compras":json.loads(compras.to_json(orient="records")),"efectivo":json.loads(efectivo.to_json(orient="records")),"observaciones_caja":caja_obs,"resultado_arqueo":resultado_caja,"saldo_teorico":saldo_teorico,"efectivo_fisico":efectivo_fisico,"diferencia_caja":diferencia_caja}
         st.divider(); q1,q2=st.columns(2)
@@ -2492,12 +2611,13 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             }
         )
         obs_cb=st.text_area("Observaciones",key="credito_observaciones")
-        preparado_cb=st.text_input("Preparado por",value=usuario_actual["nombre"],key="credito_preparado_por")
-        revisado_cb=st.text_input("Revisado por",key="credito_revisado_por")
+        preparado_cb=usuario_actual["nombre"]
+        revisado_cb=""
+        renderizar_bloque_firmas_ui(preparado_cb, "Se registra al guardar", "", "Pendiente", "", "Pendiente", "Borrador / Pendiente de revisión")
 
         logo_bytes=obtener_logo_empresa(empresa)
-        excel_cb,nombre_excel_cb=preparar_excel_credito_bancario(empresa,mes,fecha_elaboracion,entidad_credito,numero_credito,fecha_inicio,fecha_vencimiento,tasa,saldo_libros_cb,saldo_extracto_cb,diferencias_cb_df,obs_cb,logo_bytes)
-        pdf_cb,nombre_pdf_cb=generar_pdf_credito_bancario(empresa,mes,fecha_elaboracion,entidad_credito,numero_credito,fecha_inicio,fecha_vencimiento,tasa,saldo_libros_cb,saldo_extracto_cb,diferencias_cb_df,obs_cb,logo_bytes)
+        excel_cb,nombre_excel_cb=preparar_excel_credito_bancario(empresa,mes,fecha_elaboracion,entidad_credito,numero_credito,fecha_inicio,fecha_vencimiento,tasa,saldo_libros_cb,saldo_extracto_cb,diferencias_cb_df,obs_cb,logo_bytes,preparado_cb,"","","Se registra al guardar","","","Borrador / Pendiente de revisión")
+        pdf_cb,nombre_pdf_cb=generar_pdf_credito_bancario(empresa,mes,fecha_elaboracion,entidad_credito,numero_credito,fecha_inicio,fecha_vencimiento,tasa,saldo_libros_cb,saldo_extracto_cb,diferencias_cb_df,obs_cb,logo_bytes,preparado_cb,"","","Se registra al guardar","","","Borrador / Pendiente de revisión")
         d1,d2=st.columns(2)
         d1.download_button("📊 Descargar Excel",data=excel_cb,file_name=nombre_excel_cb,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
         d2.download_button("📄 Descargar PDF",data=pdf_cb,file_name=nombre_pdf_cb,mime="application/pdf",use_container_width=True)
@@ -2659,15 +2779,17 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     r2.metric("Diferencia Conciliada", formatear_moneda(diferencia_conciliada))
     r3.metric("Resultado Final", formatear_moneda(resultado_final))
 
-    preparado_por = st.text_input("Preparado por", value=usuario_actual["nombre"], key="form_preparado_por")
-    revisado_por = st.text_input("Revisado por", key="form_revisado_por")
+    preparado_por = usuario_actual["nombre"]
+    revisado_por = ""
+    renderizar_bloque_firmas_ui(preparado_por, "Se registra al guardar", "", "Pendiente", "", "Pendiente", "Borrador / Pendiente de revisión")
 
     excel_data, nombre_archivo = preparar_excel(
         empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
         saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
         resultado_final, salidas_extracto, salidas_libros, entradas_libros,
         entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
-        nombres_titulos
+        nombres_titulos, aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="",
+        estado="Borrador / Pendiente de revisión"
     )
 
     st.divider()
