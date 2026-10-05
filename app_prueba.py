@@ -1258,7 +1258,7 @@ def generar_pdf_credito_reporte(data):
         ['SALDO SEGÚN EXTRACTO',formatear_moneda(data.get('saldo_extracto',0))],
         ['DIFERENCIA',formatear_moneda(data.get('diferencia',0))]
     ]
-    t=platypus.Table(executivo,colWidths=[180,360])
+    t=platypus.Table(ejecutivo,colWidths=[180,360])
     t.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#EAF2F8')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#C9C9C9')),('ALIGN',(1,2),(1,4),'RIGHT'),('PADDING',(0,0),(-1,-1),7)]))
     story.append(t); story.append(Spacer(1,10))
     info=[['Empresa',data.get('empresa',''),'NIT',data.get('nit','')],['Banco',data.get('banco',''),'Cuenta',data.get('numero_cuenta','')],['Entidad financiera',data.get('entidad_financiera',''),'No. crédito',data.get('numero_credito','')],['Fecha de creación',data.get('fecha_creacion',''),'Fecha de revisión',data.get('fecha_revision','')]]
@@ -2573,7 +2573,7 @@ elif menu_seleccionado == "🏢 Empresas":
                             st.rerun()
                 with col_act2:
                     if rol_actual == "Administrador":
-                        if st.button("🗑️ Eliminar", key=f"btn_del_emp_{emp['id']}"):
+                        if st.button("🗑️️ Eliminar", key=f"btn_del_emp_{emp['id']}"):
                             ok, mensaje = eliminar_empresa_db(emp['id'])
                             if ok:
                                 st.success(mensaje)
@@ -2920,7 +2920,7 @@ elif menu_seleccionado == "📋 Historial":
 
                     c_act1, c_act2, c_act3 = st.columns(3)
                     with c_act1:
-                        if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
+                        if st.button("✏️️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
                             st.session_state.conciliacion_a_editar = fila['id']
                             st.session_state.pop("datos_cargados_edit", None)
                             st.session_state.menu_override = "🏦 Conciliación"
@@ -3030,7 +3030,7 @@ elif menu_seleccionado == "📋 Historial":
                         m4.metric("Resultado", d.get("resultado", ""))
                         st.write(f"**Responsable:** {d.get('responsable','N/A')} | **Preparado por:** {d.get('preparado_por','N/A')}")
                         if d.get("motivo_correccion"):
-                            st.error(f"⚠️ Observación del auditor: {d['motivo_correccion']}")
+                            st.error(f"⚠️️ Observación del auditor: {d['motivo_correccion']}")
 
                         r1, r2 = st.columns(2)
                         with r1:
@@ -3244,4 +3244,3 @@ elif menu_seleccionado == "📄 Reportes":
                 r1,r2=st.columns(2)
                 with r1: st.download_button('📊 Descargar Excel',data=generar_excel_caja_reporte(d),file_name=f"CAJA_{int(rid):06d}.xlsx",mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key=f'rep_caja_excel_{rid}')
                 with r2: st.download_button('📄 Descargar PDF',data=generar_pdf_caja_reporte(d),file_name=f"CAJA_{int(rid):06d}.pdf",mime='application/pdf',key=f'rep_caja_pdf_{rid}')
-
