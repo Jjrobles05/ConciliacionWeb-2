@@ -753,9 +753,18 @@ def actualizar_usuario_db(usuario_id, usuario, nombre, rol, activo, empresa_id=N
 
     conn = conectar_db(); c = conn.cursor()
     try:
-        c.execute("SELECT id FROM usuarios WHERE LOWER(usuario)=LOWER(?) AND id<>?", (usuario, int(usuario_id)))
-        if c.fetchone():
-            return False, "Ese nombre de usuario ya está registrado."
+        # Primero verificamos que el usuario que se está editando exista.
+        c.execute("SELECT usuario FROM usuarios WHERE id=?", (int(usuario_id),))
+        usuario_actual_db = c.fetchone()
+        if not usuario_actual_db:
+            return False, "No se encontró el usuario que deseas actualizar."
+
+        # Solo rechazamos el nombre si pertenece REALMENTE a otro usuario.
+        # Esto permite guardar cambios manteniendo el mismo nombre de usuario.
+        c.execute("SELECT id FROM usuarios WHERE LOWER(TRIM(usuario))=LOWER(TRIM(?))", (usuario,))
+        duplicado = c.fetchone()
+        if duplicado and int(duplicado[0]) != int(usuario_id):
+            return False, f"El nombre de usuario '{usuario}' ya pertenece a otro usuario."
 
         if nueva_contrasena is not None and str(nueva_contrasena).strip():
             nuevo_salt, nuevo_hash = hash_password(str(nueva_contrasena).strip())
@@ -1957,6 +1966,8 @@ elif menu_seleccionado == "📋 Historial":
 
 elif menu_seleccionado == "👥 Usuarios":
     st.title("👥 Gestión de Usuarios y Roles")
+    if st.session_state.get("mensaje_usuario_editado"):
+        st.success(st.session_state.pop("mensaje_usuario_editado"))
     usuarios_df = obtener_usuarios()
 
     if rol_actual == "Administrador":
@@ -2021,7 +2032,7 @@ elif menu_seleccionado == "👥 Usuarios":
                         if edit_pass and edit_pass != edit_pass2:
                             st.error("Las nuevas contraseñas no coinciden.")
                         else:
-                            ok, mensaje = actualizar_usuario_db(uid, edit_usuario, edit_nombre, edit_rol, edit_activo, edit_empresa, edit_pass or None)
+                            ok, mensaje = actualizar_usuario_db(int(edit_id), edit_usuario, edit_nombre, edit_rol, edit_activo, edit_empresa, edit_pass or None)
                             if ok:
                                 if uid == int(usuario_actual["id"]):
                                     actualizado = autenticar_usuario(edit_usuario, edit_pass if edit_pass else "") if edit_pass else None
@@ -2034,7 +2045,7 @@ elif menu_seleccionado == "👥 Usuarios":
                                 st.session_state.pop("usuario_a_editar", None)
                                 try: st.cache_data.clear()
                                 except Exception: pass
-                                st.success(mensaje)
+                                st.session_state["mensaje_usuario_editado"] = "✅ Se actualizaron los cambios correctamente."
                                 st.rerun()
                             else:
                                 st.error(mensaje)
