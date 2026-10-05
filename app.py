@@ -375,80 +375,6 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
     return last_id
 
 
-def preparar_excel_asignaciones(asignaciones_df, empresa, anio, mes_num):
-    """Genera Excel con el reparto mensual fijo de cuentas por Preparador."""
-    workbook = Workbook()
-    ws = workbook.active
-    ws.title = "Asignaciones"
-    meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-    mes_nombre = meses[int(mes_num)-1]
-    ws.merge_cells("A1:E1")
-    ws["A1"] = f"ASIGNACIÓN MENSUAL DE CONCILIACIONES - {mes_nombre.upper()} {anio}"
-    estilo_titulo(ws["A1"], 14)
-    ws["A2"] = "Empresa"
-    ws["B2"] = empresa
-    ws["A2"].font = Font(bold=True)
-    encabezados = ["Banco", "Cuenta / Tarjeta", "Tipo", "Preparador asignado", "Fecha de asignación"]
-    fila = 4
-    for col, encabezado in enumerate(encabezados, 1):
-        celda = ws.cell(row=fila, column=col, value=encabezado)
-        celda.font = Font(bold=True)
-        celda.fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
-        celda.alignment = Alignment(horizontal="center")
-    fila += 1
-    for _, r in asignaciones_df.iterrows():
-        valores = [r.get("banco", ""), r.get("numero_cuenta", ""), r.get("tipo_cuenta", ""),
-                   r.get("preparador", ""), r.get("fecha_asignacion", "")]
-        for col, valor in enumerate(valores, 1):
-            ws.cell(row=fila, column=col, value=str(valor or ""))
-        fila += 1
-    for col, ancho in enumerate([22, 24, 22, 28, 22], 1):
-        ws.column_dimensions[chr(64+col)].width = ancho
-    output = io.BytesIO()
-    workbook.save(output)
-    output.seek(0)
-    nombre = f"ASIGNACION_{limpiar_nombre_archivo(empresa)}_{mes_nombre.upper()}_{anio}.xlsx"
-    return output.getvalue(), nombre
-
-
-def generar_pdf_asignaciones(asignaciones_df, empresa, anio, mes_num):
-    """Genera PDF con el reparto mensual fijo de cuentas por Preparador."""
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=portrait(letter), rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
-    styles = getSampleStyleSheet()
-    story = []
-    meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
-    mes_nombre = meses[int(mes_num)-1]
-    title_style = ParagraphStyle("AsignTitle", parent=styles["Heading1"], alignment=1, fontSize=13, spaceAfter=8)
-    normal = ParagraphStyle("AsignNormal", parent=styles["Normal"], fontSize=8, leading=10)
-    story.append(Paragraph("ASIGNACIÓN MENSUAL DE CONCILIACIONES", title_style))
-    story.append(Paragraph(f"<b>Empresa:</b> {empresa}<br/><b>Periodo:</b> {mes_nombre} {anio}<br/><b>Estado:</b> Asignación fija", normal))
-    story.append(Spacer(1, 10))
-    datos = [["Banco", "Cuenta / Tarjeta", "Tipo", "Preparador"]]
-    for _, r in asignaciones_df.iterrows():
-        datos.append([str(r.get("banco", "")), str(r.get("numero_cuenta", "")),
-                      str(r.get("tipo_cuenta", "")), str(r.get("preparador", ""))])
-    tabla = Table(datos, colWidths=[125, 125, 125, 150], repeatRows=1)
-    tabla.setStyle(TableStyle([
-        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1F4E78")),
-        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
-        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
-        ("FONTSIZE", (0,0), (-1,-1), 7),
-        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#D9D9D9")),
-        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
-        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F7F7F7")]),
-    ]))
-    story.append(tabla)
-    story.append(Spacer(1, 10))
-    story.append(Paragraph("La asignación fue generada aleatoriamente por el Administrador y queda fija para el periodo indicado.", normal))
-    doc.build(story)
-    buffer.seek(0)
-    nombre = f"ASIGNACION_{limpiar_nombre_archivo(empresa)}_{mes_nombre.upper()}_{anio}.pdf"
-    return buffer.getvalue(), nombre
-
-
 def obtener_asignaciones_mes(empresa_id, anio, mes_num):
     """Devuelve las asignaciones fijas de un mes para una empresa."""
     if not empresa_id:
@@ -816,6 +742,138 @@ def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, mot
     c.execute("UPDATE conciliaciones SET revisado_por=?, dictamen=?, observaciones=? WHERE id=?",
               (revisado_por, nuevo_estado, json.dumps(datos,ensure_ascii=False), int(id_conciliacion)))
     conn.commit(); conn.close()
+
+
+# ==========================================
+# 4B. CONCILIACIONES ESPECIALES: CAJA Y CRÉDITO BANCARIO
+# ==========================================
+def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
+                                  saldo_libros, saldo_extracto, resultado_final,
+                                  datos_extra, preparado_por, revisado_por,
+                                  workflow_status="Pendiente de revisión", id_edicion=None):
+    """Guarda Caja o Crédito bancario dentro del mismo historial/workflow existente."""
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        empresa_id = _buscar_empresa_id(c, empresa, nit)
+        cuenta_id = _buscar_cuenta_id(c, empresa_id, banco, cuenta, tipo)
+        payload = dict(datos_extra or {})
+        payload.update({
+            "empresa": empresa, "nit": nit, "mes": mes,
+            "fecha_elaboracion": fecha_elaboracion.isoformat() if hasattr(fecha_elaboracion, "isoformat") else str(fecha_elaboracion),
+            "banco": banco, "cuenta": cuenta, "tipo": tipo,
+            "saldo_libros": float(saldo_libros), "saldo_extracto": float(saldo_extracto),
+            "diferencia_inicial": float(saldo_extracto) - float(saldo_libros),
+            "resultado_final": float(resultado_final),
+            "estado": "CONCILIACIÓN CORRECTA" if abs(float(resultado_final)) < 0.005 else "CONCILIACIÓN CON DIFERENCIA",
+            "preparado_por": preparado_por, "revisado_por": revisado_por,
+            "workflow_status": workflow_status
+        })
+        observaciones=json.dumps(payload, ensure_ascii=False)
+        fecha_creacion=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if id_edicion:
+            c.execute("""UPDATE conciliaciones SET empresa_id=?, cuenta_id=?, periodo=?, saldo_libro=?, saldo_banco=?,
+                         estado=?, preparado_por=?, revisado_por=?, fecha_creacion=?, dictamen=?, observaciones=? WHERE id=?""",
+                      (empresa_id, cuenta_id, mes, float(saldo_libros), float(saldo_extracto), payload["estado"],
+                       preparado_por or None, revisado_por or None, fecha_creacion, workflow_status, observaciones, int(id_edicion)))
+            last_id=int(id_edicion)
+        else:
+            c.execute("""INSERT INTO conciliaciones (empresa_id, cuenta_id, periodo, saldo_libro, saldo_banco, estado,
+                         preparado_por, revisado_por, fecha_creacion, dictamen, observaciones)
+                         VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                      (empresa_id, cuenta_id, mes, float(saldo_libros), float(saldo_extracto), payload["estado"],
+                       preparado_por or None, revisado_por or None, fecha_creacion, workflow_status, observaciones))
+            last_id=int(c.lastrowid)
+        conn.commit(); return last_id
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        conn.close()
+
+
+def _filas_caja_default():
+    return pd.DataFrame([{"N°":i,"Fecha":"","Proveedor":"","Concepto / Compra":"","Factura / Soporte":"",
+                          "Forma de pago":"","Valor compra":0.0,"IVA / otros":0.0,"Total pagado":0.0,"Observaciones":""} for i in range(1,21)])
+
+
+def preparar_excel_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, compras_df, efectivo_df, observaciones, logo_bytes=None):
+    wb=Workbook(); ws=wb.active; ws.title="Arqueo de Caja"
+    ws.merge_cells("A1:J1"); ws["A1"]="ARQUEO DE CAJA GENERAL – COMPRAS"; ws["A1"].font=Font(bold=True,size=14); ws["A1"].alignment=Alignment(horizontal="center")
+    ws["A3"]="Empresa:"; ws["B3"]=empresa; ws["D3"]="Responsable:"; ws["E3"]=responsable; ws["G3"]="Período:"; ws["H3"]=mes
+    ws["A4"]="Fecha:"; ws["B4"]=str(fecha); ws["D4"]="Fondo autorizado:"; ws["E4"]=float(fondo); ws["G4"]="Saldo inicial para compras:"; ws["H4"]=float(saldo_inicial)
+    if logo_bytes:
+        try:
+            img=XLImage(io.BytesIO(logo_bytes)); img.width=110; img.height=60; img.anchor="J2"; ws.add_image(img)
+        except Exception: pass
+    headers=["N°","Fecha","Proveedor","Concepto / Compra","Factura / Soporte","Forma de pago","Valor compra","IVA / otros","Total pagado","Observaciones"]
+    for col,h in enumerate(headers,1):
+        cell=ws.cell(6,col,h); cell.font=Font(bold=True); cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
+    for r_idx,row in enumerate(compras_df.to_dict("records"),7):
+        for col,h in enumerate(headers,1): ws.cell(r_idx,col,row.get(h,""))
+    fin=6+len(compras_df)
+    ws.cell(fin+1,6,"TOTAL COMPRAS:"); ws.cell(fin+1,9,float(total_columna(compras_df,"Total pagado")))
+    ws.cell(fin+3,2,"DETALLE DEL SALDO EN CAJA");
+    ws.cell(fin+4,2,"Denominación"); ws.cell(fin+4,3,"Cantidad"); ws.cell(fin+4,4,"Monto")
+    rr=fin+5
+    for row in efectivo_df.to_dict("records"):
+        ws.cell(rr,2,row.get("Denominación","")); ws.cell(rr,3,row.get("Cantidad",0)); ws.cell(rr,4,row.get("Monto",0)); rr+=1
+    total_ef=total_columna(efectivo_df,"Monto")
+    total_compras=total_columna(compras_df,"Total pagado")
+    teorico=float(saldo_inicial)-total_compras
+    ws.cell(rr+1,8,"Saldo teórico final:"); ws.cell(rr+1,10,teorico)
+    ws.cell(rr+2,8,"Efectivo físico final:"); ws.cell(rr+2,10,total_ef)
+    ws.cell(rr+3,8,"Diferencia (sobrante/faltante):"); ws.cell(rr+3,10,total_ef-teorico)
+    ws.cell(rr+4,8,"Resultado del arqueo:"); ws.cell(rr+4,10,"CUADRA" if abs(total_ef-teorico)<0.005 else ("SOBRANTE" if total_ef-teorico>0 else "FALTANTE"))
+    ws.cell(rr+6,2,"Observaciones:"); ws.cell(rr+7,2,observaciones or "")
+    for col,w in enumerate([7,13,22,28,24,16,16,14,16,34],1): ws.column_dimensions[chr(64+col)].width=w
+    for row in ws.iter_rows():
+        for cell in row: cell.alignment=Alignment(vertical="top",wrap_text=True)
+    out=io.BytesIO(); wb.save(out); return out.getvalue(), f"ARQUEO_CAJA_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
+
+
+def generar_pdf_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, compras_df, efectivo_df, observaciones, logo_bytes=None):
+    out=io.BytesIO(); doc=SimpleDocTemplate(out,pagesize=portrait(letter),rightMargin=25,leftMargin=25,topMargin=25,bottomMargin=25); styles=getSampleStyleSheet(); story=[]
+    if logo_bytes:
+        try: story.append(Image(io.BytesIO(logo_bytes),width=75,height=45)); story.append(Spacer(1,4))
+        except Exception: pass
+    story += [Paragraph("<b>ARQUEO DE CAJA GENERAL – COMPRAS</b>",styles["Title"]), Paragraph(f"Empresa: {empresa} &nbsp;&nbsp; Responsable: {responsable}",styles["Normal"]), Paragraph(f"Fecha: {fecha} &nbsp;&nbsp; Período: {mes}",styles["Normal"]), Paragraph(f"Saldo inicial: {formatear_moneda(saldo_inicial)} &nbsp;&nbsp; Fondo autorizado: {formatear_moneda(fondo)}",styles["Normal"]), Spacer(1,8)]
+    headers=["N°","Fecha","Proveedor","Concepto","Soporte","Pago","Compra","IVA","Total","Observaciones"]
+    data=[headers]
+    for _,r in compras_df.iterrows(): data.append([r.get("N°",""),r.get("Fecha",""),r.get("Proveedor",""),r.get("Concepto / Compra",""),r.get("Factura / Soporte",""),r.get("Forma de pago",""),formatear_moneda(r.get("Valor compra",0)),formatear_moneda(r.get("IVA / otros",0)),formatear_moneda(r.get("Total pagado",0)),r.get("Observaciones","")])
+    t=Table(data,repeatRows=1,colWidths=[20,45,60,70,55,40,48,45,50,80]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.lightgrey),("GRID",(0,0),(-1,-1),0.4,colors.grey),("FONTSIZE",(0,0),(-1,-1),6),("VALIGN",(0,0),(-1,-1),"TOP")])); story += [t,Spacer(1,8)]
+    total_compras=total_columna(compras_df,"Total pagado"); teorico=float(saldo_inicial)-total_compras; fisico=total_columna(efectivo_df,"Monto"); diff=fisico-teorico
+    story += [Paragraph(f"<b>Total compras:</b> {formatear_moneda(total_compras)}",styles["Normal"]),Paragraph(f"<b>Saldo teórico final:</b> {formatear_moneda(teorico)}",styles["Normal"]),Paragraph(f"<b>Efectivo físico final:</b> {formatear_moneda(fisico)}",styles["Normal"]),Paragraph(f"<b>Diferencia:</b> {formatear_moneda(diff)} &nbsp;&nbsp; <b>{'CUADRA' if abs(diff)<0.005 else ('SOBRANTE' if diff>0 else 'FALTANTE')}</b>",styles["Normal"]),Spacer(1,8),Paragraph(f"<b>Observaciones:</b> {observaciones or ''}",styles["Normal"])]
+    doc.build(story); return out.getvalue(), f"ARQUEO_CAJA_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.pdf"
+
+
+def preparar_excel_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_inicio, fecha_vencimiento, tasa, saldo_libros, saldo_extracto, diferencias_df, observaciones, logo_bytes=None):
+    wb=Workbook(); ws=wb.active; ws.title="Crédito Bancario"; ws.merge_cells("A1:F1"); ws["A1"]="CONCILIACIÓN DE CRÉDITO BANCARIO"; ws["A1"].font=Font(bold=True,size=14); ws["A1"].alignment=Alignment(horizontal="center")
+    ws["A3"]="Empresa:"; ws["B3"]=empresa; ws["D3"]="Período:"; ws["E3"]=mes; ws["A4"]="Entidad financiera:"; ws["B4"]=entidad; ws["D4"]="Número de crédito:"; ws["E4"]=numero; ws["A5"]="Fecha inicio:"; ws["B5"]=str(fecha_inicio); ws["D5"]="Vencimiento:"; ws["E5"]=str(fecha_vencimiento); ws["A6"]="Tasa:"; ws["B6"]=tasa
+    ws["A8"]="Saldo según libros:"; ws["B8"]=float(saldo_libros); ws["D8"]="Saldo según extracto:"; ws["E8"]=float(saldo_extracto); ws["A9"]="Diferencia:"; ws["B9"]=float(saldo_extracto)-float(saldo_libros)
+    headers=["Concepto","Valor","Observación"]
+    for c,h in enumerate(headers,1): ws.cell(11,c,h).font=Font(bold=True)
+    for r_idx,row in enumerate(diferencias_df.to_dict("records"),12): ws.cell(r_idx,1,row.get("Concepto","")); ws.cell(r_idx,2,row.get("Valor",0)); ws.cell(r_idx,3,row.get("Observación",""))
+    total_dif=total_columna(diferencias_df,"Valor"); rr=12+len(diferencias_df); ws.cell(rr+1,1,"Total diferencias detalladas:"); ws.cell(rr+1,2,total_dif); ws.cell(rr+3,1,"Resultado:"); ws.cell(rr+3,2,"CONCILIADO" if abs(float(saldo_extracto)-float(saldo_libros))<0.005 else "NO CONCILIADO"); ws.cell(rr+5,1,"Observaciones:"); ws.cell(rr+6,1,observaciones or "")
+    for col,w in zip("ABCDEF",[28,18,40,24,22,18]): ws.column_dimensions[col].width=w
+    if logo_bytes:
+        try: img=XLImage(io.BytesIO(logo_bytes)); img.width=110; img.height=60; img.anchor="F2"; ws.add_image(img)
+        except Exception: pass
+    out=io.BytesIO(); wb.save(out); return out.getvalue(), f"CREDITO_BANCARIO_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
+
+
+def generar_pdf_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_inicio, fecha_vencimiento, tasa, saldo_libros, saldo_extracto, diferencias_df, observaciones, logo_bytes=None):
+    out=io.BytesIO(); doc=SimpleDocTemplate(out,pagesize=portrait(letter),rightMargin=35,leftMargin=35,topMargin=30,bottomMargin=30); styles=getSampleStyleSheet(); story=[]
+    if logo_bytes:
+        try: story.append(Image(io.BytesIO(logo_bytes),width=75,height=45)); story.append(Spacer(1,4))
+        except Exception: pass
+    story += [Paragraph("<b>CONCILIACIÓN DE CRÉDITO BANCARIO</b>",styles["Title"]),Paragraph(f"Empresa: {empresa} &nbsp;&nbsp; Período: {mes}",styles["Normal"]),Paragraph(f"Entidad: {entidad} &nbsp;&nbsp; Crédito: {numero}",styles["Normal"]),Paragraph(f"Inicio: {fecha_inicio} &nbsp;&nbsp; Vencimiento: {fecha_vencimiento} &nbsp;&nbsp; Tasa: {tasa}",styles["Normal"]),Spacer(1,8)]
+    diff=float(saldo_extracto)-float(saldo_libros); data=[["Concepto","Valor"],["Saldo según libros",formatear_moneda(saldo_libros)],["Saldo según extracto",formatear_moneda(saldo_extracto)],["Diferencia",formatear_moneda(diff)],["Resultado","CONCILIADO" if abs(diff)<0.005 else "NO CONCILIADO"]]
+    t=Table(data,colWidths=[220,180]); t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.lightgrey),("GRID",(0,0),(-1,-1),0.5,colors.grey),("FONTNAME",(0,0),(-1,0),"Helvetica-Bold")])); story += [t,Spacer(1,10),Paragraph("<b>Diferencias / partidas identificadas</b>",styles["Heading3"])]
+    det=[["Concepto","Valor","Observación"]]+[[r.get("Concepto",""),formatear_moneda(r.get("Valor",0)),r.get("Observación","")] for _,r in diferencias_df.iterrows()]
+    t2=Table(det,colWidths=[170,90,190],repeatRows=1); t2.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.lightgrey),("GRID",(0,0),(-1,-1),0.4,colors.grey),("FONTSIZE",(0,0),(-1,-1),8)])); story += [t2,Spacer(1,10),Paragraph(f"<b>Observaciones:</b> {observaciones or ''}",styles["Normal"])]
+    doc.build(story); return out.getvalue(), f"CREDITO_BANCARIO_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.pdf"
+
 
 # ==========================================
 # 5. AUTENTICACIÓN FLEXIBLE Y SEGURA
@@ -1489,7 +1547,29 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                     datos = {}
 
                 tipo_cta = c_data.get("tipo") or "Cuenta de ahorros"
-                es_tc = "tarjeta" in tipo_cta.lower() or "crédito" in tipo_cta.lower() or "credito" in tipo_cta.lower()
+                tipo_cta_lower = tipo_cta.lower()
+                es_caja_hist = "caja" in tipo_cta_lower
+                es_credito_hist = "crédito bancario" in tipo_cta_lower or "credito bancario" in tipo_cta_lower
+                es_tc = "tarjeta" in tipo_cta_lower
+
+                if es_caja_hist or es_credito_hist:
+                    st.info(f"📌 Tipo de conciliación: **{tipo_cta}**")
+                    datos_especiales = datos
+                    if es_caja_hist:
+                        compras_h=pd.DataFrame(datos_especiales.get("compras",[])); efectivo_h=pd.DataFrame(datos_especiales.get("efectivo",[]))
+                        excel_h,nombre_h=preparar_excel_caja(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("responsable",c_data.get("preparado_por","")),datos_especiales.get("saldo_inicial",0),datos_especiales.get("fondo_autorizado",0),compras_h,efectivo_h,datos_especiales.get("observaciones_caja",""),obtener_logo_empresa(c_data.get("empresa")))
+                        pdf_h,_=generar_pdf_caja(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("responsable",c_data.get("preparado_por","")),datos_especiales.get("saldo_inicial",0),datos_especiales.get("fondo_autorizado",0),compras_h,efectivo_h,datos_especiales.get("observaciones_caja",""),obtener_logo_empresa(c_data.get("empresa")))
+                    else:
+                        dif_h=pd.DataFrame(datos_especiales.get("diferencias",[]))
+                        excel_h,nombre_h=preparar_excel_credito_bancario(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("entidad_financiera",c_data.get("banco","")),datos_especiales.get("numero_credito",c_data.get("cuenta","")),datos_especiales.get("fecha_inicio",""),datos_especiales.get("fecha_vencimiento",""),datos_especiales.get("tasa",""),c_data.get("saldo_libros",0),c_data.get("saldo_extracto",0),dif_h,datos_especiales.get("observaciones_credito",""),obtener_logo_empresa(c_data.get("empresa")))
+                        pdf_h,_=generar_pdf_credito_bancario(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("entidad_financiera",c_data.get("banco","")),datos_especiales.get("numero_credito",c_data.get("cuenta","")),datos_especiales.get("fecha_inicio",""),datos_especiales.get("fecha_vencimiento",""),datos_especiales.get("tasa",""),c_data.get("saldo_libros",0),c_data.get("saldo_extracto",0),dif_h,datos_especiales.get("observaciones_credito",""),obtener_logo_empresa(c_data.get("empresa")))
+                    h1,h2,h3=st.columns(3)
+                    with h1:
+                        if st.button("✏️ Editar Conciliación",key=f"btn_edit_{fila['id']}"):
+                            st.session_state.conciliacion_a_editar=fila['id']; st.session_state.pop("datos_cargados_edit",None); st.session_state.menu_override="📝 Nueva Conciliación"; st.rerun()
+                    with h2: st.download_button("📊 Descargar Excel",data=excel_h,file_name=nombre_h,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key=f"dlx_{fila['id']}")
+                    with h3: st.download_button("📄 Descargar PDF",data=pdf_h,file_name=nombre_h.replace(".xlsx",".pdf"),mime="application/pdf",key=f"dlp_{fila['id']}")
+                    continue
 
                 if es_tc:
                     t1_nombre, t2_nombre, t3_nombre, t4_nombre = (
@@ -1767,7 +1847,7 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
             with st.form("form_cuenta_maestro"):
                 banco = st.text_input("Banco")
                 num = st.text_input("Número de Cuenta / Tarjeta")
-                tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"])
+                tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito", "Caja", "Crédito bancario"])
                 emp_id = None
                 if not empresas_df.empty:
                     emp_id = st.selectbox("Asociar a Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0])
@@ -1806,13 +1886,6 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                 st.dataframe(asignaciones_df[["banco","numero_cuenta","tipo_cuenta","preparador"]], use_container_width=True, hide_index=True, column_config={
                     "banco":"Banco", "numero_cuenta":"Cuenta / Tarjeta", "tipo_cuenta":"Tipo", "preparador":"Preparador asignado"
                 })
-                excel_asig, nombre_excel_asig = preparar_excel_asignaciones(asignaciones_df, empresas_df.loc[empresas_df["id"] == emp_asig, "nombre"].values[0], anio_asig, mes_asig)
-                pdf_asig, nombre_pdf_asig = generar_pdf_asignaciones(asignaciones_df, empresas_df.loc[empresas_df["id"] == emp_asig, "nombre"].values[0], anio_asig, mes_asig)
-                col_d1, col_d2 = st.columns(2)
-                with col_d1:
-                    st.download_button("📊 Descargar asignación en Excel", data=excel_asig, file_name=nombre_excel_asig, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-                with col_d2:
-                    st.download_button("📄 Descargar asignación en PDF", data=pdf_asig, file_name=nombre_pdf_asig, mime="application/pdf", use_container_width=True)
 
     st.subheader("🏦 Cuentas registradas")
     st.dataframe(obtener_cuentas(empresa_activa_id), use_container_width=True, hide_index=True)
@@ -1851,6 +1924,25 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 if d_js.get("entradas_libros"): st.session_state.tabla3 = pd.DataFrame(d_js["entradas_libros"])
                 if d_js.get("entradas_extracto"): st.session_state.tabla4 = pd.DataFrame(d_js["entradas_extracto"])
                 if d_js.get("gastos_bancarios"): st.session_state.tabla5 = pd.DataFrame(d_js["gastos_bancarios"])
+                if d_js.get("especial") == "caja":
+                    st.session_state.caja_compras = pd.DataFrame(d_js.get("compras", _filas_caja_default().to_dict("records")))
+                    st.session_state.caja_efectivo = pd.DataFrame(d_js.get("efectivo", []))
+                    st.session_state.caja_responsable = d_js.get("responsable", usuario_actual["nombre"])
+                    st.session_state.caja_saldo_inicial = float(d_js.get("saldo_inicial", 0) or 0)
+                    st.session_state.caja_fondo = float(d_js.get("fondo_autorizado", 0) or 0)
+                    st.session_state.caja_obs = d_js.get("observaciones_caja", "")
+                elif d_js.get("especial") == "credito_bancario":
+                    st.session_state.credito_entidad = d_js.get("entidad_financiera", c_edit.get("banco", ""))
+                    st.session_state.credito_numero = d_js.get("numero_credito", c_edit.get("cuenta", ""))
+                    try: st.session_state.credito_fecha_inicio = datetime.fromisoformat(str(d_js.get("fecha_inicio"))[:10]).date()
+                    except Exception: pass
+                    try: st.session_state.credito_fecha_vencimiento = datetime.fromisoformat(str(d_js.get("fecha_vencimiento"))[:10]).date()
+                    except Exception: pass
+                    st.session_state.credito_tasa = d_js.get("tasa", "")
+                    st.session_state.credito_saldo_libros = float(d_js.get("saldo_libros", c_edit.get("saldo_libros", 0)) or 0)
+                    st.session_state.credito_saldo_extracto = float(d_js.get("saldo_extracto", c_edit.get("saldo_extracto", 0)) or 0)
+                    st.session_state.credito_diferencias = pd.DataFrame(d_js.get("diferencias", []))
+                    st.session_state.credito_observaciones = d_js.get("observaciones_credito", "")
             except Exception:
                 pass
             st.session_state.datos_cargados_edit = True
@@ -1925,14 +2017,86 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                         st.info("No hay cuentas registradas para esta empresa.")
                         banco = st.text_input("Nombre del Banco", key="form_banco")
                         cuenta = st.text_input("Número de Cuenta", key="form_cuenta")
-                        tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"])
+                        tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito", "Caja", "Crédito bancario"])
 
     with col_logo_emp:
         logo_bytes = obtener_logo_empresa(empresa)
         if logo_bytes:
             st.image(logo_bytes, caption=f"Logo {empresa}", width=150)
 
-    es_tc = "tarjeta" in tipo.lower() or "crédito" in tipo.lower() or "credito" in tipo.lower()
+    tipo_lower = str(tipo or "").lower()
+    es_caja = "caja" in tipo_lower
+    es_credito_bancario = "crédito bancario" in tipo_lower or "credito bancario" in tipo_lower
+    es_tc = ("tarjeta" in tipo_lower)
+
+    if es_caja:
+        st.info("💵 Modo activado: Arqueo de Caja General – Compras.")
+        nombres_titulos = {}
+        st.divider(); st.subheader("💵 Arqueo de Caja General – Compras")
+        if "caja_compras" not in st.session_state or id_edicion:
+            st.session_state.caja_compras = _filas_caja_default()
+        if "caja_efectivo" not in st.session_state or id_edicion:
+            denoms=[2000,5000,10000,20000,50000,100000,100,200,500,1000]
+            st.session_state.caja_efectivo=pd.DataFrame([{"Denominación":d,"Cantidad":0,"Monto":0.0} for d in denoms])
+        c1,c2,c3=st.columns(3)
+        with c1: caja_responsable=st.text_input("Responsable", value=usuario_actual["nombre"], key="caja_responsable")
+        with c2: caja_saldo_inicial=st.number_input("Saldo inicial para compras", min_value=0.0, format="%.2f", key="caja_saldo_inicial")
+        with c3: caja_fondo=st.number_input("Fondo autorizado", min_value=0.0, format="%.2f", key="caja_fondo")
+        caja_obs=st.text_area("Observaciones", key="caja_obs")
+        st.markdown("**Detalle de compras**")
+        compras=st.data_editor(formatear_columna_valor(st.session_state.caja_compras,"Valor compra"),num_rows="dynamic",use_container_width=True,key="editor_caja_compras",column_config=config_monetaria(["Valor compra","IVA / otros","Total pagado"]))
+        st.markdown("**Detalle del saldo en caja**")
+        efectivo=st.data_editor(st.session_state.caja_efectivo,num_rows="fixed",use_container_width=True,key="editor_caja_efectivo",column_config={"Cantidad":st.column_config.NumberColumn("Cantidad",min_value=0,step=1),"Monto":st.column_config.NumberColumn("Monto",format="$ %,.2f")})
+        efectivo=efectivo.copy(); efectivo["Monto"]=pd.to_numeric(efectivo["Denominación"],errors="coerce").fillna(0)*pd.to_numeric(efectivo["Cantidad"],errors="coerce").fillna(0)
+        total_compras=total_columna(compras,"Total pagado"); saldo_teorico=float(caja_saldo_inicial)-total_compras; efectivo_fisico=total_columna(efectivo,"Monto"); diferencia_caja=efectivo_fisico-saldo_teorico
+        resultado_caja="CUADRA" if abs(diferencia_caja)<0.005 else ("SOBRANTE" if diferencia_caja>0 else "FALTANTE")
+        a,b,c=st.columns(3); a.metric("Saldo teórico final",formatear_moneda(saldo_teorico)); b.metric("Efectivo físico final",formatear_moneda(efectivo_fisico)); c.metric("Diferencia",formatear_moneda(diferencia_caja))
+        st.success(f"Resultado del arqueo: **{resultado_caja}**" if resultado_caja=="CUADRA" else f"Resultado del arqueo: **{resultado_caja}**")
+        preparado_por=st.text_input("Preparado por",value=usuario_actual["nombre"],key="caja_preparado_por"); revisado_por=st.text_input("Revisado por",key="caja_revisado_por")
+        logo_bytes=obtener_logo_empresa(empresa)
+        excel_caja,nombre_excel_caja=preparar_excel_caja(empresa,mes,fecha_elaboracion,caja_responsable,caja_saldo_inicial,caja_fondo,compras,efectivo,caja_obs,logo_bytes)
+        pdf_caja,nombre_pdf_caja=generar_pdf_caja(empresa,mes,fecha_elaboracion,caja_responsable,caja_saldo_inicial,caja_fondo,compras,efectivo,caja_obs,logo_bytes)
+        d1,d2=st.columns(2); d1.download_button("📊 Descargar Excel",data=excel_caja,file_name=nombre_excel_caja,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True); d2.download_button("📄 Descargar PDF",data=pdf_caja,file_name=nombre_pdf_caja,mime="application/pdf",use_container_width=True)
+        datos_extra={"especial":"caja","responsable":caja_responsable,"saldo_inicial":caja_saldo_inicial,"fondo_autorizado":caja_fondo,"compras":json.loads(compras.to_json(orient="records")),"efectivo":json.loads(efectivo.to_json(orient="records")),"observaciones_caja":caja_obs,"resultado_arqueo":resultado_caja,"saldo_teorico":saldo_teorico,"efectivo_fisico":efectivo_fisico,"diferencia_caja":diferencia_caja}
+        st.divider(); q1,q2=st.columns(2)
+        with q1:
+            if st.button("💾 Guardar Caja como Borrador",key="guardar_caja_borrador"):
+                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,banco,cuenta,tipo,saldo_teorico,efectivo_fisico,diferencia_caja,datos_extra,preparado_por,revisado_por,"Borrador",id_edicion); st.success(f"💾 Conciliación CONC-{id_g:06d} guardada como Borrador."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
+        with q2:
+            if st.button("🚀 Enviar Caja a Revisión",key="enviar_caja_revision",type="primary"):
+                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,banco,cuenta,tipo,saldo_teorico,efectivo_fisico,diferencia_caja,datos_extra,preparado_por,revisado_por,"Pendiente de revisión",id_edicion); st.success(f"🚀 Conciliación CONC-{id_g:06d} enviada a Revisión."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
+        st.stop()
+
+    if es_credito_bancario:
+        st.info("💰 Modo activado: Conciliación de Crédito Bancario.")
+        nombres_titulos={}
+        st.divider(); st.subheader("💰 Conciliación de Crédito Bancario")
+        c1,c2=st.columns(2)
+        with c1: entidad_credito=st.text_input("Entidad financiera",value=banco,key="credito_entidad"); numero_credito=st.text_input("Número de crédito",value=cuenta,key="credito_numero")
+        with c2: fecha_inicio=st.date_input("Fecha de inicio",key="credito_fecha_inicio"); fecha_vencimiento=st.date_input("Fecha de vencimiento",key="credito_fecha_vencimiento"); tasa=st.text_input("Tasa de interés",key="credito_tasa")
+        c1,c2=st.columns(2)
+        with c1: saldo_libros_cb=st.number_input("Saldo según libros",format="%.2f",key="credito_saldo_libros")
+        with c2: saldo_extracto_cb=st.number_input("Saldo según extracto bancario del crédito",format="%.2f",key="credito_saldo_extracto")
+        diferencia_cb=float(saldo_extracto_cb)-float(saldo_libros_cb); resultado_cb="CONCILIADO" if abs(diferencia_cb)<0.005 else "NO CONCILIADO"
+        st.metric("Diferencia",formatear_moneda(diferencia_cb)); (st.success if resultado_cb=="CONCILIADO" else st.warning)(f"Resultado: **{resultado_cb}**")
+        if "credito_diferencias" not in st.session_state or id_edicion: st.session_state.credito_diferencias=pd.DataFrame([{"Concepto":"Pago registrado en banco y no en libros","Valor":0.0,"Observación":""},{"Concepto":"Pago registrado en libros y no en banco","Valor":0.0,"Observación":""},{"Concepto":"Intereses del crédito","Valor":0.0,"Observación":""},{"Concepto":"Seguros","Valor":0.0,"Observación":""},{"Concepto":"Comisiones","Valor":0.0,"Observación":""},{"Concepto":"Abonos extraordinarios","Valor":0.0,"Observación":""},{"Concepto":"Reclasificaciones contables","Valor":0.0,"Observación":""},{"Concepto":"Diferencia pendiente de identificar","Valor":0.0,"Observación":""},{"Concepto":"Otro","Valor":0.0,"Observación":""}])
+        diferencias_cb_df=st.data_editor(st.session_state.credito_diferencias,num_rows="dynamic",use_container_width=True,key="editor_credito_diferencias",column_config=config_monetaria(["Valor"]))
+        obs_cb=st.text_area("Observaciones",key="credito_observaciones")
+        preparado_cb=st.text_input("Preparado por",value=usuario_actual["nombre"],key="credito_preparado_por"); revisado_cb=st.text_input("Revisado por",key="credito_revisado_por")
+        logo_bytes=obtener_logo_empresa(empresa)
+        excel_cb,nombre_excel_cb=preparar_excel_credito_bancario(empresa,mes,fecha_elaboracion,entidad_credito,numero_credito,fecha_inicio,fecha_vencimiento,tasa,saldo_libros_cb,saldo_extracto_cb,diferencias_cb_df,obs_cb,logo_bytes)
+        pdf_cb,nombre_pdf_cb=generar_pdf_credito_bancario(empresa,mes,fecha_elaboracion,entidad_credito,numero_credito,fecha_inicio,fecha_vencimiento,tasa,saldo_libros_cb,saldo_extracto_cb,diferencias_cb_df,obs_cb,logo_bytes)
+        d1,d2=st.columns(2); d1.download_button("📊 Descargar Excel",data=excel_cb,file_name=nombre_excel_cb,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True); d2.download_button("📄 Descargar PDF",data=pdf_cb,file_name=nombre_pdf_cb,mime="application/pdf",use_container_width=True)
+        datos_extra={"especial":"credito_bancario","entidad_financiera":entidad_credito,"numero_credito":numero_credito,"fecha_inicio":str(fecha_inicio),"fecha_vencimiento":str(fecha_vencimiento),"tasa":tasa,"diferencias":json.loads(diferencias_cb_df.to_json(orient="records")),"observaciones_credito":obs_cb}
+        st.divider(); q1,q2=st.columns(2)
+        with q1:
+            if st.button("💾 Guardar Crédito como Borrador",key="guardar_credito_borrador"):
+                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,entidad_credito,numero_credito,tipo,saldo_libros_cb,saldo_extracto_cb,diferencia_cb,datos_extra,preparado_cb,revisado_cb,"Borrador",id_edicion); st.success(f"💾 Conciliación CONC-{id_g:06d} guardada como Borrador."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
+        with q2:
+            if st.button("🚀 Enviar Crédito a Revisión",key="enviar_credito_revision",type="primary"):
+                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,entidad_credito,numero_credito,tipo,saldo_libros_cb,saldo_extracto_cb,diferencia_cb,datos_extra,preparado_cb,revisado_cb,"Pendiente de revisión",id_edicion); st.success(f"🚀 Conciliación CONC-{id_g:06d} enviada a Revisión."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
+        st.stop()
+
     if es_tc:
         st.info("💳 Modo activado: Conciliación de Tarjeta de Crédito.")
         nombres_titulos = {
