@@ -1918,6 +1918,47 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     buffer.seek(0)
     return buffer.getvalue()
 
+
+def mostrar_linea_correccion(data, tipo='Conciliación'):
+    """Muestra la trazabilidad de devolución/corrección sin alterar el flujo existente."""
+    if not data:
+        return
+    estado = str(data.get('workflow_status') or '')
+    motivo = str(data.get('motivo_correccion') or '').strip()
+    if not motivo and estado != 'Requiere corrección':
+        return
+
+    revisado = data.get('revisado_por_nombre') or data.get('revisado_por_usuario') or data.get('revisado_por') or 'Auditor'
+    preparado = data.get('corregido_por_nombre') or data.get('corregido_por') or data.get('preparado_por_nombre') or data.get('preparado_por') or 'Preparador'
+    fecha_dev = data.get('fecha_devolucion') or (data.get('fecha_revision') if estado == 'Requiere corrección' else '') or 'N/A'
+    fecha_corr = data.get('fecha_correccion') or ''
+    fecha_reenvio = data.get('fecha_reenvio') or ''
+
+    st.markdown('### 📝 Línea de corrección por devolución')
+    if estado == 'Requiere corrección':
+        st.error(
+            f"🔴 **DEVOLUCIÓN DEL AUDITOR** · {tipo}\n\n"
+            f"**Auditor:** {revisado} | **Fecha:** {fecha_dev}\n\n"
+            f"**Motivo:** {motivo or 'Sin detalle especificado'}"
+        )
+        st.markdown(
+            "**↓ CORRECCIÓN PENDIENTE**  \n"
+            f"🟡 El preparador **{preparado}** debe realizar la corrección y volver a enviar a revisión."
+        )
+    else:
+        st.info(
+            f"🟡 **CORRECCIÓN REGISTRADA** · Preparada por: **{preparado}** · "
+            f"Fecha corrección: **{fecha_corr or 'N/A'}** · Reenvío: **{fecha_reenvio or 'N/A'}**"
+        )
+        st.markdown(
+            f"**DEVOLUCIÓN** → {fecha_dev}  \n"
+            f"↓  \n"
+            f"**CORRECCIÓN** → {fecha_corr or 'registrada'}  \n"
+            f"↓  \n"
+            f"**REENVIADA A AUDITORÍA** → {fecha_reenvio or 'registrada'}"
+        )
+
+
 def vista_conciliacion_bancaria(empresa_activa_id, empresa_activa_nombre, empresa_activa_nit, empresas_df, usuario_actual):
         st.title("📝 Captura / Edición de Conciliación Bancaria")
         id_edicion = st.session_state.get("conciliacion_a_editar", None)
@@ -1927,16 +1968,8 @@ def vista_conciliacion_bancaria(empresa_activa_id, empresa_activa_nombre, empres
             consecutivo_edit_str = f"CONC-{int(id_edicion):06d}"
             wf_status = c_edit.get("workflow_status", "")
 
-            # Panel visual de devolución si está en estado 'Requiere corrección'
             if wf_status == "Requiere corrección":
-                st.error(
-                    f"🔴 **REQUIERE CORRECCIÓN - CONCILIACIÓN {consecutivo_edit_str}**\n\n"
-                    f"• **Devuelta por:** {c_edit.get('revisado_por_usuario', 'Auditor')}\n"
-                    f"• **Fecha de Devolución:** {c_edit.get('fecha_devolucion', 'N/A')}\n"
-                    f"• **Motivo del Hallazgo:** {c_edit.get('tipo_hallazgo', 'General')}\n"
-                    f"• **Observación del Auditor:** {c_edit.get('motivo_correccion', 'Sin detalle especificado')}\n\n"
-                    f"✏️ *Por favor realiza los ajustes necesarios y presiona abajo el botón '📤 Enviar nuevamente a revisión'*."
-                )
+                mostrar_linea_correccion(c_edit, "Conciliación bancaria")
             else:
                 st.info(f"✏️ **Modo Edición Activado:** Editando Conciliación {consecutivo_edit_str} ({c_edit.get('empresa')} - {c_edit.get('banco')})")
 
@@ -2961,7 +2994,7 @@ elif menu_seleccionado == "📋 Historial":
                         m3.metric("Diferencia", formatear_moneda(d.get("diferencia", 0)))
                         st.write(f"**Resultado:** {d.get('resultado','')} | **Preparado por:** {d.get('preparado_por','N/A')}")
                         if d.get("motivo_correccion"):
-                            st.error(f"⚠️ Observación del auditor: {d['motivo_correccion']}")
+                            mostrar_linea_correccion(d, "Conciliación de crédito")
 
                         r1, r2 = st.columns(2)
                         with r1:
@@ -3015,7 +3048,7 @@ elif menu_seleccionado == "📋 Historial":
                         m4.metric("Resultado", d.get("resultado", ""))
                         st.write(f"**Responsable:** {d.get('responsable','N/A')} | **Preparado por:** {d.get('preparado_por','N/A')}")
                         if d.get("motivo_correccion"):
-                            st.error(f"⚠️ Observación del auditor: {d['motivo_correccion']}")
+                            mostrar_linea_correccion(d, "Cuadre de caja")
 
                         r1, r2 = st.columns(2)
                         with r1:
