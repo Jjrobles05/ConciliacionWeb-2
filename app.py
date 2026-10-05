@@ -841,7 +841,7 @@ def construir_firmas_conciliacion(preparado_por="", revisado_por="", aprobado_po
         "fecha_aprobacion": fecha_aprobacion or ""
     }
 
-def renderizar_bloque_firmas_ui(preparado_por, preparado_fecha="", revisado_por="", revisado_fecha="", aprobado_por="", aprobado_fecha="", estado="Pendiente de revisión"):
+def renderizar_bloque_firmas_ui(preparado_por, fecha_preparacion="", revisado_por="", revisado_fecha="", aprobado_por="", aprobado_fecha="", estado="Pendiente de revisión"):
     st.divider()
     st.subheader("✍️ Firmas y trazabilidad")
     st.caption("Las firmas se generan automáticamente con el usuario autenticado y la fecha/hora de cada acción.")
@@ -886,7 +886,7 @@ def guardar_conciliacion_historial(
         ahora = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         datos.update(construir_firmas_conciliacion(
             preparado_por=preparado_por,
-            preparado_fecha=datos.get('fecha_preparacion') or ahora,
+            fecha_preparacion=datos.get('fecha_preparacion') or ahora,
             revisado_por=datos.get('revisado_por_usuario') or revisado_por,
             revisado_fecha=datos.get('fecha_revision') or '',
             aprobado_por=datos.get('aprobado_por_usuario') or '',
@@ -1081,7 +1081,7 @@ def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, c
             "estado": "CONCILIACIÓN CORRECTA" if abs(float(resultado_final)) < 0.005 else "CONCILIACIÓN CON DIFERENCIA",
             "preparado_por": preparado_por, "revisado_por": revisado_por,
             "workflow_status": workflow_status,
-            **construir_firmas_conciliacion(preparado_por=preparado_por, preparado_fecha=payload.get("fecha_preparacion") or ahora, revisado_por=payload.get("revisado_por_usuario") or revisado_por, revisado_fecha=payload.get("fecha_revision") or "", aprobado_por=payload.get("aprobado_por_usuario") or "", aprobado_fecha=payload.get("fecha_aprobacion") or "")
+            **construir_firmas_conciliacion(preparado_por=preparado_por, fecha_preparacion=payload.get("fecha_preparacion") or ahora, revisado_por=payload.get("revisado_por_usuario") or revisado_por, revisado_fecha=payload.get("fecha_revision") or "", aprobado_por=payload.get("aprobado_por_usuario") or "", aprobado_fecha=payload.get("fecha_aprobacion") or "")
         })
         observaciones=json.dumps(payload, ensure_ascii=False)
         fecha_creacion=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1910,6 +1910,10 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
             cuenta_txt = fila.get("cuenta") or "N/A"
             banco_txt = fila.get("banco") or "N/A"
             consecutivo_str = f"CONC-{int(fila['id']):06d}"
+            es_destacada = int(fila["id"]) == int(st.session_state.get("historial_id_destacado", -1))
+            if es_destacada:
+                st.success(f"✅ Esta es la conciliación que acabas de guardar: **{consecutivo_str}** — Estado: **{wf_status}**")
+                st.session_state.pop("historial_id_destacado", None)
 
             with st.expander(f"📌 {consecutivo_str} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']}"):
                 c_data = obtener_conciliacion_por_id(fila["id"])
@@ -2552,10 +2556,10 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         st.divider(); q1,q2=st.columns(2)
         with q1:
             if st.button("💾 Guardar Caja como Borrador",key="guardar_caja_borrador"):
-                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,banco,cuenta,tipo,saldo_teorico,efectivo_fisico,diferencia_caja,datos_extra,preparado_por,revisado_por,"Borrador",id_edicion); st.success(f"💾 Conciliación CONC-{id_g:06d} guardada como Borrador."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
+                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,banco,cuenta,tipo,saldo_teorico,efectivo_fisico,diferencia_caja,datos_extra,preparado_por,revisado_por,"Borrador",id_edicion); st.success(f"💾 Conciliación CONC-{id_g:06d} guardada como Borrador."); st.session_state.pop("conciliacion_a_editar",None); st.session_state["historial_id_destacado"] = int(id_g); st.session_state.menu_override = "📋 Historial"; st.rerun()
         with q2:
             if st.button("🚀 Enviar Caja a Revisión",key="enviar_caja_revision",type="primary"):
-                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,banco,cuenta,tipo,saldo_teorico,efectivo_fisico,diferencia_caja,datos_extra,preparado_por,revisado_por,"Pendiente de revisión",id_edicion); st.success(f"🚀 Conciliación CONC-{id_g:06d} enviada a Revisión."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
+                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,banco,cuenta,tipo,saldo_teorico,efectivo_fisico,diferencia_caja,datos_extra,preparado_por,revisado_por,"Pendiente de revisión",id_edicion); st.success(f"🚀 Conciliación CONC-{id_g:06d} enviada a Revisión."); st.session_state.pop("conciliacion_a_editar",None); st.session_state["historial_id_destacado"] = int(id_g); st.session_state.menu_override = "📋 Historial"; st.rerun()
         st.stop()
 
     if es_credito_bancario:
@@ -2627,11 +2631,11 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         with q1:
             if st.button("💾 Guardar Crédito como Borrador",key="guardar_credito_borrador"):
                 id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,entidad_credito,numero_credito,tipo,saldo_libros_cb,saldo_extracto_cb,diferencia_cb,datos_extra,preparado_cb,revisado_cb,"Borrador",id_edicion)
-                st.success(f"💾 Conciliación CONC-{id_g:06d} guardada como Borrador."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
+                st.success(f"💾 Conciliación CONC-{id_g:06d} guardada como Borrador."); st.session_state.pop("conciliacion_a_editar",None); st.session_state["historial_id_destacado"] = int(id_g); st.session_state.menu_override = "📋 Historial"; st.rerun()
         with q2:
             if st.button("🚀 Enviar Crédito a Revisión",key="enviar_credito_revision",type="primary"):
                 id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,entidad_credito,numero_credito,tipo,saldo_libros_cb,saldo_extracto_cb,diferencia_cb,datos_extra,preparado_cb,revisado_cb,"Pendiente de revisión",id_edicion)
-                st.success(f"🚀 Conciliación CONC-{id_g:06d} enviada a Revisión."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
+                st.success(f"🚀 Conciliación CONC-{id_g:06d} enviada a Revisión."); st.session_state.pop("conciliacion_a_editar",None); st.session_state["historial_id_destacado"] = int(id_g); st.session_state.menu_override = "📋 Historial"; st.rerun()
         st.stop()
 
     if es_tc:
@@ -2805,6 +2809,8 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             )
             st.session_state.pop("conciliacion_a_editar", None)
             st.session_state.pop("datos_cargados_edit", None)
+            st.session_state["historial_id_destacado"] = int(id_g)
+            st.session_state.menu_override = "📋 Historial"
             st.success(f"💾 Conciliación CONC-{int(id_g):06d} guardada como Borrador.")
 
     with btn_col_env:
@@ -2839,6 +2845,10 @@ elif menu_seleccionado == "📋 Historial":
             banco_txt = fila.get("banco") or "N/A"
             wf_status = fila.get("workflow_status", "Pendiente de revisión")
             consecutivo_str = f"CONC-{int(fila['id']):06d}"
+            es_destacada = int(fila["id"]) == int(st.session_state.get("historial_id_destacado", -1))
+            if es_destacada:
+                st.success(f"✅ Esta es la conciliación que acabas de guardar: **{consecutivo_str}** — Estado: **{wf_status}**")
+                st.session_state.pop("historial_id_destacado", None)
 
             with st.expander(f"📌 {consecutivo_str} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']} - Estado: {wf_status}"):
                 c_data = obtener_conciliacion_por_id(fila["id"])
