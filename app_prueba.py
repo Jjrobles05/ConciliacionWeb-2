@@ -1092,6 +1092,7 @@ def obtener_detalle_conciliacion_credito(id_conciliacion):
                 'observaciones':row[7] or '','nombre_soporte':row[8] or '','preparado_por':row[9] or '',
                 'revisado_por':row[10] or '','fecha_creacion':row[11] or '','fecha_revision':row[12] or '',
                 'workflow_status':row[13] or 'Borrador','motivo_correccion':row[14] or '',
+                'preparado_por_nombre':nombre_usuario_por_id(row[9]), 'revisado_por_nombre':nombre_usuario_por_id(row[10]),
                 'entidad_financiera':row[15] or '','numero_credito':row[16] or '','descripcion':row[17] or '',
                 'banco':row[18] or '','numero_cuenta':row[19] or '','empresa':row[20] or '','nit':row[21] or ''}
     except Exception:
@@ -1130,6 +1131,7 @@ def obtener_detalle_arqueo_caja(id_arqueo):
                 'resultado':row[10] or '','observaciones':row[11] or '','preparado_por':row[12] or '',
                 'revisado_por':row[13] or '','fecha_creacion':row[14] or '','fecha_revision':row[15] or '',
                 'workflow_status':row[16] or 'Borrador','motivo_correccion':row[17] or '',
+                'preparado_por_nombre':nombre_usuario_por_id(row[12]), 'revisado_por_nombre':nombre_usuario_por_id(row[13]),
                 'caja':row[18] or '','responsable':row[19] or '','empresa':row[20] or '','nit':row[21] or '',
                 'compras':compras,'efectivo':efectivo}
     except Exception:
@@ -1147,13 +1149,75 @@ def actualizar_estado_caja_auditoria(id_arqueo,nuevo_estado,revisado_por,motivo_
     finally: conn.close()
 
 
+def nombre_usuario_por_id(usuario_id):
+    """Devuelve el nombre completo del usuario a partir de su ID."""
+    if usuario_id in (None, "", 0, "0"):
+        return ""
+    try:
+        conn=conectar_db(); c=conn.cursor()
+        c.execute("SELECT nombre FROM usuarios WHERE id=?", (int(usuario_id),))
+        row=c.fetchone(); conn.close()
+        return row[0] if row else str(usuario_id)
+    except Exception:
+        return str(usuario_id)
+
+
+def nombre_persona(data, campo, campo_nombre=None):
+    """Normaliza nombres que pueden estar guardados como texto o como ID."""
+    valor=data.get(campo, "")
+    if campo_nombre and data.get(campo_nombre):
+        return str(data.get(campo_nombre))
+    if valor in (None, ""):
+        return ""
+    try:
+        if str(valor).isdigit():
+            return nombre_usuario_por_id(valor)
+    except Exception:
+        pass
+    return str(valor)
+
+
+def bloque_firmas_pdf(story, data, normal_style, aprobado=True):
+    """Bloque ejecutivo de firmas: preparado y auditor cuando el registro está aprobado."""
+    preparado=nombre_persona(data, 'preparado_por', 'preparado_por_nombre') or 'N/A'
+    auditor=nombre_persona(data, 'revisado_por', 'revisado_por_nombre')
+    fecha_revision=data.get('fecha_revision','') or ''
+    estado=str(data.get('workflow_status',''))
+    story.append(Spacer(1,14))
+    story.append(Paragraph('<b>RESPONSABLES Y APROBACIÓN</b>', normal_style))
+    if estado == 'Aprobada' and auditor:
+        auditor_txt=auditor
+        fecha_txt=fecha_revision or 'Fecha de aprobación registrada'
+    else:
+        auditor_txt='Pendiente de aprobación por auditor'
+        fecha_txt=''
+    firmas=[
+        [Paragraph('<b>PREPARADO POR</b>',normal_style), Paragraph('<b>AUDITOR / REVISOR</b>',normal_style)],
+        [Paragraph(str(preparado),normal_style), Paragraph(str(auditor_txt),normal_style)],
+        [Paragraph('Firma: ______________________________',normal_style), Paragraph('Firma: ______________________________',normal_style)],
+        [Paragraph(f"Fecha: {data.get('fecha_creacion','') or ''}",normal_style), Paragraph(f"Fecha de aprobación: {fecha_txt}",normal_style)]
+    ]
+    t=Table(firmas,colWidths=[270,270])
+    t.setStyle(TableStyle([
+        ('BOX',(0,0),(-1,-1),0.6,colors.HexColor('#B7B7B7')),
+        ('INNERGRID',(0,0),(-1,-1),0.35,colors.HexColor('#D9D9D9')),
+        ('BACKGROUND',(0,0),(-1,0),colors.HexColor('#EAF2F8')),
+        ('VALIGN',(0,0),(-1,-1),'MIDDLE'),
+        ('PADDING',(0,0),(-1,-1),7)
+    ]))
+    story.append(t)
+    if estado != 'Aprobada':
+        story.append(Spacer(1,5))
+        story.append(Paragraph('<i>Este documento aún no contiene la firma de aprobación del auditor porque el registro no ha sido aprobado.</i>', normal_style))
+
+
 def generar_excel_credito_reporte(data):
     wb=Workbook(); ws=wb.active; ws.title='Conciliación Crédito'
     ws.append(['REPORTE DE CONCILIACIÓN DE CRÉDITO']); ws.append([])
     datos=[('Empresa',data.get('empresa')),('NIT',data.get('nit')),('Banco',data.get('banco')),('Cuenta',data.get('numero_cuenta')),
            ('Entidad financiera',data.get('entidad_financiera')),('Número de crédito',data.get('numero_credito')),('Período',data.get('periodo')),
            ('Saldo según libros',data.get('saldo_libros')),('Saldo según extracto',data.get('saldo_extracto')),('Diferencia',data.get('diferencia')),
-           ('Resultado',data.get('resultado')),('Estado',data.get('workflow_status')),('Preparado por',data.get('preparado_por')),('Revisado por',data.get('revisado_por')),
+           ('Resultado',data.get('resultado')),('Estado',data.get('workflow_status')),('Preparado por',nombre_persona(data,'preparado_por','preparado_por_nombre')),('Revisado por',nombre_persona(data,'revisado_por','revisado_por_nombre')),
            ('Fecha creación',data.get('fecha_creacion')),('Fecha revisión',data.get('fecha_revision')),('Observaciones',data.get('observaciones'))]
     for k,v in datos: ws.append([k,v])
     for cell in ws[1]: cell.font=Font(bold=True,size=14)
@@ -1164,16 +1228,55 @@ def generar_excel_credito_reporte(data):
 
 
 def generar_pdf_credito_reporte(data):
-    bio=io.BytesIO(); doc=SimpleDocTemplate(bio,pagesize=portrait(letter),rightMargin=35,leftMargin=35,topMargin=35,bottomMargin=35)
-    styles=getSampleStyleSheet(); story=[Paragraph('REPORTE DE CONCILIACIÓN DE CRÉDITO',styles['Title']),Spacer(1,12)]
-    rows=[['Campo','Valor'],['Empresa',data.get('empresa','')],['NIT',data.get('nit','')],['Banco',data.get('banco','')],['Cuenta',data.get('numero_cuenta','')],['Entidad financiera',data.get('entidad_financiera','')],['Número de crédito',data.get('numero_credito','')],['Período',data.get('periodo','')],['Saldo libros',formatear_moneda(data.get('saldo_libros',0))],['Saldo extracto',formatear_moneda(data.get('saldo_extracto',0))],['Diferencia',formatear_moneda(data.get('diferencia',0))],['Resultado',data.get('resultado','')],['Estado',data.get('workflow_status','')],['Preparado por',str(data.get('preparado_por',''))],['Revisado por',str(data.get('revisado_por',''))],['Observaciones',data.get('observaciones','')]]
-    t=Table(rows,colWidths=[150,350]); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1F4E78')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.5,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('PADDING',(0,0),(-1,-1),6)])); story.append(t); doc.build(story); return bio.getvalue()
+    bio=io.BytesIO()
+    doc=SimpleDocTemplate(bio,pagesize=portrait(letter),rightMargin=30,leftMargin=30,topMargin=30,bottomMargin=30)
+    styles=getSampleStyleSheet()
+    title=ParagraphStyle('CredTitle',parent=styles['Heading1'],fontSize=15,leading=18,textColor=colors.HexColor('#1F4E78'),spaceAfter=2)
+    sub=ParagraphStyle('CredSub',parent=styles['Normal'],fontSize=8,textColor=colors.HexColor('#666666'))
+    normal=ParagraphStyle('CredNormal',parent=styles['Normal'],fontSize=8.5,leading=10)
+    story=[]
+    logo=obtener_logo_empresa(data.get('empresa',''))
+    encabezado=[]
+    titulo=Paragraph('<b>INFORME EJECUTIVO<br/>CONCILIACIÓN DE CRÉDITO</b>',title)
+    if logo:
+        try:
+            encabezado=[[titulo,Image(io.BytesIO(logo),width=72,height=42)]]
+            ht=Table(encabezado,colWidths=[440,100])
+            ht.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(1,0),(1,0),'RIGHT')]))
+            story.append(ht)
+        except Exception:
+            story.append(titulo)
+    else:
+        story.append(titulo)
+    story.append(Paragraph(f"{data.get('empresa','')} · NIT {data.get('nit','')} · Período {data.get('periodo','')}",sub))
+    story.append(Spacer(1,10))
+    estado=data.get('workflow_status','')
+    ejecutivo=[
+        ['ESTADO',estado],['RESULTADO',data.get('resultado','')],
+        ['SALDO SEGÚN LIBROS',formatear_moneda(data.get('saldo_libros',0))],
+        ['SALDO SEGÚN EXTRACTO',formatear_moneda(data.get('saldo_extracto',0))],
+        ['DIFERENCIA',formatear_moneda(data.get('diferencia',0))]
+    ]
+    t=Table(executivo,colWidths=[180,360])
+    t.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#EAF2F8')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#C9C9C9')),('ALIGN',(1,2),(1,4),'RIGHT'),('PADDING',(0,0),(-1,-1),7)]))
+    story.append(t); story.append(Spacer(1,10))
+    info=[['Empresa',data.get('empresa',''),'NIT',data.get('nit','')],['Banco',data.get('banco',''),'Cuenta',data.get('numero_cuenta','')],['Entidad financiera',data.get('entidad_financiera',''),'No. crédito',data.get('numero_credito','')],['Fecha de creación',data.get('fecha_creacion',''),'Fecha de revisión',data.get('fecha_revision','')]]
+    ti=Table(info,colWidths=[95,175,95,175])
+    ti.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#F4F4F4')),('BACKGROUND',(2,0),(2,-1),colors.HexColor('#F4F4F4')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('FONTNAME',(2,0),(2,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#D9D9D9')),('PADDING',(0,0),(-1,-1),5)]))
+    story.append(ti)
+    if data.get('observaciones'):
+        story.append(Spacer(1,8)); story.append(Paragraph(f"<b>Observaciones:</b> {data.get('observaciones')}",normal))
+    if data.get('motivo_correccion'):
+        story.append(Spacer(1,5)); story.append(Paragraph(f"<b>Observación del auditor:</b> {data.get('motivo_correccion')}",normal))
+    bloque_firmas_pdf(story,data,normal)
+    story.append(Spacer(1,8)); story.append(Paragraph('<i>Documento generado por el Sistema de Conciliación. La firma del auditor se incorpora únicamente cuando la conciliación queda aprobada.</i>',sub))
+    doc.build(story); bio.seek(0); return bio.getvalue()
 
 
 def generar_excel_caja_reporte(data):
     wb=Workbook(); ws=wb.active; ws.title='Arqueo de Caja'
     ws.append(['REPORTE DE CUADRE DE CAJA']); ws.append([])
-    datos=[('Empresa',data.get('empresa')),('NIT',data.get('nit')),('Caja',data.get('caja')),('Responsable',data.get('responsable')),('Fecha',data.get('fecha_arqueo')),('Período',data.get('periodo')),('Saldo inicial',data.get('saldo_inicial')),('Fondo autorizado',data.get('fondo_autorizado')),('Total compras',data.get('total_compras')),('Saldo teórico',data.get('saldo_teorico')),('Efectivo físico',data.get('efectivo_fisico')),('Diferencia',data.get('diferencia')),('Resultado',data.get('resultado')),('Estado',data.get('workflow_status')),('Preparado por',data.get('preparado_por')),('Revisado por',data.get('revisado_por')),('Observaciones',data.get('observaciones'))]
+    datos=[('Empresa',data.get('empresa')),('NIT',data.get('nit')),('Caja',data.get('caja')),('Responsable',data.get('responsable')),('Fecha',data.get('fecha_arqueo')),('Período',data.get('periodo')),('Saldo inicial',data.get('saldo_inicial')),('Fondo autorizado',data.get('fondo_autorizado')),('Total compras',data.get('total_compras')),('Saldo teórico',data.get('saldo_teorico')),('Efectivo físico',data.get('efectivo_fisico')),('Diferencia',data.get('diferencia')),('Resultado',data.get('resultado')),('Estado',data.get('workflow_status')),('Preparado por',nombre_persona(data,'preparado_por','preparado_por_nombre')),('Revisado por',nombre_persona(data,'revisado_por','revisado_por_nombre')),('Observaciones',data.get('observaciones'))]
     for k,v in datos: ws.append([k,v])
     ws.append([]); ws.append(['DETALLE DE COMPRAS']); ws.append(['N°','Fecha','Proveedor','Concepto','Factura/Soporte','Forma de pago','Valor compra','IVA/otros','Total pagado','Observaciones'])
     for r in data.get('compras',[]): ws.append(list(r))
@@ -1188,19 +1291,42 @@ def generar_excel_caja_reporte(data):
 
 
 def generar_pdf_caja_reporte(data):
-    bio=io.BytesIO(); doc=SimpleDocTemplate(bio,pagesize=portrait(letter),rightMargin=30,leftMargin=30,topMargin=30,bottomMargin=30)
-    styles=getSampleStyleSheet(); story=[Paragraph('REPORTE DE CUADRE DE CAJA',styles['Title']),Spacer(1,12)]
-    resumen=[['Campo','Valor'],['Empresa',data.get('empresa','')],['Caja',data.get('caja','')],['Responsable',data.get('responsable','')],['Fecha',data.get('fecha_arqueo','')],['Período',data.get('periodo','')],['Saldo inicial',formatear_moneda(data.get('saldo_inicial',0))],['Total compras',formatear_moneda(data.get('total_compras',0))],['Saldo teórico',formatear_moneda(data.get('saldo_teorico',0))],['Efectivo físico',formatear_moneda(data.get('efectivo_fisico',0))],['Diferencia',formatear_moneda(data.get('diferencia',0))],['Resultado',data.get('resultado','')],['Estado',data.get('workflow_status','')],['Observaciones',data.get('observaciones','')]]
-    t=Table(resumen,colWidths=[150,350]); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1F4E78')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.5,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('PADDING',(0,0),(-1,-1),5)])); story.append(t); story.append(Spacer(1,12)); story.append(Paragraph('Detalle de compras',styles['Heading2']))
+    bio=io.BytesIO()
+    doc=SimpleDocTemplate(bio,pagesize=portrait(letter),rightMargin=28,leftMargin=28,topMargin=28,bottomMargin=28)
+    styles=getSampleStyleSheet()
+    title=ParagraphStyle('CajaTitle',parent=styles['Heading1'],fontSize=15,leading=18,textColor=colors.HexColor('#1F4E78'),spaceAfter=2)
+    sub=ParagraphStyle('CajaSub',parent=styles['Normal'],fontSize=8,textColor=colors.HexColor('#666666'))
+    normal=ParagraphStyle('CajaNormal',parent=styles['Normal'],fontSize=8,leading=10)
+    story=[]
+    logo=obtener_logo_empresa(data.get('empresa',''))
+    titulo=Paragraph('<b>INFORME EJECUTIVO<br/>CUADRE DE CAJA</b>',title)
+    if logo:
+        try:
+            ht=Table([[titulo,Image(io.BytesIO(logo),width=72,height=42)]],colWidths=[440,100])
+            ht.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(1,0),(1,0),'RIGHT')]))
+            story.append(ht)
+        except Exception: story.append(titulo)
+    else: story.append(titulo)
+    story.append(Paragraph(f"{data.get('empresa','')} · NIT {data.get('nit','')} · Período {data.get('periodo','')}",sub)); story.append(Spacer(1,10))
+    resumen=[['ESTADO',data.get('workflow_status','')],['RESULTADO',data.get('resultado','')],['SALDO INICIAL',formatear_moneda(data.get('saldo_inicial',0))],['TOTAL COMPRAS',formatear_moneda(data.get('total_compras',0))],['SALDO TEÓRICO',formatear_moneda(data.get('saldo_teorico',0))],['EFECTIVO FÍSICO',formatear_moneda(data.get('efectivo_fisico',0))],['DIFERENCIA',formatear_moneda(data.get('diferencia',0))]]
+    t=Table(resumen,colWidths=[180,360]); t.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#EAF2F8')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#C9C9C9')),('ALIGN',(1,2),(1,-1),'RIGHT'),('PADDING',(0,0),(-1,-1),6)])); story.append(t); story.append(Spacer(1,10))
+    info=[['Empresa',data.get('empresa',''),'NIT',data.get('nit','')],['Caja',data.get('caja',''),'Responsable',data.get('responsable','')],['Fecha del arqueo',data.get('fecha_arqueo',''),'Fecha de creación',data.get('fecha_creacion','')],['Fecha de revisión',data.get('fecha_revision',''),'Fondo autorizado',formatear_moneda(data.get('fondo_autorizado',0))]]
+    ti=Table(info,colWidths=[95,175,95,175]); ti.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#F4F4F4')),('BACKGROUND',(2,0),(2,-1),colors.HexColor('#F4F4F4')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('FONTNAME',(2,0),(2,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#D9D9D9')),('PADDING',(0,0),(-1,-1),5)])); story.append(ti)
+    story.append(Spacer(1,10)); story.append(Paragraph('Detalle ejecutivo de compras',styles['Heading2']))
     compras=[['N°','Fecha','Proveedor','Concepto','Valor','IVA/otros','Total']]
     for r in data.get('compras',[]): compras.append([str(r[0]),str(r[1]),str(r[2]),str(r[3]),formatear_moneda(r[6]),formatear_moneda(r[7]),formatear_moneda(r[8])])
     if len(compras)>1:
-        t2=Table(compras,colWidths=[25,55,95,145,65,65,65]); t2.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#5B9BD5')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.4,colors.grey),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP')])); story.append(t2)
-    story.append(Spacer(1,12)); story.append(Paragraph('Conteo físico de efectivo',styles['Heading2']))
+        t2=Table(compras,colWidths=[25,55,95,145,65,65,65]); t2.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1F4E78')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#C9C9C9')),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP'),('PADDING',(0,0),(-1,-1),4)])); story.append(t2)
+    story.append(Spacer(1,10)); story.append(Paragraph('Conteo físico de efectivo',styles['Heading2']))
     ef=[['Tipo','Denominación','Cantidad','Valor total']]+[[str(r[0]),formatear_moneda(r[1]),str(r[2]),formatear_moneda(r[3])] for r in data.get('efectivo',[])]
     if len(ef)>1:
-        t3=Table(ef,colWidths=[100,100,80,120]); t3.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#5B9BD5')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.4,colors.grey),('FONTSIZE',(0,0),(-1,-1),8)])); story.append(t3)
-    doc.build(story); return bio.getvalue()
+        t3=Table(ef,colWidths=[100,100,80,120]); t3.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1F4E78')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#C9C9C9')),('FONTSIZE',(0,0),(-1,-1),8)])); story.append(t3)
+    if data.get('observaciones'): story.append(Spacer(1,8)); story.append(Paragraph(f"<b>Observaciones:</b> {data.get('observaciones')}",normal))
+    if data.get('motivo_correccion'): story.append(Spacer(1,5)); story.append(Paragraph(f"<b>Observación del auditor:</b> {data.get('motivo_correccion')}",normal))
+    bloque_firmas_pdf(story,data,normal)
+    story.append(Spacer(1,8)); story.append(Paragraph('<i>Documento generado por el Sistema de Conciliación. La firma del auditor se incorpora únicamente cuando el cuadre queda aprobado.</i>',sub))
+    doc.build(story); bio.seek(0); return bio.getvalue()
+
 
 def obtener_conciliaciones_creditos(empresa_nombre=None):
     try:
@@ -1787,13 +1913,16 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     agregar_tabla_pdf(f"4. {nombres_titulos['t4']}", datos.get("entradas_extracto", []), ["Fecha", "Concepto", "Valor"], ["Fecha", "Concepto", "Valor"], [80, 340, 120])
     agregar_tabla_pdf("GASTOS BANCARIOS", datos.get("gastos_bancarios", []), ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"], ["Fecha", "4x1000", "Cuota", "IVA", "Rte", "Comisión", "Intereses"], [60, 80, 80, 80, 80, 80, 80])
 
-    story.append(Spacer(1, 12))
-    firmas = [
-        [Paragraph(f"<b>Preparado por:</b> {datos.get('preparado_por', 'N/A')}", normal_style), Paragraph(f"<b>Revisado por:</b> {c_data.get('revisado_por_usuario', 'N/A')}", normal_style)]
-    ]
-    t_firmas = Table(firmas, colWidths=[270, 270])
-    t_firmas.setStyle(TableStyle([('LINEABOVE', (0, 0), (-1, -1), 1, colors.HexColor("#1F4E78"))]))
-    story.append(t_firmas)
+    firma_data=dict(datos)
+    firma_data.update({
+        'preparado_por_nombre': datos.get('preparado_por', ''),
+        'revisado_por_nombre': c_data.get('revisado_por_usuario', ''),
+        'revisado_por': c_data.get('revisado_por_usuario', ''),
+        'workflow_status': c_data.get('workflow_status', c_data.get('estado', '')),
+        'fecha_revision': c_data.get('fecha_revision', ''),
+        'fecha_creacion': c_data.get('fecha_elaboracion', '')
+    })
+    bloque_firmas_pdf(story, firma_data, normal_style)
 
     doc.build(story)
     buffer.seek(0)
