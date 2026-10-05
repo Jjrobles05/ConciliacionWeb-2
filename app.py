@@ -888,9 +888,9 @@ def guardar_conciliacion_historial(
             preparado_por=preparado_por,
             fecha_preparacion=datos.get('fecha_preparacion') or ahora,
             revisado_por=datos.get('revisado_por_usuario') or revisado_por,
-            revisado_fecha=datos.get('fecha_revision') or '',
+            fecha_revision=datos.get('fecha_revision') or '',
             aprobado_por=datos.get('aprobado_por_usuario') or '',
-            aprobado_fecha=datos.get('fecha_aprobacion') or ''
+            fecha_aprobacion=datos.get('fecha_aprobacion') or ''
         ))
         estado = datos["estado"]
         fecha_creacion = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1105,7 +1105,7 @@ def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, c
             "estado": "CONCILIACIÓN CORRECTA" if abs(float(resultado_final)) < 0.005 else "CONCILIACIÓN CON DIFERENCIA",
             "preparado_por": preparado_por, "revisado_por": revisado_por,
             "workflow_status": workflow_status,
-            **construir_firmas_conciliacion(preparado_por=preparado_por, fecha_preparacion=payload.get("fecha_preparacion") or ahora, revisado_por=payload.get("revisado_por_usuario") or revisado_por, revisado_fecha=payload.get("fecha_revision") or "", aprobado_por=payload.get("aprobado_por_usuario") or "", aprobado_fecha=payload.get("fecha_aprobacion") or "")
+            **construir_firmas_conciliacion(preparado_por=preparado_por, fecha_preparacion=payload.get("fecha_preparacion") or ahora, revisado_por=payload.get("revisado_por_usuario") or revisado_por, fecha_revision=payload.get("fecha_revision") or "", aprobado_por=payload.get("aprobado_por_usuario") or "", fecha_aprobacion=payload.get("fecha_aprobacion") or "")
         })
         observaciones=json.dumps(payload, ensure_ascii=False)
         fecha_creacion=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
