@@ -5,6 +5,7 @@ import sqlite3
 import hashlib
 import hmac
 import secrets
+import random
 from datetime import datetime
 import pandas as pd
 import streamlit as st
@@ -126,6 +127,21 @@ def inicializar_db():
             observaciones TEXT,
             FOREIGN KEY(empresa_id) REFERENCES empresas(id),
             FOREIGN KEY(cuenta_id) REFERENCES cuentas_bancarias(id)
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS asignaciones_cuentas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            empresa_id INTEGER NOT NULL,
+            cuenta_id INTEGER NOT NULL,
+            usuario_id INTEGER NOT NULL,
+            anio INTEGER NOT NULL,
+            mes INTEGER NOT NULL,
+            fecha_asignacion TEXT NOT NULL,
+            FOREIGN KEY(empresa_id) REFERENCES empresas(id),
+            FOREIGN KEY(cuenta_id) REFERENCES cuentas_bancarias(id),
+            FOREIGN KEY(usuario_id) REFERENCES usuarios(id),
+            UNIQUE(cuenta_id, anio, mes)
         )
     """)
     conn.commit()
@@ -359,29 +375,112 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
     return last_id
 
 
-def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
+def obtener_asignaciones_mes(empresa_id, anio, mes_num):
+    """Devuelve las asignaciones fijas de un mes para una empresa."""
     if not empresa_id:
         return pd.DataFrame()
-    conn = conectar_db()
-    c = conn.cursor()
-    c.execute("SELECT id, nombre FROM usuarios WHERE empresa_id = ? AND activo = 1 AND rol = 'Preparador' ORDER BY id", (int(empresa_id),))
-    usr_rows = c.fetchall()
-    c.execute("SELECT id, banco, numero_cuenta, tipo_cuenta FROM cuentas_bancarias WHERE empresa_id = ? ORDER BY id", (int(empresa_id),))
-    cta_rows = c.fetchall()
-    conn.close()
-    if not cta_rows:
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT a.id, a.cuenta_id, c.banco, c.numero_cuenta, c.tipo_cuenta,
+                   a.usuario_id, u.nombre AS preparador, u.usuario, a.anio, a.mes, a.fecha_asignacion
+            FROM asignaciones_cuentas a
+            JOIN cuentas_bancarias c ON c.id = a.cuenta_id
+            JOIN usuarios u ON u.id = a.usuario_id
+            WHERE a.empresa_id=? AND a.anio=? AND a.mes=?
+            ORDER BY c.banco, c.numero_cuenta
+        """, (int(empresa_id), int(anio), int(mes_num)))
+        rows=c.fetchall()
+        return pd.DataFrame(rows, columns=['id','cuenta_id','banco','numero_cuenta','tipo_cuenta','usuario_id','preparador','usuario','anio','mes','fecha_asignacion'])
+    except Exception:
         return pd.DataFrame()
-    cuentas = pd.DataFrame(cta_rows, columns=['id', 'banco', 'numero_cuenta', 'tipo_cuenta'])
-    if not usr_rows or usuario_id not in [u[0] for u in usr_rows]:
-        return cuentas
-    num_usuarios = len(usr_rows)
-    ids_usuarios = [u[0] for u in usr_rows]
-    cuentas_asignadas = []
-    for idx_cuenta, fila_cuenta in cuentas.iterrows():
-        idx_usuario_asignado = (idx_cuenta + mes_num) % num_usuarios
-        if ids_usuarios[idx_usuario_asignado] == usuario_id:
-            cuentas_asignadas.append(fila_cuenta)
-    return pd.DataFrame(cuentas_asignadas) if cuentas_asignadas else pd.DataFrame(columns=cuentas.columns)
+    finally:
+        conn.close()
+
+
+def contar_asignaciones_mes(empresa_id, anio, mes_num):
+    if not empresa_id:
+        return 0
+    conn=conectar_db(); c=conn.cursor()
+    try:
+        c.execute("SELECT COUNT(*) FROM asignaciones_cuentas WHERE empresa_id=? AND anio=? AND mes=?", (int(empresa_id), int(anio), int(mes_num)))
+        return int(c.fetchone()[0] or 0)
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
+def generar_asignacion_mensual(empresa_id, anio, mes_num):
+    """Genera una sola vez un reparto aleatorio y balanceado; luego queda fijo."""
+    if not empresa_id:
+        return False, "Selecciona una empresa."
+    conn=conectar_db(); c=conn.cursor()
+    try:
+        c.execute("SELECT COUNT(*) FROM asignaciones_cuentas WHERE empresa_id=? AND anio=? AND mes=?", (int(empresa_id), int(anio), int(mes_num)))
+        existentes=int(c.fetchone()[0] or 0)
+        if existentes:
+            return False, "Este mes ya tiene una asignación generada. La asignación quedó fija y no se modificará."
+
+        c.execute("SELECT id, nombre FROM usuarios WHERE empresa_id=? AND activo=1 AND rol='Preparador' ORDER BY id", (int(empresa_id),))
+        preparadores=c.fetchall()
+        c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? ORDER BY id", (int(empresa_id),))
+        cuentas=[int(r[0]) for r in c.fetchall()]
+        if not preparadores:
+            return False, "No hay Preparadores activos asignados a esta empresa."
+        if not cuentas:
+            return False, "No hay cuentas bancarias registradas para esta empresa."
+
+        # Aleatorio en cada generación, procurando repartir las cuentas de forma equilibrada.
+        usuarios=[int(r[0]) for r in preparadores]
+        nombres={int(r[0]):r[1] for r in preparadores}
+        random.SystemRandom().shuffle(usuarios)
+        random.SystemRandom().shuffle(cuentas)
+        fecha=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for idx, cuenta_id in enumerate(cuentas):
+            usuario_id=usuarios[idx % len(usuarios)]
+            c.execute("""INSERT INTO asignaciones_cuentas
+                         (empresa_id, cuenta_id, usuario_id, anio, mes, fecha_asignacion)
+                         VALUES (?,?,?,?,?,?)""",
+                      (int(empresa_id), cuenta_id, usuario_id, int(anio), int(mes_num), fecha))
+        conn.commit()
+        resumen={uid:0 for uid in usuarios}
+        for idx in range(len(cuentas)):
+            resumen[usuarios[idx % len(usuarios)]] += 1
+        detalle=', '.join(f"{nombres[uid]}: {resumen[uid]}" for uid in usuarios)
+        return True, f"Asignación generada correctamente y quedó fija para {mes_num:02d}/{anio}. {detalle}."
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible generar la asignación: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
+
+def obtener_cuentas_rotadas_por_usuario(empresa_id, anio, mes_num, usuario_id):
+    """Para Preparadores devuelve SOLO sus cuentas asignadas en el mes. Para otros roles devuelve todas."""
+    if not empresa_id:
+        return pd.DataFrame()
+    conn=conectar_db(); c=conn.cursor()
+    try:
+        c.execute("SELECT rol FROM usuarios WHERE id=?", (int(usuario_id),))
+        fila=c.fetchone()
+        rol_usuario=fila[0] if fila else None
+        if rol_usuario != 'Preparador':
+            c.execute("SELECT id, banco, numero_cuenta, tipo_cuenta FROM cuentas_bancarias WHERE empresa_id=? ORDER BY id", (int(empresa_id),))
+        else:
+            c.execute("""SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta
+                         FROM asignaciones_cuentas a
+                         JOIN cuentas_bancarias c ON c.id=a.cuenta_id
+                         WHERE a.empresa_id=? AND a.anio=? AND a.mes=? AND a.usuario_id=?
+                         ORDER BY c.banco, c.numero_cuenta""",
+                      (int(empresa_id), int(anio), int(mes_num), int(usuario_id)))
+        rows=c.fetchall()
+        return pd.DataFrame(rows, columns=['id','banco','numero_cuenta','tipo_cuenta'])
+    except Exception:
+        return pd.DataFrame()
+    finally:
+        conn.close()
 
 
 def parsear_texto_pegado(texto, columnas_esperadas):
@@ -1603,6 +1702,38 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                     st.success("Cuenta guardada exitosamente.")
                     st.rerun()
 
+        st.divider()
+        st.subheader("🎲 Asignación mensual de conciliaciones")
+        st.caption("Tú decides cuándo repartir. El reparto es aleatorio, equilibrado y queda fijo para el mes seleccionado.")
+        if empresas_df.empty:
+            st.warning("Primero debes registrar una empresa.")
+        else:
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                emp_asig = st.selectbox("Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0], key="asig_empresa")
+            with col_b:
+                mes_asig = st.selectbox("Mes", list(range(1,13)), index=datetime.now().month-1, format_func=lambda x: ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"][x-1], key="asig_mes")
+            with col_c:
+                anio_asig = st.number_input("Año", value=datetime.now().year, step=1, key="asig_anio")
+
+            asignaciones_df = obtener_asignaciones_mes(emp_asig, anio_asig, mes_asig)
+            if asignaciones_df.empty:
+                st.info("📌 Este mes todavía no tiene asignación. Presiona el botón para realizar el reparto aleatorio.")
+                confirmar_asig = st.checkbox("Entiendo que el reparto quedará fijo para este mes", key="confirmar_asignacion_mes")
+                if st.button("🎲 ASIGNAR CONCILIACIONES DEL MES", type="primary", disabled=not confirmar_asig, use_container_width=True):
+                    ok, mensaje = generar_asignacion_mensual(emp_asig, anio_asig, mes_asig)
+                    if ok:
+                        st.success(mensaje)
+                        st.rerun()
+                    else:
+                        st.error(mensaje)
+            else:
+                st.success("🔒 Este mes ya está asignado. Las cuentas quedan fijas para los Preparadores.")
+                st.dataframe(asignaciones_df[["banco","numero_cuenta","tipo_cuenta","preparador"]], use_container_width=True, hide_index=True, column_config={
+                    "banco":"Banco", "numero_cuenta":"Cuenta / Tarjeta", "tipo_cuenta":"Tipo", "preparador":"Preparador asignado"
+                })
+
+    st.subheader("🏦 Cuentas registradas")
     st.dataframe(obtener_cuentas(empresa_activa_id), use_container_width=True, hide_index=True)
 
 elif menu_seleccionado == "📝 Nueva Conciliación":
@@ -1692,7 +1823,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 st.text_input("Cuenta / Tarjeta", value=cuenta, disabled=True)
                 st.text_input("Tipo", value=tipo, disabled=True)
             else:
-                cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(empresa_activa_id, mes_num, usuario_actual["id"])
+                cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(empresa_activa_id, anio, mes_num, usuario_actual["id"])
                 if not cuentas_asig_df.empty:
                     st.info("ℹ️ **Cuentas asignadas para tu perfil este mes:**")
                     cta_sel = st.selectbox(
@@ -1704,10 +1835,16 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                     cuenta = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "numero_cuenta"].values[0]
                     tipo = cuentas_asig_df.loc[cuentas_asig_df["id"] == cta_sel, "tipo_cuenta"].values[0]
                 else:
-                    st.warning("No hay cuentas asignadas o registradas para preparadores activos en esta empresa.")
-                    banco = st.text_input("Nombre del Banco", key="form_banco")
-                    cuenta = st.text_input("Número de Cuenta", key="form_cuenta")
-                    tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"])
+                    if rol_actual == "Preparador":
+                        st.error("🔒 No tienes cuentas asignadas para este mes. Solicita al Administrador que realice la asignación mensual.")
+                        banco = ""
+                        cuenta = ""
+                        tipo = "Cuenta de ahorros"
+                    else:
+                        st.info("No hay cuentas registradas para esta empresa.")
+                        banco = st.text_input("Nombre del Banco", key="form_banco")
+                        cuenta = st.text_input("Número de Cuenta", key="form_cuenta")
+                        tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"])
 
     with col_logo_emp:
         logo_bytes = obtener_logo_empresa(empresa)
