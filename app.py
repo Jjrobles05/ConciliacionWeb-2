@@ -1113,10 +1113,13 @@ def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, c
         # por empresa + cuenta + período. Si no viene un id de edición, reutilizamos la
         # conciliación existente de ese período en lugar de provocar un IntegrityError.
         if not id_edicion:
+            # Buscar también con TRIM/LOWER porque en bases antiguas el período
+            # puede haber quedado con espacios o distinta capitalización.
             c.execute("""SELECT id FROM conciliaciones
-                         WHERE empresa_id=? AND cuenta_id=? AND periodo=?
+                         WHERE empresa_id=? AND cuenta_id=?
+                           AND LOWER(TRIM(periodo))=LOWER(TRIM(?))
                          ORDER BY id DESC LIMIT 1""",
-                      (empresa_id, cuenta_id, str(mes)))
+                      (int(empresa_id), int(cuenta_id), str(mes)))
             existente = c.fetchone()
             if existente:
                 id_edicion = int(existente[0])
@@ -1128,12 +1131,34 @@ def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, c
                        preparado_por or None, revisado_por or None, fecha_creacion, workflow_status, observaciones, int(id_edicion)))
             last_id=int(id_edicion)
         else:
-            c.execute("""INSERT INTO conciliaciones (empresa_id, cuenta_id, periodo, saldo_libro, saldo_banco, estado,
-                         preparado_por, revisado_por, fecha_creacion, dictamen, observaciones)
-                         VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                      (empresa_id, cuenta_id, mes, float(saldo_libros), float(saldo_extracto), payload["estado"],
-                       preparado_por or None, revisado_por or None, fecha_creacion, workflow_status, observaciones))
-            last_id=int(c.lastrowid)
+            try:
+                c.execute("""INSERT INTO conciliaciones (empresa_id, cuenta_id, periodo, saldo_libro, saldo_banco, estado,
+                             preparado_por, revisado_por, fecha_creacion, dictamen, observaciones)
+                             VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                          (empresa_id, cuenta_id, mes, float(saldo_libros), float(saldo_extracto), payload["estado"],
+                           preparado_por or None, revisado_por or None, fecha_creacion, workflow_status, observaciones))
+                last_id=int(c.lastrowid)
+            except Exception as exc:
+                # Algunas versiones de la BD tienen una restricción UNIQUE que
+                # no está declarada en el código actual. Si Turso rechaza el INSERT,
+                # recuperamos la conciliación existente del mismo crédito/período
+                # y la actualizamos en lugar de perder el borrador.
+                c.execute("""SELECT id FROM conciliaciones
+                             WHERE empresa_id=? AND cuenta_id=?
+                               AND LOWER(TRIM(periodo))=LOWER(TRIM(?))
+                             ORDER BY id DESC LIMIT 1""",
+                          (int(empresa_id), int(cuenta_id), str(mes)))
+                existente = c.fetchone()
+                if existente:
+                    last_id=int(existente[0])
+                    c.execute("""UPDATE conciliaciones SET empresa_id=?, cuenta_id=?, periodo=?, saldo_libro=?, saldo_banco=?,
+                                 estado=?, preparado_por=?, revisado_por=?, fecha_creacion=?, dictamen=?, observaciones=? WHERE id=?""",
+                              (empresa_id, cuenta_id, mes, float(saldo_libros), float(saldo_extracto), payload["estado"],
+                               preparado_por or None, revisado_por or None, fecha_creacion, workflow_status, observaciones, last_id))
+                else:
+                    # No hay registro previo que pueda explicar el conflicto.
+                    # Conservamos el error original para que Turso lo reporte en logs.
+                    raise exc
         conn.commit(); return last_id
     except Exception:
         try: conn.rollback()
