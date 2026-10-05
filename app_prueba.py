@@ -33,18 +33,10 @@ st.set_page_config(
 # 2. CONEXIÓN TURSO / SQLITE
 # ==========================================
 def conectar_db():
-    """
-    Conecta directamente a Turso cuando existen los Secrets
-    TURSO_DATABASE_URL y TURSO_AUTH_TOKEN.
-
-    Si los Secrets no están configurados, utiliza SQLite local
-    como respaldo para desarrollo.
-    """
     if "TURSO_DATABASE_URL" in st.secrets and "TURSO_AUTH_TOKEN" in st.secrets:
         url = str(st.secrets["TURSO_DATABASE_URL"]).strip()
         token = str(st.secrets["TURSO_AUTH_TOKEN"]).strip()
 
-        # Turso Serverless utiliza HTTPS para el acceso remoto.
         if url.startswith("libsql://"):
             url = "https://" + url[len("libsql://"): ]
 
@@ -71,7 +63,6 @@ def conectar_db():
 # 3. CREACIÓN Y ESTRUCTURA DE TABLAS
 # ==========================================
 def inicializar_db():
-    """Crea únicamente las tablas si no existen usando el esquema Turso actual."""
     conn = conectar_db()
     c = conn.cursor()
     c.execute("""
@@ -81,7 +72,6 @@ def inicializar_db():
             razon_social TEXT NOT NULL
         )
     """)
-    # Agrega el campo de logo si la tabla empresas ya existía sin él.
     try:
         c.execute("ALTER TABLE empresas ADD COLUMN logo BLOB")
     except Exception:
@@ -186,12 +176,10 @@ def inicializar_db():
             FOREIGN KEY (arqueo_id) REFERENCES arqueos_caja(id)
         )
     """)
-    # Migración segura: versiones anteriores de la app pueden no tener cuenta_id en créditos.
     try:
         c.execute("ALTER TABLE creditos ADD COLUMN cuenta_id INTEGER")
     except Exception:
         pass
-    # Maestro único: cada elemento por conciliar se clasifica como Bancaria, Caja o Crédito.
     try:
         c.execute("ALTER TABLE cuentas_bancarias ADD COLUMN tipo_conciliacion TEXT NOT NULL DEFAULT 'Bancaria'")
     except Exception:
@@ -200,8 +188,6 @@ def inicializar_db():
         c.execute("ALTER TABLE cajas ADD COLUMN cuenta_id INTEGER")
     except Exception:
         pass
-    # Registros creados en versiones anteriores: si una cuenta ya está ligada a un crédito/caja,
-    # la clasificamos automáticamente en el maestro único.
     try:
         c.execute("""UPDATE cuentas_bancarias SET tipo_conciliacion='Crédito'
                      WHERE id IN (SELECT cuenta_id FROM creditos WHERE cuenta_id IS NOT NULL)""")
@@ -212,7 +198,6 @@ def inicializar_db():
                      WHERE id IN (SELECT cuenta_id FROM cajas WHERE cuenta_id IS NOT NULL)""")
     except Exception:
         pass
-    # Las cuentas existentes sin relación especializada pertenecen a la conciliación bancaria.
     try:
         c.execute("UPDATE cuentas_bancarias SET tipo_conciliacion='Bancaria' WHERE tipo_conciliacion IS NULL OR TRIM(tipo_conciliacion)=''")
     except Exception:
@@ -254,7 +239,6 @@ def obtener_empresa_por_id(empresa_id):
 
 
 def obtener_logo_empresa(nombre_empresa):
-    """Obtiene el logo BLOB de la empresa para mostrarlo en la app y reportes."""
     if not nombre_empresa:
         return None
     try:
@@ -271,7 +255,6 @@ def obtener_logo_empresa(nombre_empresa):
 
 
 def guardar_empresa(nombre, nit, logo_bytes=None):
-    """Registra una empresa y controla NIT duplicado sin mostrar errores técnicos."""
     nombre = str(nombre or "").strip()
     nit = str(nit or "").strip()
     if not nombre or not nit:
@@ -292,7 +275,6 @@ def guardar_empresa(nombre, nit, logo_bytes=None):
         return False, f"No fue posible registrar la empresa: {type(e).__name__}: {e}"
     finally:
         conn.close()
-
 
 
 def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
@@ -316,7 +298,6 @@ def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
         return False, f"No fue posible actualizar la empresa: {type(e).__name__}: {e}"
     finally:
         conn.close()
-
 
 
 def eliminar_empresa_db(empresa_id):
@@ -357,7 +338,6 @@ def eliminar_empresa_db(empresa_id):
         conn.close()
 
 
-
 def eliminar_conciliacion_db(conciliacion_id):
     conn = conectar_db()
     c = conn.cursor()
@@ -367,7 +347,6 @@ def eliminar_conciliacion_db(conciliacion_id):
 
 
 def limpiar_datos_operativos():
-    """Elimina bancos, cuentas y conciliaciones, conservando empresas y usuarios."""
     conn = conectar_db()
     c = conn.cursor()
     try:
@@ -399,12 +378,6 @@ def limpiar_datos_operativos():
 
 
 def reiniciar_datos_aplicativo():
-    """Elimina todos los datos operativos y deja la aplicación como instalación nueva.
-
-    Conserva la estructura de las tablas y la conexión a Turso/SQLite.
-    Después del borrado no quedan usuarios, por lo que la pantalla inicial
-    permitirá crear nuevamente el primer Administrador.
-    """
     conn = conectar_db()
     c = conn.cursor()
     try:
@@ -469,7 +442,6 @@ def obtener_cuentas(empresa_id=None, tipo_conciliacion=None):
 
 
 def guardar_elemento_conciliacion_db(tipo_conciliacion, empresa_id, usuario_id, datos):
-    """Crea el registro en el maestro único y su registro especializado."""
     tipo = str(tipo_conciliacion).strip()
     conn = conectar_db()
     c = conn.cursor()
@@ -674,14 +646,17 @@ def _json_datos_conciliacion(empresa, nit, mes, fecha_elaboracion, banco, cuenta
                               diferencia_conciliada, resultado_final, salidas_extracto,
                               salidas_libros, entradas_libros, entradas_extracto,
                               gastos_bancarios, preparado_por, revisado_por,
-                              workflow_status):
+                              workflow_status, datos_previos=None):
     def dataframe_a_registros(df):
         limpio = limpiar_dataframe(df)
         if limpio is None or limpio.empty:
             return []
         return json.loads(limpio.to_json(orient="records", date_format="iso"))
+    
     fecha_elaboracion_texto = fecha_elaboracion.isoformat() if hasattr(fecha_elaboracion, "isoformat") else str(fecha_elaboracion)
-    return {
+    
+    res = datos_previos.copy() if datos_previos else {}
+    res.update({
         "empresa": empresa, "nit": nit, "mes": mes,
         "fecha_elaboracion": fecha_elaboracion_texto, "banco": banco,
         "cuenta": cuenta, "tipo": tipo,
@@ -697,7 +672,15 @@ def _json_datos_conciliacion(empresa, nit, mes, fecha_elaboracion, banco, cuenta
         "gastos_bancarios": dataframe_a_registros(gastos_bancarios),
         "preparado_por": preparado_por, "revisado_por": revisado_por,
         "workflow_status": workflow_status,
-    }
+    })
+    
+    # Si viene de una corrección y se envía a revisión, registramos la trazabilidad
+    if workflow_status == "Pendiente de revisión" and res.get("fecha_devolucion"):
+        res["fecha_correccion"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        res["corregido_por"] = preparado_por
+        res["fecha_reenvio"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+    return res
 
 
 def _buscar_empresa_id(c, empresa, nit):
@@ -737,12 +720,20 @@ def guardar_conciliacion_historial(
     try:
         empresa_id = _buscar_empresa_id(c, empresa, nit)
         cuenta_id = _buscar_cuenta_id(c, empresa_id, banco, cuenta, tipo)
+        
+        datos_previos = {}
+        if id_edicion:
+            c.execute("SELECT observaciones FROM conciliaciones WHERE id=?", (int(id_edicion),))
+            r = c.fetchone()
+            if r:
+                datos_previos = _decodificar_observaciones(r[0])
+                
         datos = _json_datos_conciliacion(
             empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
             saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
             resultado_final, salidas_extracto, salidas_libros, entradas_libros,
             entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
-            workflow_status
+            workflow_status, datos_previos=datos_previos
         )
         estado = datos["estado"]
         fecha_creacion = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -885,7 +876,9 @@ def obtener_conciliacion_por_id(id_conciliacion):
             'workflow_status': row[10] or datos.get('workflow_status','Pendiente de revisión'),
             'revisado_por_usuario': row[8] or datos.get('revisado_por_usuario',''),
             'fecha_revision': datos.get('fecha_revision'), 'motivo_correccion': datos.get('motivo_correccion'),
-            'tipo_hallazgo': datos.get('tipo_hallazgo'), 'checklist_json': datos.get('checklist_json')
+            'tipo_hallazgo': datos.get('tipo_hallazgo'), 'checklist_json': datos.get('checklist_json'),
+            'fecha_devolucion': datos.get('fecha_devolucion'), 'fecha_correccion': datos.get('fecha_correccion'),
+            'corregido_por': datos.get('corregido_por'), 'fecha_reenvio': datos.get('fecha_reenvio')
         }
     except Exception:
         return None
@@ -896,8 +889,19 @@ def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, mot
     conn = conectar_db(); c = conn.cursor()
     c.execute("SELECT observaciones FROM conciliaciones WHERE id=?", (int(id_conciliacion),))
     row = c.fetchone(); datos = _decodificar_observaciones(row[0] if row else None)
-    datos.update({'workflow_status': nuevo_estado, 'revisado_por_usuario': revisado_por, 'fecha_revision': fecha_rev,
-                  'motivo_correccion': motivo_correccion, 'tipo_hallazgo': tipo_hallazgo, 'checklist_json': checklist})
+    
+    datos.update({
+        'workflow_status': nuevo_estado, 
+        'revisado_por_usuario': revisado_por, 
+        'fecha_revision': fecha_rev,
+        'motivo_correccion': motivo_correccion, 
+        'tipo_hallazgo': tipo_hallazgo, 
+        'checklist_json': checklist
+    })
+    
+    if nuevo_estado == "Requiere corrección":
+        datos['fecha_devolucion'] = fecha_rev
+        
     c.execute("UPDATE conciliaciones SET revisado_por=?, dictamen=?, observaciones=? WHERE id=?",
               (revisado_por, nuevo_estado, json.dumps(datos,ensure_ascii=False), int(id_conciliacion)))
     conn.commit(); conn.close()
@@ -1074,7 +1078,6 @@ def guardar_arqueo_caja_db(caja_id,empresa_id,fecha_arqueo,periodo,saldo_inicial
     finally: conn.close()
 
 
-
 def obtener_detalle_conciliacion_credito(id_conciliacion):
     try:
         conn=conectar_db(); c=conn.cursor()
@@ -1151,7 +1154,6 @@ def actualizar_estado_caja_auditoria(id_arqueo,nuevo_estado,revisado_por,motivo_
 
 
 def nombre_usuario_por_id(usuario_id):
-    """Devuelve el nombre completo del usuario a partir de su ID."""
     if usuario_id in (None, "", 0, "0"):
         return ""
     try:
@@ -1164,7 +1166,6 @@ def nombre_usuario_por_id(usuario_id):
 
 
 def nombre_persona(data, campo, campo_nombre=None):
-    """Normaliza nombres que pueden estar guardados como texto o como ID."""
     valor=data.get(campo, "")
     if campo_nombre and data.get(campo_nombre):
         return str(data.get(campo_nombre))
@@ -1179,7 +1180,6 @@ def nombre_persona(data, campo, campo_nombre=None):
 
 
 def bloque_firmas_pdf(story, data, normal_style, aprobado=True):
-    """Bloque ejecutivo de firmas: preparado y auditor cuando el registro está aprobado."""
     preparado=nombre_persona(data, 'preparado_por', 'preparado_por_nombre') or 'N/A'
     auditor=nombre_persona(data, 'revisado_por', 'revisado_por_nombre')
     fecha_revision=data.get('fecha_revision','') or ''
@@ -1355,7 +1355,6 @@ def vista_conciliacion_creditos(empresa_activa_id,empresa_activa_nombre,empresas
         empresa_activa_id=int(st.selectbox('Empresa',empresas_df['id'].tolist(),format_func=lambda x: empresas_df.loc[empresas_df['id']==x,'nombre'].values[0],key='credito_empresa'))
         empresa_activa_nombre=empresas_df.loc[empresas_df['id']==empresa_activa_id,'nombre'].values[0]
 
-    # Igual que la conciliación bancaria: la cuenta a conciliar sale del maestro Bancos y Cuentas.
     mes=st.selectbox('Mes',['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'],index=datetime.now().month-1,key='credito_mes')
     anio=st.number_input('Año',value=datetime.now().year,step=1,key='credito_anio')
     mes_num=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'].index(mes)+1
@@ -1366,7 +1365,7 @@ def vista_conciliacion_creditos(empresa_activa_id,empresa_activa_nombre,empresas
     if cuentas_asig_df.empty:
         st.warning('⚠️ No hay cuentas bancarias registradas para esta empresa. Registra primero la cuenta en 🏦 Bancos y Cuentas.')
         return
-    st.info('ℹ️ La cuenta del crédito se selecciona desde 🏦 Bancos y Cuentas, igual que en la conciliación bancaria.')
+    st.info('ℹ️️ La cuenta del crédito se selecciona desde 🏦 Bancos y Cuentas, igual que en la conciliación bancaria.')
     cta_sel=st.selectbox('Cuenta / Tarjeta Registrada',cuentas_asig_df['id'].tolist(),format_func=lambda x: f"{cuentas_asig_df.loc[cuentas_asig_df['id']==x,'banco'].values[0]} - {cuentas_asig_df.loc[cuentas_asig_df['id']==x,'numero_cuenta'].values[0]}",key='credito_cuenta_sel')
     cuenta_fila=cuentas_asig_df[cuentas_asig_df['id']==cta_sel].iloc[0]
     banco_cuenta=str(cuenta_fila['banco'])
@@ -1566,7 +1565,6 @@ rol_actual = usuario_actual["rol"]
 # ==========================================
 empresas_df = obtener_empresas()
 with st.sidebar:
-    # Reservamos este espacio arriba para mostrar el logo de la empresa activa.
     logo_sidebar = st.empty()
 
     st.title("Conciliación Web")
@@ -1591,7 +1589,6 @@ with st.sidebar:
         empresa_activa_id = usuario_actual.get("empresa_id")
         st.info(f"🏢 **Empresa:** {empresa_activa_nombre}")
 
-    # Logo de la empresa activa en lugar del logo genérico de banco.
     logo_empresa_sidebar = None
     if empresa_activa_nombre and empresa_activa_nombre not in ["Todas las empresas", "Sin asignar"]:
         logo_empresa_sidebar = obtener_logo_empresa(empresa_activa_nombre)
@@ -1617,7 +1614,6 @@ with st.sidebar:
 # 8. EXPORTADORES A EXCEL Y PDF
 # ==========================================
 def formatear_moneda(valor):
-    """Formatea valores monetarios en formato colombiano sin alterar el valor numérico interno."""
     try:
         numero = float(valor or 0)
     except (TypeError, ValueError):
@@ -1628,7 +1624,6 @@ def formatear_moneda(valor):
 
 
 def formatear_columna_valor(df, columna="Valor"):
-    """Configura la columna monetaria de un DataFrame para edición/visualización sin convertirla a texto."""
     if df is None or df.empty or columna not in df.columns:
         return df
     resultado = df.copy()
@@ -1637,7 +1632,6 @@ def formatear_columna_valor(df, columna="Valor"):
 
 
 def config_monetaria(columnas):
-    """Devuelve configuración monetaria para st.data_editor/st.dataframe."""
     config = {}
     for columna in columnas:
         config[columna] = st.column_config.NumberColumn(
@@ -1773,22 +1767,17 @@ def preparar_excel(
 
     fila = escribir_seccion(ws, 3, "INFORMACIÓN GENERAL", 7)
 
-    # Logo de la empresa en el encabezado del Excel.
-    # El logo se recupera desde Turso/SQLite usando la empresa seleccionada.
     logo_bytes = obtener_logo_empresa(empresa)
     if logo_bytes:
         try:
             logo_stream = io.BytesIO(logo_bytes)
             logo_excel = XLImage(logo_stream)
-            # Tamaño visual del logo; Excel conservará la imagen dentro del libro.
             logo_excel.width = 120
             logo_excel.height = 65
             logo_excel.anchor = "E4"
             ws.add_image(logo_excel)
             ws.row_dimensions[4].height = max(ws.row_dimensions[4].height or 15, 50)
         except Exception:
-            # Si el archivo almacenado no es una imagen válida, el Excel se genera
-            # normalmente sin logo y el PDF seguirá usando su propio manejo.
             pass
 
     datos_generales = [
@@ -1932,10 +1921,25 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
 def vista_conciliacion_bancaria(empresa_activa_id, empresa_activa_nombre, empresa_activa_nit, empresas_df, usuario_actual):
         st.title("📝 Captura / Edición de Conciliación Bancaria")
         id_edicion = st.session_state.get("conciliacion_a_editar", None)
+        
         if id_edicion:
             c_edit = obtener_conciliacion_por_id(id_edicion)
             consecutivo_edit_str = f"CONC-{int(id_edicion):06d}"
-            st.info(f"✏️ **Modo Edición Activado:** Editando Conciliación {consecutivo_edit_str} ({c_edit.get('empresa')} - {c_edit.get('banco')})")
+            wf_status = c_edit.get("workflow_status", "")
+
+            # Panel visual de devolución si está en estado 'Requiere corrección'
+            if wf_status == "Requiere corrección":
+                st.error(
+                    f"🔴 **REQUIERE CORRECCIÓN - CONCILIACIÓN {consecutivo_edit_str}**\n\n"
+                    f"• **Devuelta por:** {c_edit.get('revisado_por_usuario', 'Auditor')}\n"
+                    f"• **Fecha de Devolución:** {c_edit.get('fecha_devolucion', 'N/A')}\n"
+                    f"• **Motivo del Hallazgo:** {c_edit.get('tipo_hallazgo', 'General')}\n"
+                    f"• **Observación del Auditor:** {c_edit.get('motivo_correccion', 'Sin detalle especificado')}\n\n"
+                    f"✏️ *Por favor realiza los ajustes necesarios y presiona abajo el botón '📤 Enviar nuevamente a revisión'*."
+                )
+            else:
+                st.info(f"✏️ **Modo Edición Activado:** Editando Conciliación {consecutivo_edit_str} ({c_edit.get('empresa')} - {c_edit.get('banco')})")
+
             if st.button("❌ Cancelar Edición y Crear Nueva"):
                 st.session_state.conciliacion_a_editar = None
                 if "datos_cargados_edit" in st.session_state:
@@ -2211,7 +2215,8 @@ def vista_conciliacion_bancaria(empresa_activa_id, empresa_activa_nombre, empres
                 st.success(f"💾 Conciliación CONC-{int(id_g):06d} guardada como Borrador.")
 
         with btn_col_env:
-            if st.button("🚀 Enviar a Revisión", key="btn_enviar_revision", type="primary"):
+            texto_boton_envio = "📤 Enviar nuevamente a revisión" if (id_edicion and wf_status == "Requiere corrección") else "🚀 Enviar a Revisión"
+            if st.button(texto_boton_envio, key="btn_enviar_revision", type="primary"):
                 id_g = guardar_conciliacion_historial(
                     empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
                     saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
@@ -2573,7 +2578,7 @@ elif menu_seleccionado == "🏢 Empresas":
                             st.rerun()
                 with col_act2:
                     if rol_actual == "Administrador":
-                        if st.button("🗑️️ Eliminar", key=f"btn_del_emp_{emp['id']}"):
+                        if st.button("🗑️ Eliminar", key=f"btn_del_emp_{emp['id']}"):
                             ok, mensaje = eliminar_empresa_db(emp['id'])
                             if ok:
                                 st.success(mensaje)
@@ -2585,9 +2590,6 @@ elif menu_seleccionado == "🏢 Empresas":
 elif menu_seleccionado == "🏦 Bancos y Cuentas":
     st.title("🏦 Maestro de Elementos por Conciliar")
 
-    # ==========================================================
-    # MAESTRO ÚNICO DE ELEMENTOS POR CONCILIAR
-    # ==========================================================
     if rol_actual == "Administrador":
         with st.expander("➕ Registrar nuevo elemento por conciliar", expanded=False):
             tipo_nuevo = st.radio(
@@ -2653,9 +2655,6 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                     else:
                         st.error(res)
 
-    # ==========================================================
-    # ESTADO DE EDICIÓN / ELIMINACIÓN
-    # ==========================================================
     if "cuenta_a_editar" not in st.session_state:
         st.session_state["cuenta_a_editar"] = None
     if "cuenta_a_eliminar" not in st.session_state:
@@ -2706,9 +2705,6 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                             st.session_state["cuenta_a_editar"] = None
                             st.rerun()
 
-    # ==========================================================
-    # FORMULARIO REAL DE EDICIÓN
-    # ==========================================================
     cuenta_edit_id = st.session_state.get("cuenta_a_editar")
 
     if cuenta_edit_id is not None and rol_actual == "Administrador":
@@ -2798,9 +2794,6 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                         else:
                             st.error(mensaje)
 
-    # ==========================================================
-    # CONFIRMACIÓN REAL DE ELIMINACIÓN
-    # ==========================================================
     cuenta_delete_id = st.session_state.get("cuenta_a_eliminar")
 
     if cuenta_delete_id is not None and rol_actual == "Administrador":
@@ -2865,9 +2858,6 @@ elif menu_seleccionado == "📋 Historial":
         "💵 Cuadre de cajas"
     ])
 
-    # ==========================================================
-    # HISTORIAL BANCARIO
-    # ==========================================================
     with tab_b:
         historial = obtener_historial(empresa_activa_nombre)
         filtro_estado_b = st.selectbox(
@@ -2901,6 +2891,7 @@ elif menu_seleccionado == "📋 Historial":
                     if wf_status == "Requiere corrección" and c_data.get("motivo_correccion"):
                         st.error(
                             f"⚠️ **Observaciones del Auditor ({c_data.get('revisado_por_usuario', 'N/A')}):**\n"
+                            f"• **Fecha Devolución:** {c_data.get('fecha_devolucion', 'N/A')}\n"
                             f"• **Categoría:** {c_data.get('tipo_hallazgo', 'General')}\n"
                             f"• **Detalle:** {c_data.get('motivo_correccion')}"
                         )
@@ -2920,7 +2911,7 @@ elif menu_seleccionado == "📋 Historial":
 
                     c_act1, c_act2, c_act3 = st.columns(3)
                     with c_act1:
-                        if st.button("✏️️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
+                        if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
                             st.session_state.conciliacion_a_editar = fila['id']
                             st.session_state.pop("datos_cargados_edit", None)
                             st.session_state.menu_override = "🏦 Conciliación"
@@ -2935,9 +2926,6 @@ elif menu_seleccionado == "📋 Historial":
                         nombre_pdf = f"CONCILIACION_{consecutivo_str}_{limpiar_nombre_archivo(c_data.get('empresa'))}.pdf"
                         st.download_button("📄 Descargar PDF", data=pdf_bytes, file_name=nombre_pdf, mime="application/pdf", key=f"hist_pdf_{fila['id']}")
 
-    # ==========================================================
-    # HISTORIAL DE CRÉDITOS
-    # ==========================================================
     with tab_c:
         hist_creditos = obtener_conciliaciones_creditos(empresa_activa_nombre)
         filtro_estado_c = st.selectbox(
@@ -2993,9 +2981,6 @@ elif menu_seleccionado == "📋 Historial":
                                 key=f"hist_cred_pdf_{cid}"
                             )
 
-    # ==========================================================
-    # HISTORIAL DE CAJAS
-    # ==========================================================
     with tab_k:
         hist_cajas = obtener_arqueos_caja(empresa_activa_nombre)
         filtro_estado_k = st.selectbox(
@@ -3030,7 +3015,7 @@ elif menu_seleccionado == "📋 Historial":
                         m4.metric("Resultado", d.get("resultado", ""))
                         st.write(f"**Responsable:** {d.get('responsable','N/A')} | **Preparado por:** {d.get('preparado_por','N/A')}")
                         if d.get("motivo_correccion"):
-                            st.error(f"⚠️️ Observación del auditor: {d['motivo_correccion']}")
+                            st.error(f"⚠️ Observación del auditor: {d['motivo_correccion']}")
 
                         r1, r2 = st.columns(2)
                         with r1:
