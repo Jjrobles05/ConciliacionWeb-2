@@ -1228,6 +1228,8 @@ def generar_excel_credito_reporte(data):
 
 
 def generar_pdf_credito_reporte(data):
+    # Import local para garantizar que Streamlit tenga Table disponible
+    from reportlab.platypus import Table, TableStyle, Paragraph, Spacer, Image, SimpleDocTemplate
     bio=io.BytesIO()
     doc=SimpleDocTemplate(bio,pagesize=portrait(letter),rightMargin=30,leftMargin=30,topMargin=30,bottomMargin=30)
     styles=getSampleStyleSheet()
