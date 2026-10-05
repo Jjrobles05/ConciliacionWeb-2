@@ -375,6 +375,80 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
     return last_id
 
 
+def preparar_excel_asignaciones(asignaciones_df, empresa, anio, mes_num):
+    """Genera Excel con el reparto mensual fijo de cuentas por Preparador."""
+    workbook = Workbook()
+    ws = workbook.active
+    ws.title = "Asignaciones"
+    meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+    mes_nombre = meses[int(mes_num)-1]
+    ws.merge_cells("A1:E1")
+    ws["A1"] = f"ASIGNACIÓN MENSUAL DE CONCILIACIONES - {mes_nombre.upper()} {anio}"
+    estilo_titulo(ws["A1"], 14)
+    ws["A2"] = "Empresa"
+    ws["B2"] = empresa
+    ws["A2"].font = Font(bold=True)
+    encabezados = ["Banco", "Cuenta / Tarjeta", "Tipo", "Preparador asignado", "Fecha de asignación"]
+    fila = 4
+    for col, encabezado in enumerate(encabezados, 1):
+        celda = ws.cell(row=fila, column=col, value=encabezado)
+        celda.font = Font(bold=True)
+        celda.fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+        celda.alignment = Alignment(horizontal="center")
+    fila += 1
+    for _, r in asignaciones_df.iterrows():
+        valores = [r.get("banco", ""), r.get("numero_cuenta", ""), r.get("tipo_cuenta", ""),
+                   r.get("preparador", ""), r.get("fecha_asignacion", "")]
+        for col, valor in enumerate(valores, 1):
+            ws.cell(row=fila, column=col, value=str(valor or ""))
+        fila += 1
+    for col, ancho in enumerate([22, 24, 22, 28, 22], 1):
+        ws.column_dimensions[chr(64+col)].width = ancho
+    output = io.BytesIO()
+    workbook.save(output)
+    output.seek(0)
+    nombre = f"ASIGNACION_{limpiar_nombre_archivo(empresa)}_{mes_nombre.upper()}_{anio}.xlsx"
+    return output.getvalue(), nombre
+
+
+def generar_pdf_asignaciones(asignaciones_df, empresa, anio, mes_num):
+    """Genera PDF con el reparto mensual fijo de cuentas por Preparador."""
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=portrait(letter), rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    story = []
+    meses = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+             "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+    mes_nombre = meses[int(mes_num)-1]
+    title_style = ParagraphStyle("AsignTitle", parent=styles["Heading1"], alignment=1, fontSize=13, spaceAfter=8)
+    normal = ParagraphStyle("AsignNormal", parent=styles["Normal"], fontSize=8, leading=10)
+    story.append(Paragraph("ASIGNACIÓN MENSUAL DE CONCILIACIONES", title_style))
+    story.append(Paragraph(f"<b>Empresa:</b> {empresa}<br/><b>Periodo:</b> {mes_nombre} {anio}<br/><b>Estado:</b> Asignación fija", normal))
+    story.append(Spacer(1, 10))
+    datos = [["Banco", "Cuenta / Tarjeta", "Tipo", "Preparador"]]
+    for _, r in asignaciones_df.iterrows():
+        datos.append([str(r.get("banco", "")), str(r.get("numero_cuenta", "")),
+                      str(r.get("tipo_cuenta", "")), str(r.get("preparador", ""))])
+    tabla = Table(datos, colWidths=[125, 125, 125, 150], repeatRows=1)
+    tabla.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#1F4E78")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("FONTSIZE", (0,0), (-1,-1), 7),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.HexColor("#D9D9D9")),
+        ("VALIGN", (0,0), (-1,-1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0,1), (-1,-1), [colors.white, colors.HexColor("#F7F7F7")]),
+    ]))
+    story.append(tabla)
+    story.append(Spacer(1, 10))
+    story.append(Paragraph("La asignación fue generada aleatoriamente por el Administrador y queda fija para el periodo indicado.", normal))
+    doc.build(story)
+    buffer.seek(0)
+    nombre = f"ASIGNACION_{limpiar_nombre_archivo(empresa)}_{mes_nombre.upper()}_{anio}.pdf"
+    return buffer.getvalue(), nombre
+
+
 def obtener_asignaciones_mes(empresa_id, anio, mes_num):
     """Devuelve las asignaciones fijas de un mes para una empresa."""
     if not empresa_id:
@@ -1732,6 +1806,13 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                 st.dataframe(asignaciones_df[["banco","numero_cuenta","tipo_cuenta","preparador"]], use_container_width=True, hide_index=True, column_config={
                     "banco":"Banco", "numero_cuenta":"Cuenta / Tarjeta", "tipo_cuenta":"Tipo", "preparador":"Preparador asignado"
                 })
+                excel_asig, nombre_excel_asig = preparar_excel_asignaciones(asignaciones_df, empresas_df.loc[empresas_df["id"] == emp_asig, "nombre"].values[0], anio_asig, mes_asig)
+                pdf_asig, nombre_pdf_asig = generar_pdf_asignaciones(asignaciones_df, empresas_df.loc[empresas_df["id"] == emp_asig, "nombre"].values[0], anio_asig, mes_asig)
+                col_d1, col_d2 = st.columns(2)
+                with col_d1:
+                    st.download_button("📊 Descargar asignación en Excel", data=excel_asig, file_name=nombre_excel_asig, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+                with col_d2:
+                    st.download_button("📄 Descargar asignación en PDF", data=pdf_asig, file_name=nombre_pdf_asig, mime="application/pdf", use_container_width=True)
 
     st.subheader("🏦 Cuentas registradas")
     st.dataframe(obtener_cuentas(empresa_activa_id), use_container_width=True, hide_index=True)
