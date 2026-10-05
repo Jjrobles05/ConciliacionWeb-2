@@ -545,6 +545,99 @@ def generar_asignacion_mensual(empresa_id, anio, mes_num):
         conn.close()
 
 
+def asignar_cuentas_nuevas_mes(empresa_id, anio, mes_num):
+    """Asigna SOLO las cuentas que aún no tienen asignación en el mes.
+    Conserva intactas todas las asignaciones existentes y balancea las nuevas
+    teniendo en cuenta la carga actual de cada Preparador.
+    """
+    if not empresa_id:
+        return False, "Selecciona una empresa."
+
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("SELECT id, nombre FROM usuarios WHERE empresa_id=? AND activo=1 AND rol='Preparador' ORDER BY id",
+                  (int(empresa_id),))
+        preparadores = c.fetchall()
+        if not preparadores:
+            return False, "No hay Preparadores activos asignados a esta empresa."
+
+        c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? ORDER BY id", (int(empresa_id),))
+        cuentas = [int(r[0]) for r in c.fetchall()]
+        if not cuentas:
+            return False, "No hay cuentas bancarias registradas para esta empresa."
+
+        c.execute("SELECT cuenta_id, usuario_id FROM asignaciones_cuentas WHERE empresa_id=? AND anio=? AND mes=?",
+                  (int(empresa_id), int(anio), int(mes_num)))
+        asignadas = c.fetchall()
+        asignadas_ids = {int(r[0]) for r in asignadas}
+        cuentas_nuevas = [cid for cid in cuentas if cid not in asignadas_ids]
+
+        if not cuentas_nuevas:
+            return False, "No hay cuentas nuevas pendientes de asignar para este mes."
+
+        usuarios = [int(r[0]) for r in preparadores]
+        nombres = {int(r[0]): r[1] for r in preparadores}
+        cargas = {uid: 0 for uid in usuarios}
+        for _, usuario_id in asignadas:
+            uid = int(usuario_id)
+            if uid in cargas:
+                cargas[uid] += 1
+
+        # Aleatoriedad solo para desempatar; nunca se redistribuyen las cuentas existentes.
+        rng = random.SystemRandom()
+        rng.shuffle(cuentas_nuevas)
+        fecha = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        resumen_nuevas = {uid: 0 for uid in usuarios}
+
+        for cuenta_id in cuentas_nuevas:
+            min_carga = min(cargas.values())
+            candidatos = [uid for uid in usuarios if cargas[uid] == min_carga]
+            usuario_id = rng.choice(candidatos)
+            c.execute("""INSERT INTO asignaciones_cuentas
+                         (empresa_id, cuenta_id, usuario_id, anio, mes, fecha_asignacion)
+                         VALUES (?,?,?,?,?,?)""",
+                      (int(empresa_id), cuenta_id, usuario_id, int(anio), int(mes_num), fecha))
+            cargas[usuario_id] += 1
+            resumen_nuevas[usuario_id] += 1
+
+        conn.commit()
+        detalle = ', '.join(
+            f"{nombres[uid]}: +{resumen_nuevas[uid]} (total {cargas[uid]})"
+            for uid in usuarios if resumen_nuevas[uid] > 0
+        )
+        return True, (f"Se asignaron {len(cuentas_nuevas)} cuenta(s) nueva(s) para {mes_num:02d}/{anio}. "
+                      f"Las asignaciones anteriores quedaron intactas. {detalle}.")
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False, f"No fue posible asignar las cuentas nuevas: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
+
+def contar_cuentas_sin_asignar_mes(empresa_id, anio, mes_num):
+    if not empresa_id:
+        return 0
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("""
+            SELECT COUNT(*)
+            FROM cuentas_bancarias c
+            WHERE c.empresa_id=?
+              AND NOT EXISTS (
+                  SELECT 1 FROM asignaciones_cuentas a
+                  WHERE a.cuenta_id=c.id AND a.empresa_id=? AND a.anio=? AND a.mes=?
+              )
+        """, (int(empresa_id), int(empresa_id), int(anio), int(mes_num)))
+        return int(c.fetchone()[0] or 0)
+    except Exception:
+        return 0
+    finally:
+        conn.close()
+
+
 def obtener_cuentas_rotadas_por_usuario(empresa_id, anio, mes_num, usuario_id):
     """Para Preparadores devuelve SOLO sus cuentas asignadas en el mes. Para otros roles devuelve todas."""
     if not empresa_id:
@@ -1979,10 +2072,32 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                     else:
                         st.error(mensaje)
             else:
-                st.success("🔒 Este mes ya está asignado. Las cuentas quedan fijas para los Preparadores.")
+                st.success("🔒 Este mes ya está asignado. Las cuentas existentes quedan fijas para los Preparadores.")
                 st.dataframe(asignaciones_df[["banco","numero_cuenta","tipo_cuenta","preparador"]], use_container_width=True, hide_index=True, column_config={
                     "banco":"Banco", "numero_cuenta":"Cuenta / Tarjeta", "tipo_cuenta":"Tipo", "preparador":"Preparador asignado"
                 })
+
+                cuentas_pendientes = contar_cuentas_sin_asignar_mes(emp_asig, anio_asig, mes_asig)
+                if cuentas_pendientes > 0:
+                    st.warning(f"🆕 Hay **{cuentas_pendientes} cuenta(s) nueva(s)** registrada(s) que todavía no tienen asignación para este mes.")
+                    confirmar_nuevas = st.checkbox(
+                        "Entiendo que solo se asignarán las cuentas nuevas y no se modificarán las existentes",
+                        key="confirmar_asignacion_cuentas_nuevas"
+                    )
+                    if st.button(
+                        "🔄 ASIGNAR CUENTAS NUEVAS DEL MES",
+                        type="primary",
+                        disabled=not confirmar_nuevas,
+                        use_container_width=True
+                    ):
+                        ok, mensaje = asignar_cuentas_nuevas_mes(emp_asig, anio_asig, mes_asig)
+                        if ok:
+                            st.success(mensaje)
+                            st.rerun()
+                        else:
+                            st.error(mensaje)
+                else:
+                    st.info("✅ Todas las cuentas registradas ya tienen asignación para este mes.")
 
     st.subheader("🏦 Cuentas registradas")
     cuentas_reg = obtener_cuentas(empresa_activa_id)
