@@ -375,6 +375,50 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
     return last_id
 
 
+def actualizar_cuenta_db(cuenta_id, banco, numero_cuenta, tipo_cuenta, empresa_id):
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("UPDATE cuentas_bancarias SET banco=?, numero_cuenta=?, tipo_cuenta=?, empresa_id=? WHERE id=?",
+                  (str(banco).strip(), str(numero_cuenta).strip(), str(tipo_cuenta), empresa_id, int(cuenta_id)))
+        if c.rowcount == 0:
+            return False, "No se encontró la cuenta para actualizar."
+        conn.commit()
+        return True, "Cuenta actualizada correctamente."
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible actualizar la cuenta: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
+
+def eliminar_cuenta_db(cuenta_id):
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("SELECT banco, numero_cuenta FROM cuentas_bancarias WHERE id=?", (int(cuenta_id),))
+        fila = c.fetchone()
+        if not fila:
+            return False, "La cuenta no existe."
+        c.execute("SELECT COUNT(*) FROM conciliaciones WHERE cuenta_id=?", (int(cuenta_id),))
+        conciliaciones = int(c.fetchone()[0] or 0)
+        c.execute("SELECT COUNT(*) FROM asignaciones_cuentas WHERE cuenta_id=?", (int(cuenta_id),))
+        asignaciones = int(c.fetchone()[0] or 0)
+        if conciliaciones or asignaciones:
+            partes=[]
+            if conciliaciones: partes.append(f"{conciliaciones} conciliación(es)")
+            if asignaciones: partes.append(f"{asignaciones} asignación(es) mensuales")
+            return False, "No se puede eliminar esta cuenta porque tiene " + " y ".join(partes) + "."
+        c.execute("DELETE FROM cuentas_bancarias WHERE id=?", (int(cuenta_id),))
+        conn.commit()
+        return True, f"Cuenta {fila[0]} - {fila[1]} eliminada correctamente."
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible eliminar la cuenta: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
+
 def obtener_asignaciones_mes(empresa_id, anio, mes_num):
     """Devuelve las asignaciones fijas de un mes para una empresa."""
     if not empresa_id:
@@ -1888,7 +1932,75 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                 })
 
     st.subheader("🏦 Cuentas registradas")
-    st.dataframe(obtener_cuentas(empresa_activa_id), use_container_width=True, hide_index=True)
+    cuentas_reg = obtener_cuentas(empresa_activa_id)
+    cuenta_edit_id = st.session_state.get("cuenta_a_editar")
+
+    if cuenta_edit_id:
+        cuenta_obj = cuentas_reg[cuentas_reg["id"] == cuenta_edit_id]
+        if not cuenta_obj.empty:
+            fila = cuenta_obj.iloc[0]
+            st.info(f"✏️ **Editando:** {fila['banco']} - {fila['numero_cuenta']}")
+            with st.form("form_editar_cuenta"):
+                e_banco = st.text_input("Banco", value=str(fila["banco"]))
+                e_num = st.text_input("Número de Cuenta / Tarjeta", value=str(fila["numero_cuenta"]))
+                e_tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito", "Caja", "Crédito bancario"], index=["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito", "Caja", "Crédito bancario"].index(str(fila["tipo_cuenta"])) if str(fila["tipo_cuenta"]) in ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito", "Caja", "Crédito bancario"] else 0)
+                e_emp = st.selectbox("Empresa", empresas_df["id"].tolist(), index=empresas_df["id"].tolist().index(int(fila["empresa_id"])) if not empresas_df.empty and int(fila["empresa_id"]) in empresas_df["id"].tolist() else 0, format_func=lambda x: empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0]) if not empresas_df.empty else None
+                ca, cc = st.columns(2)
+                with ca:
+                    guardar_edit = st.form_submit_button("💾 Guardar cambios", type="primary")
+                with cc:
+                    cancelar_edit = st.form_submit_button("❌ Cancelar")
+                if guardar_edit:
+                    if not e_banco.strip() or not e_num.strip():
+                        st.error("Banco y número de cuenta/tarjeta son obligatorios.")
+                    else:
+                        ok, mensaje = actualizar_cuenta_db(cuenta_edit_id, e_banco, e_num, e_tipo, e_emp)
+                        if ok:
+                            st.session_state.pop("cuenta_a_editar", None)
+                            st.success(mensaje)
+                            st.rerun()
+                        else:
+                            st.error(mensaje)
+                elif cancelar_edit:
+                    st.session_state.pop("cuenta_a_editar", None)
+                    st.rerun()
+            st.divider()
+
+    cuentas_reg = obtener_cuentas(empresa_activa_id)
+    if cuentas_reg.empty:
+        st.info("No hay cuentas registradas para esta empresa.")
+    else:
+        for _, cuenta_fila in cuentas_reg.iterrows():
+            c1, c2, c3, c4, c5 = st.columns([1.6, 2.2, 2.0, 1.2, 1.2])
+            with c1: st.write(f"**{cuenta_fila['banco']}**")
+            with c2: st.write(str(cuenta_fila['numero_cuenta']))
+            with c3: st.write(str(cuenta_fila['tipo_cuenta']))
+            with c4:
+                if st.button("✏️ Editar", key=f"editar_cuenta_{cuenta_fila['id']}"):
+                    st.session_state.cuenta_a_editar = int(cuenta_fila['id'])
+                    st.rerun()
+            with c5:
+                if st.button("🗑️ Eliminar", key=f"eliminar_cuenta_{cuenta_fila['id']}"):
+                    st.session_state.cuenta_a_eliminar = int(cuenta_fila['id'])
+                    st.rerun()
+
+            if st.session_state.get("cuenta_a_eliminar") == int(cuenta_fila['id']):
+                st.warning(f"⚠️ Vas a eliminar **{cuenta_fila['banco']} - {cuenta_fila['numero_cuenta']}**. Esta acción no se puede deshacer.")
+                x1, x2 = st.columns(2)
+                with x1:
+                    if st.button("✅ Sí, eliminar", key=f"confirmar_eliminar_cuenta_{cuenta_fila['id']}", type="primary"):
+                        ok, mensaje = eliminar_cuenta_db(int(cuenta_fila['id']))
+                        st.session_state.pop("cuenta_a_eliminar", None)
+                        if ok:
+                            st.success(mensaje)
+                            st.rerun()
+                        else:
+                            st.error(mensaje)
+                with x2:
+                    if st.button("❌ Cancelar", key=f"cancelar_eliminar_cuenta_{cuenta_fila['id']}"):
+                        st.session_state.pop("cuenta_a_eliminar", None)
+                        st.rerun()
+            st.divider()
 
 elif menu_seleccionado == "📝 Nueva Conciliación":
     st.title("📝 Captura / Edición de Conciliación Bancaria")
