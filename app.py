@@ -97,6 +97,27 @@ def inicializar_db():
             FOREIGN KEY(empresa_id) REFERENCES empresas(id)
         )
     """)
+    # Información específica de los créditos bancarios.
+    # Se crea de forma compatible con instalaciones existentes.
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS creditos (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            empresa_id INTEGER NOT NULL,
+            cuenta_id INTEGER NOT NULL,
+            entidad_financiera TEXT NOT NULL,
+            numero_credito TEXT NOT NULL,
+            descripcion TEXT,
+            fecha_inicio TEXT,
+            fecha_vencimiento TEXT,
+            tasa_interes TEXT,
+            activo INTEGER NOT NULL DEFAULT 1,
+            fecha_creacion TEXT NOT NULL,
+            creado_por INTEGER,
+            FOREIGN KEY(empresa_id) REFERENCES empresas(id),
+            FOREIGN KEY(cuenta_id) REFERENCES cuentas_bancarias(id),
+            UNIQUE(empresa_id, numero_credito)
+        )
+    """)
     c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -364,15 +385,62 @@ def obtener_cuentas(empresa_id=None):
     return pd.DataFrame(columns=['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre'])
 
 
-def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
-    conn = conectar_db()
-    c = conn.cursor()
-    c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id) VALUES (?, ?, ?, ?)",
-              (banco.strip(), numero_cuenta.strip(), tipo_cuenta, empresa_id))
-    conn.commit()
-    last_id = c.lastrowid
-    conn.close()
-    return last_id
+def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id, datos_credito=None, usuario_id=None):
+    """Guarda una cuenta y, si es Crédito bancario, crea también su registro de crédito."""
+    banco = str(banco or "").strip()
+    numero_cuenta = str(numero_cuenta or "").strip()
+    tipo_cuenta = str(tipo_cuenta or "").strip()
+    if not banco or not numero_cuenta or not empresa_id:
+        raise ValueError("Banco, número de cuenta y empresa son obligatorios.")
+
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? AND banco=? AND numero_cuenta=?",
+                  (int(empresa_id), banco, numero_cuenta))
+        existente = c.fetchone()
+        if existente:
+            cuenta_id = int(existente[0])
+            c.execute("UPDATE cuentas_bancarias SET tipo_cuenta=? WHERE id=?", (tipo_cuenta, cuenta_id))
+        else:
+            c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id) VALUES (?, ?, ?, ?)",
+                      (banco, numero_cuenta, tipo_cuenta, int(empresa_id)))
+            cuenta_id = int(c.lastrowid)
+
+        if tipo_cuenta == "Crédito bancario":
+            datos_credito = datos_credito or {}
+            entidad = str(datos_credito.get("entidad_financiera") or banco).strip()
+            numero_credito = str(datos_credito.get("numero_credito") or numero_cuenta).strip()
+            descripcion = str(datos_credito.get("descripcion") or "").strip()
+            fecha_inicio = str(datos_credito.get("fecha_inicio") or "")
+            fecha_vencimiento = str(datos_credito.get("fecha_vencimiento") or "")
+            tasa_interes = str(datos_credito.get("tasa_interes") or "").strip()
+            if not entidad or not numero_credito:
+                raise ValueError("La entidad financiera y el número de crédito son obligatorios.")
+
+            c.execute("SELECT id FROM creditos WHERE empresa_id=? AND numero_credito=?",
+                      (int(empresa_id), numero_credito))
+            credito_existente = c.fetchone()
+            if credito_existente:
+                c.execute("""UPDATE creditos SET cuenta_id=?, entidad_financiera=?, descripcion=?,
+                             fecha_inicio=?, fecha_vencimiento=?, tasa_interes=?, activo=1, creado_por=?
+                             WHERE id=?""",
+                          (cuenta_id, entidad, descripcion, fecha_inicio, fecha_vencimiento, tasa_interes, usuario_id, int(credito_existente[0])))
+            else:
+                c.execute("""INSERT INTO creditos
+                             (empresa_id, cuenta_id, entidad_financiera, numero_credito, descripcion,
+                              fecha_inicio, fecha_vencimiento, tasa_interes, activo, fecha_creacion, creado_por)
+                             VALUES (?,?,?,?,?,?,?,?,1,?,?)""",
+                          (int(empresa_id), cuenta_id, entidad, numero_credito, descripcion,
+                           fecha_inicio, fecha_vencimiento, tasa_interes, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), usuario_id))
+
+        conn.commit()
+        return cuenta_id
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        raise
+    finally:
+        conn.close()
 
 
 def actualizar_cuenta_db(cuenta_id, banco, numero_cuenta, tipo_cuenta, empresa_id):
@@ -1889,16 +1957,51 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
     if rol_actual == "Administrador":
         with st.expander("➕ Registrar nueva cuenta bancaria"):
             with st.form("form_cuenta_maestro"):
-                banco = st.text_input("Banco")
-                num = st.text_input("Número de Cuenta / Tarjeta")
+                banco = st.text_input("Banco / Entidad financiera")
+                num = st.text_input("Número de Cuenta / Tarjeta / Crédito")
                 tipo = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito", "Caja", "Crédito bancario"])
                 emp_id = None
                 if not empresas_df.empty:
                     emp_id = st.selectbox("Asociar a Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0])
-                if st.form_submit_button("Guardar Cuenta", type="primary"):
-                    guardar_cuenta(banco, num, tipo, emp_id)
-                    st.success("Cuenta guardada exitosamente.")
-                    st.rerun()
+
+                credito_form = {}
+                if tipo == "Crédito bancario":
+                    st.markdown("### 💰 Datos del crédito bancario")
+                    cr1, cr2 = st.columns(2)
+                    with cr1:
+                        entidad_financiera = st.text_input("Entidad financiera", value=banco, key="nuevo_credito_entidad")
+                        numero_credito = st.text_input("Número de crédito", value=num, key="nuevo_credito_numero")
+                        fecha_inicio = st.date_input("Fecha de inicio", key="nuevo_credito_inicio")
+                    with cr2:
+                        descripcion_credito = st.text_input("Descripción del crédito", key="nuevo_credito_descripcion")
+                        fecha_vencimiento = st.date_input("Fecha de vencimiento", key="nuevo_credito_vencimiento")
+                        tasa_interes = st.text_input("Tasa de interés", key="nuevo_credito_tasa")
+                    credito_form = {
+                        "entidad_financiera": entidad_financiera,
+                        "numero_credito": numero_credito,
+                        "descripcion": descripcion_credito,
+                        "fecha_inicio": fecha_inicio.isoformat(),
+                        "fecha_vencimiento": fecha_vencimiento.isoformat(),
+                        "tasa_interes": tasa_interes,
+                    }
+
+                if st.form_submit_button("💾 Guardar Cuenta", type="primary"):
+                    if not banco.strip() or not num.strip():
+                        st.error("Debes indicar el banco/entidad y el número de cuenta o crédito.")
+                    elif emp_id is None:
+                        st.error("Debes asociar la cuenta a una empresa.")
+                    elif tipo == "Crédito bancario" and (not str(credito_form.get("entidad_financiera", "")).strip() or not str(credito_form.get("numero_credito", "")).strip()):
+                        st.error("Para un Crédito bancario debes indicar la entidad financiera y el número de crédito.")
+                    else:
+                        try:
+                            guardar_cuenta(banco, num, tipo, emp_id, credito_form, usuario_actual.get("id"))
+                            if tipo == "Crédito bancario":
+                                st.success("✅ Cuenta y crédito bancario guardados correctamente.")
+                            else:
+                                st.success("✅ Cuenta guardada exitosamente.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"No fue posible guardar la cuenta: {type(e).__name__}: {e}")
 
         st.divider()
         st.subheader("🎲 Asignación mensual de conciliaciones")
