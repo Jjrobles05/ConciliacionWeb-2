@@ -931,6 +931,8 @@ def _decodificar_observaciones(texto):
 
 
 def obtener_historial(empresa_nombre=None):
+    """Lee TODAS las conciliaciones guardadas y las prepara para Historial/Auditoría/Reportes."""
+    conn = None
     try:
         conn = conectar_db()
         c = conn.cursor()
@@ -940,39 +942,61 @@ def obtener_historial(empresa_nombre=None):
                    co.saldo_libro, co.estado, co.preparado_por, co.revisado_por,
                    co.dictamen, co.observaciones
             FROM conciliaciones co
-            LEFT JOIN empresas e ON co.empresa_id=e.id
-            LEFT JOIN cuentas_bancarias cb ON co.cuenta_id=cb.id
+            LEFT JOIN empresas e ON co.empresa_id = e.id
+            LEFT JOIN cuentas_bancarias cb ON co.cuenta_id = cb.id
         """
-        params = ()
-        if empresa_nombre and empresa_nombre != "Todas las empresas":
-            query += " WHERE e.razon_social=?"
-            params = (empresa_nombre,)
+        params = []
+        if empresa_nombre and str(empresa_nombre).strip() not in ("Todas las empresas", "Sin asignar"):
+            query += " WHERE (e.razon_social = ? OR json_extract(co.observaciones, '$.empresa') = ?)"
+            params = [str(empresa_nombre).strip(), str(empresa_nombre).strip()]
         query += " ORDER BY co.id DESC"
-        c.execute(query, params)
+        c.execute(query, tuple(params))
         rows = c.fetchall()
-        conn.close()
-        if not rows:
-            return pd.DataFrame()
+
         salida = []
         for row in rows:
             d = _decodificar_observaciones(row[14])
+            workflow = row[13] or d.get('workflow_status') or 'Pendiente de revisión'
             salida.append({
-                'id': row[0], 'fecha_guardado': row[1], 'empresa': row[2] or d.get('empresa', ''),
-                'nit': row[3] or d.get('nit', ''), 'mes': row[4] or d.get('mes', ''),
-                'banco': row[5] or d.get('banco', ''), 'cuenta': row[6] or d.get('cuenta', ''),
-                'tipo': row[7] or d.get('tipo', ''), 'saldo_extracto': row[8], 'saldo_libros': row[9],
-                'diferencia_inicial': d.get('diferencia_inicial', float(row[8] or 0)-float(row[9] or 0)),
-                'diferencia_conciliada': d.get('diferencia_conciliada', 0.0),
-                'resultado_final': d.get('resultado_final', 0.0), 'estado': row[10] or d.get('estado', ''),
-                'workflow_status': row[13] or d.get('workflow_status', 'Pendiente de revisión'),
+                'id': int(row[0]),
+                'fecha_guardado': row[1] or '',
+                'empresa': row[2] or d.get('empresa', ''),
+                'nit': row[3] or d.get('nit', ''),
+                'mes': row[4] or d.get('mes', ''),
+                'banco': row[5] or d.get('banco', ''),
+                'cuenta': row[6] or d.get('cuenta', ''),
+                'tipo': row[7] or d.get('tipo', ''),
+                'saldo_extracto': float(row[8] or d.get('saldo_extracto', 0) or 0),
+                'saldo_libros': float(row[9] or d.get('saldo_libros', 0) or 0),
+                'diferencia_inicial': float(d.get('diferencia_inicial', float(row[8] or 0) - float(row[9] or 0)) or 0),
+                'diferencia_conciliada': float(d.get('diferencia_conciliada', 0) or 0),
+                'resultado_final': float(d.get('resultado_final', 0) or 0),
+                'estado': row[10] or d.get('estado', ''),
+                'workflow_status': workflow,
+                'preparado_por': row[11] or d.get('preparado_por', ''),
+                'revisado_por': row[12] or d.get('revisado_por', ''),
                 'revisado_por_usuario': row[12] or d.get('revisado_por_usuario', ''),
-                'fecha_revision': d.get('fecha_revision'), 'motivo_correccion': d.get('motivo_correccion'),
-                'tipo_hallazgo': d.get('tipo_hallazgo'), 'checklist_json': d.get('checklist_json'),
-                'datos_json': json.dumps(d, ensure_ascii=False), 'fecha_elaboracion': d.get('fecha_elaboracion', row[1])
+                'aprobado_por_usuario': d.get('aprobado_por_usuario', ''),
+                'fecha_preparacion': d.get('fecha_preparacion', ''),
+                'fecha_revision': d.get('fecha_revision', ''),
+                'fecha_aprobacion': d.get('fecha_aprobacion', ''),
+                'motivo_correccion': d.get('motivo_correccion'),
+                'tipo_hallazgo': d.get('tipo_hallazgo'),
+                'checklist_json': d.get('checklist_json'),
+                'datos_json': json.dumps(d, ensure_ascii=False),
+                'fecha_elaboracion': d.get('fecha_elaboracion', row[1])
             })
         return pd.DataFrame(salida)
-    except Exception:
+    except Exception as e:
+        # No ocultar el fallo: el Historial debe indicar si existe un problema de conexión/consulta.
+        st.error(f"❌ No fue posible cargar el Historial: {type(e).__name__}: {e}")
         return pd.DataFrame()
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def obtener_conciliacion_por_id(id_conciliacion):
@@ -1910,6 +1934,7 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
             cuenta_txt = fila.get("cuenta") or "N/A"
             banco_txt = fila.get("banco") or "N/A"
             consecutivo_str = f"CONC-{int(fila['id']):06d}"
+            wf_status = fila.get("workflow_status", "Pendiente de revisión")
             es_destacada = int(fila["id"]) == int(st.session_state.get("historial_id_destacado", -1))
             if es_destacada:
                 st.success(f"✅ Esta es la conciliación que acabas de guardar: **{consecutivo_str}** — Estado: **{wf_status}**")
@@ -2824,6 +2849,8 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             )
             st.session_state.pop("conciliacion_a_editar", None)
             st.session_state.pop("datos_cargados_edit", None)
+            st.session_state["historial_id_destacado"] = int(id_g)
+            st.session_state.menu_override = "📋 Historial"
             st.success(f"🚀 Conciliación CONC-{int(id_g):06d} enviada correctamente a Revisión.")
 
 elif menu_seleccionado == "📋 Historial":
