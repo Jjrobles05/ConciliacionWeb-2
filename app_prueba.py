@@ -15,9 +15,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.drawing.image import Image as XLImage
 from reportlab.lib.pagesizes import letter, portrait
 from reportlab.lib import colors
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-# Alias explícito para los informes ejecutivos; evita NameError si el PDF usa RLTable.
-RLTable = Table
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table as RLTable, TableStyle, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
 # ==========================================
@@ -1199,7 +1197,7 @@ def bloque_firmas_pdf(story, data, normal_style, aprobado=True):
         [Paragraph('Firma: ______________________________',normal_style), Paragraph('Firma: ______________________________',normal_style)],
         [Paragraph(f"Fecha: {data.get('fecha_creacion','') or ''}",normal_style), Paragraph(f"Fecha de aprobación: {fecha_txt}",normal_style)]
     ]
-    t=Table(firmas,colWidths=[270,270])
+    t=RLTable(firmas,colWidths=[270,270])
     t.setStyle(TableStyle([
         ('BOX',(0,0),(-1,-1),0.6,colors.HexColor('#B7B7B7')),
         ('INNERGRID',(0,0),(-1,-1),0.35,colors.HexColor('#D9D9D9')),
@@ -1243,7 +1241,7 @@ def generar_pdf_credito_reporte(data):
     if logo:
         try:
             encabezado=[[titulo,Image(io.BytesIO(logo),width=72,height=42)]]
-            ht=Table(encabezado,colWidths=[440,100])
+            ht=RLTable(encabezado,colWidths=[440,100])
             ht.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(1,0),(1,0),'RIGHT')]))
             story.append(ht)
         except Exception:
@@ -1259,11 +1257,11 @@ def generar_pdf_credito_reporte(data):
         ['SALDO SEGÚN EXTRACTO',formatear_moneda(data.get('saldo_extracto',0))],
         ['DIFERENCIA',formatear_moneda(data.get('diferencia',0))]
     ]
-    t=Table(executivo,colWidths=[180,360])
+    t=RLTable(executivo,colWidths=[180,360])
     t.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#EAF2F8')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#C9C9C9')),('ALIGN',(1,2),(1,4),'RIGHT'),('PADDING',(0,0),(-1,-1),7)]))
     story.append(t); story.append(Spacer(1,10))
     info=[['Empresa',data.get('empresa',''),'NIT',data.get('nit','')],['Banco',data.get('banco',''),'Cuenta',data.get('numero_cuenta','')],['Entidad financiera',data.get('entidad_financiera',''),'No. crédito',data.get('numero_credito','')],['Fecha de creación',data.get('fecha_creacion',''),'Fecha de revisión',data.get('fecha_revision','')]]
-    ti=Table(info,colWidths=[95,175,95,175])
+    ti=RLTable(info,colWidths=[95,175,95,175])
     ti.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#F4F4F4')),('BACKGROUND',(2,0),(2,-1),colors.HexColor('#F4F4F4')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('FONTNAME',(2,0),(2,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#D9D9D9')),('PADDING',(0,0),(-1,-1),5)]))
     story.append(ti)
     if data.get('observaciones'):
@@ -1304,25 +1302,25 @@ def generar_pdf_caja_reporte(data):
     titulo=Paragraph('<b>INFORME EJECUTIVO<br/>CUADRE DE CAJA</b>',title)
     if logo:
         try:
-            ht=Table([[titulo,Image(io.BytesIO(logo),width=72,height=42)]],colWidths=[440,100])
+            ht=RLTable([[titulo,Image(io.BytesIO(logo),width=72,height=42)]],colWidths=[440,100])
             ht.setStyle(TableStyle([('VALIGN',(0,0),(-1,-1),'MIDDLE'),('ALIGN',(1,0),(1,0),'RIGHT')]))
             story.append(ht)
         except Exception: story.append(titulo)
     else: story.append(titulo)
     story.append(Paragraph(f"{data.get('empresa','')} · NIT {data.get('nit','')} · Período {data.get('periodo','')}",sub)); story.append(Spacer(1,10))
     resumen=[['ESTADO',data.get('workflow_status','')],['RESULTADO',data.get('resultado','')],['SALDO INICIAL',formatear_moneda(data.get('saldo_inicial',0))],['TOTAL COMPRAS',formatear_moneda(data.get('total_compras',0))],['SALDO TEÓRICO',formatear_moneda(data.get('saldo_teorico',0))],['EFECTIVO FÍSICO',formatear_moneda(data.get('efectivo_fisico',0))],['DIFERENCIA',formatear_moneda(data.get('diferencia',0))]]
-    t=Table(resumen,colWidths=[180,360]); t.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#EAF2F8')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#C9C9C9')),('ALIGN',(1,2),(1,-1),'RIGHT'),('PADDING',(0,0),(-1,-1),6)])); story.append(t); story.append(Spacer(1,10))
+    t=RLTable(resumen,colWidths=[180,360]); t.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#EAF2F8')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.4,colors.HexColor('#C9C9C9')),('ALIGN',(1,2),(1,-1),'RIGHT'),('PADDING',(0,0),(-1,-1),6)])); story.append(t); story.append(Spacer(1,10))
     info=[['Empresa',data.get('empresa',''),'NIT',data.get('nit','')],['Caja',data.get('caja',''),'Responsable',data.get('responsable','')],['Fecha del arqueo',data.get('fecha_arqueo',''),'Fecha de creación',data.get('fecha_creacion','')],['Fecha de revisión',data.get('fecha_revision',''),'Fondo autorizado',formatear_moneda(data.get('fondo_autorizado',0))]]
-    ti=Table(info,colWidths=[95,175,95,175]); ti.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#F4F4F4')),('BACKGROUND',(2,0),(2,-1),colors.HexColor('#F4F4F4')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('FONTNAME',(2,0),(2,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#D9D9D9')),('PADDING',(0,0),(-1,-1),5)])); story.append(ti)
+    ti=RLTable(info,colWidths=[95,175,95,175]); ti.setStyle(TableStyle([('BACKGROUND',(0,0),(0,-1),colors.HexColor('#F4F4F4')),('BACKGROUND',(2,0),(2,-1),colors.HexColor('#F4F4F4')),('FONTNAME',(0,0),(0,-1),'Helvetica-Bold'),('FONTNAME',(2,0),(2,-1),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#D9D9D9')),('PADDING',(0,0),(-1,-1),5)])); story.append(ti)
     story.append(Spacer(1,10)); story.append(Paragraph('Detalle ejecutivo de compras',styles['Heading2']))
     compras=[['N°','Fecha','Proveedor','Concepto','Valor','IVA/otros','Total']]
     for r in data.get('compras',[]): compras.append([str(r[0]),str(r[1]),str(r[2]),str(r[3]),formatear_moneda(r[6]),formatear_moneda(r[7]),formatear_moneda(r[8])])
     if len(compras)>1:
-        t2=Table(compras,colWidths=[25,55,95,145,65,65,65]); t2.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1F4E78')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#C9C9C9')),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP'),('PADDING',(0,0),(-1,-1),4)])); story.append(t2)
+        t2=RLTable(compras,colWidths=[25,55,95,145,65,65,65]); t2.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1F4E78')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#C9C9C9')),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP'),('PADDING',(0,0),(-1,-1),4)])); story.append(t2)
     story.append(Spacer(1,10)); story.append(Paragraph('Conteo físico de efectivo',styles['Heading2']))
     ef=[['Tipo','Denominación','Cantidad','Valor total']]+[[str(r[0]),formatear_moneda(r[1]),str(r[2]),formatear_moneda(r[3])] for r in data.get('efectivo',[])]
     if len(ef)>1:
-        t3=Table(ef,colWidths=[100,100,80,120]); t3.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1F4E78')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#C9C9C9')),('FONTSIZE',(0,0),(-1,-1),8)])); story.append(t3)
+        t3=RLTable(ef,colWidths=[100,100,80,120]); t3.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1F4E78')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.35,colors.HexColor('#C9C9C9')),('FONTSIZE',(0,0),(-1,-1),8)])); story.append(t3)
     if data.get('observaciones'): story.append(Spacer(1,8)); story.append(Paragraph(f"<b>Observaciones:</b> {data.get('observaciones')}",normal))
     if data.get('motivo_correccion'): story.append(Spacer(1,5)); story.append(Paragraph(f"<b>Observación del auditor:</b> {data.get('motivo_correccion')}",normal))
     bloque_firmas_pdf(story,data,normal)
@@ -1850,7 +1848,7 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
         try:
             img_stream = io.BytesIO(logo_bytes)
             img_logo = Image(img_stream, width=80, height=45)
-            header_table = Table([[p_header_text, img_logo]], colWidths=[440, 100])
+            header_table = RLTable([[p_header_text, img_logo]], colWidths=[440, 100])
             header_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE'), ('ALIGN', (1,0), (1,0), 'RIGHT')]))
             story.append(header_table)
         except Exception:
@@ -1865,7 +1863,7 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
         [Paragraph("<b>Mes/Año:</b>", normal_style), Paragraph(str(c_data.get("mes", "")), normal_style), Paragraph("<b>Elaboración:</b>", normal_style), Paragraph(str(c_data.get("fecha_elaboracion", "")), normal_style)],
         [Paragraph("<b>Banco:</b>", normal_style), Paragraph(str(c_data.get("banco", "")), normal_style), Paragraph("<b>Cuenta No:</b>", normal_style), Paragraph(str(c_data.get("cuenta", "")), normal_style)],
     ]
-    t_gen = Table(data_gen, colWidths=[80, 190, 80, 190])
+    t_gen = RLTable(data_gen, colWidths=[80, 190, 80, 190])
     t_gen.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#F2F2F2")), ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D9D9D9")), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
     story.append(t_gen)
     story.append(Spacer(1, 8))
@@ -1880,7 +1878,7 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
         [Paragraph("RESULTADO FINAL", bold_style), Paragraph(formatear_moneda(res_final_val), bold_style)],
         [Paragraph("ESTADO", bold_style), Paragraph(str(c_data.get('estado', '')), bold_style)],
     ]
-    t_sal = Table(data_sal, colWidths=[320, 220])
+    t_sal = RLTable(data_sal, colWidths=[320, 220])
     t_sal.setStyle(TableStyle([('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D9D9D9")), ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#D9EAF7")), ('ALIGN', (1, 0), (1, -1), 'RIGHT'), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
     story.append(t_sal)
     story.append(Spacer(1, 8))
@@ -1904,7 +1902,7 @@ def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
                         pass
                 r.append(Paragraph(str(val), normal_style))
             rows.append(r)
-        t_m = Table(rows, colWidths=col_widths)
+        t_m = RLTable(rows, colWidths=col_widths)
         t_m.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#D9EAF7")), ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#D9D9D9")), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
         story.append(t_m)
         story.append(Spacer(1, 4))
