@@ -386,7 +386,7 @@ def obtener_cuentas(empresa_id=None):
 
 
 def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id, datos_credito=None, usuario_id=None):
-    """Guarda una cuenta y, si es Crédito bancario, crea también su registro de crédito."""
+    """Guarda cualquier cuenta bancaria, incluyendo Crédito bancario, como una cuenta normal."""
     banco = str(banco or "").strip()
     numero_cuenta = str(numero_cuenta or "").strip()
     tipo_cuenta = str(tipo_cuenta or "").strip()
@@ -404,44 +404,13 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id, datos_credito=
         else:
             c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id) VALUES (?, ?, ?, ?)",
                       (banco, numero_cuenta, tipo_cuenta, int(empresa_id)))
-            cuenta_id = int(c.lastrowid)
-
-        if tipo_cuenta == "Crédito bancario":
-            datos_credito = datos_credito or {}
-            entidad = str(datos_credito.get("entidad_financiera") or banco).strip()
-            numero_credito = str(datos_credito.get("numero_credito") or numero_cuenta).strip()
-            descripcion = str(datos_credito.get("descripcion") or "").strip()
-            fecha_inicio = str(datos_credito.get("fecha_inicio") or "")
-            fecha_vencimiento = str(datos_credito.get("fecha_vencimiento") or "")
-            tasa_interes = str(datos_credito.get("tasa_interes") or "").strip()
-            if not entidad or not numero_credito:
-                raise ValueError("La entidad financiera y el número de crédito son obligatorios.")
-
-            c.execute("SELECT id FROM creditos WHERE empresa_id=? AND numero_credito=?",
-                      (int(empresa_id), numero_credito))
-            credito_existente = c.fetchone()
-            if credito_existente:
-                c.execute("""UPDATE creditos SET cuenta_id=?, entidad_financiera=?, descripcion=?,
-                             fecha_inicio=?, fecha_vencimiento=?, tasa_interes=?, activo=1, creado_por=?
-                             WHERE id=?""",
-                          (cuenta_id, entidad, descripcion, fecha_inicio, fecha_vencimiento, tasa_interes, usuario_id, int(credito_existente[0])))
-            else:
-                c.execute("""INSERT INTO creditos
-                             (empresa_id, cuenta_id, entidad_financiera, numero_credito, descripcion,
-                              fecha_inicio, fecha_vencimiento, tasa_interes, activo, fecha_creacion, creado_por)
-                             VALUES (?,?,?,?,?,?,?,?,1,?,?)""",
-                          (int(empresa_id), cuenta_id, entidad, numero_credito, descripcion,
-                           fecha_inicio, fecha_vencimiento, tasa_interes, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), usuario_id))
-
         conn.commit()
-        return cuenta_id
     except Exception:
         try: conn.rollback()
         except Exception: pass
         raise
     finally:
         conn.close()
-
 
 def actualizar_cuenta_db(cuenta_id, banco, numero_cuenta, tipo_cuenta, empresa_id):
     conn = conectar_db(); c = conn.cursor()
@@ -1964,41 +1933,15 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                 if not empresas_df.empty:
                     emp_id = st.selectbox("Asociar a Empresa", empresas_df["id"].tolist(), format_func=lambda x: empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0])
 
-                credito_form = {}
-                if tipo == "Crédito bancario":
-                    st.markdown("### 💰 Datos del crédito bancario")
-                    cr1, cr2 = st.columns(2)
-                    with cr1:
-                        entidad_financiera = st.text_input("Entidad financiera", value=banco, key="nuevo_credito_entidad")
-                        numero_credito = st.text_input("Número de crédito", value=num, key="nuevo_credito_numero")
-                        fecha_inicio = st.date_input("Fecha de inicio", key="nuevo_credito_inicio")
-                    with cr2:
-                        descripcion_credito = st.text_input("Descripción del crédito", key="nuevo_credito_descripcion")
-                        fecha_vencimiento = st.date_input("Fecha de vencimiento", key="nuevo_credito_vencimiento")
-                        tasa_interes = st.text_input("Tasa de interés", key="nuevo_credito_tasa")
-                    credito_form = {
-                        "entidad_financiera": entidad_financiera,
-                        "numero_credito": numero_credito,
-                        "descripcion": descripcion_credito,
-                        "fecha_inicio": fecha_inicio.isoformat(),
-                        "fecha_vencimiento": fecha_vencimiento.isoformat(),
-                        "tasa_interes": tasa_interes,
-                    }
-
                 if st.form_submit_button("💾 Guardar Cuenta", type="primary"):
                     if not banco.strip() or not num.strip():
                         st.error("Debes indicar el banco/entidad y el número de cuenta o crédito.")
                     elif emp_id is None:
                         st.error("Debes asociar la cuenta a una empresa.")
-                    elif tipo == "Crédito bancario" and (not str(credito_form.get("entidad_financiera", "")).strip() or not str(credito_form.get("numero_credito", "")).strip()):
-                        st.error("Para un Crédito bancario debes indicar la entidad financiera y el número de crédito.")
                     else:
                         try:
-                            guardar_cuenta(banco, num, tipo, emp_id, credito_form, usuario_actual.get("id"))
-                            if tipo == "Crédito bancario":
-                                st.success("✅ Cuenta y crédito bancario guardados correctamente.")
-                            else:
-                                st.success("✅ Cuenta guardada exitosamente.")
+                            guardar_cuenta(banco, num, tipo, emp_id)
+                            st.success("✅ Cuenta guardada exitosamente.")
                             st.rerun()
                         except Exception as e:
                             st.error(f"No fue posible guardar la cuenta: {type(e).__name__}: {e}")
@@ -2284,32 +2227,77 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
 
     if es_credito_bancario:
         st.info("💰 Modo activado: Conciliación de Crédito Bancario.")
-        nombres_titulos={}
-        st.divider(); st.subheader("💰 Conciliación de Crédito Bancario")
+        st.divider(); st.subheader("💰 CONCILIACIÓN DE CRÉDITO BANCARIO")
+        st.caption("El crédito se registra primero como una cuenta bancaria. Los datos del crédito se diligencian aquí, únicamente al realizar la conciliación.")
+
+        # Datos de identificación del crédito
         c1,c2=st.columns(2)
-        with c1: entidad_credito=st.text_input("Entidad financiera",value=banco,key="credito_entidad"); numero_credito=st.text_input("Número de crédito",value=cuenta,key="credito_numero")
-        with c2: fecha_inicio=st.date_input("Fecha de inicio",key="credito_fecha_inicio"); fecha_vencimiento=st.date_input("Fecha de vencimiento",key="credito_fecha_vencimiento"); tasa=st.text_input("Tasa de interés",key="credito_tasa")
+        with c1:
+            entidad_credito=st.text_input("Entidad financiera",value=banco,key="credito_entidad")
+            numero_credito=st.text_input("Número de crédito",value=cuenta,key="credito_numero")
+            fecha_inicio=st.date_input("Fecha de inicio",key="credito_fecha_inicio")
+        with c2:
+            fecha_vencimiento=st.date_input("Fecha de vencimiento",key="credito_fecha_vencimiento")
+            tasa=st.text_input("Tasa de interés",key="credito_tasa")
+            cuota=st.text_input("Cuota / modalidad de pago",key="credito_cuota")
+
+        st.markdown("### 1. Comparación de saldos")
         c1,c2=st.columns(2)
-        with c1: saldo_libros_cb=st.number_input("Saldo según libros",format="%.2f",key="credito_saldo_libros")
-        with c2: saldo_extracto_cb=st.number_input("Saldo según extracto bancario del crédito",format="%.2f",key="credito_saldo_extracto")
-        diferencia_cb=float(saldo_extracto_cb)-float(saldo_libros_cb); resultado_cb="CONCILIADO" if abs(diferencia_cb)<0.005 else "NO CONCILIADO"
-        st.metric("Diferencia",formatear_moneda(diferencia_cb)); (st.success if resultado_cb=="CONCILIADO" else st.warning)(f"Resultado: **{resultado_cb}**")
-        if "credito_diferencias" not in st.session_state or id_edicion: st.session_state.credito_diferencias=pd.DataFrame([{"Concepto":"Pago registrado en banco y no en libros","Valor":0.0,"Observación":""},{"Concepto":"Pago registrado en libros y no en banco","Valor":0.0,"Observación":""},{"Concepto":"Intereses del crédito","Valor":0.0,"Observación":""},{"Concepto":"Seguros","Valor":0.0,"Observación":""},{"Concepto":"Comisiones","Valor":0.0,"Observación":""},{"Concepto":"Abonos extraordinarios","Valor":0.0,"Observación":""},{"Concepto":"Reclasificaciones contables","Valor":0.0,"Observación":""},{"Concepto":"Diferencia pendiente de identificar","Valor":0.0,"Observación":""},{"Concepto":"Otro","Valor":0.0,"Observación":""}])
-        diferencias_cb_df=st.data_editor(st.session_state.credito_diferencias,num_rows="dynamic",use_container_width=True,key="editor_credito_diferencias",column_config=config_monetaria(["Valor"]))
+        with c1:
+            saldo_libros_cb=st.number_input("Saldo según libros",min_value=0.0,format="%.2f",key="credito_saldo_libros")
+        with c2:
+            saldo_extracto_cb=st.number_input("Saldo según extracto bancario del crédito",min_value=0.0,format="%.2f",key="credito_saldo_extracto")
+
+        diferencia_cb=float(saldo_libros_cb)-float(saldo_extracto_cb)
+        resultado_cb="CONCILIADO" if abs(diferencia_cb)<0.005 else "NO CONCILIADO"
+        m1,m2=st.columns(2)
+        m1.metric("Diferencia (Libros - Extracto)",formatear_moneda(diferencia_cb))
+        (m2.success if resultado_cb=="CONCILIADO" else m2.warning)(f"Resultado: **{resultado_cb}**")
+
+        st.markdown("### 2. Partidas que explican la diferencia")
+        if "credito_diferencias" not in st.session_state or id_edicion:
+            st.session_state.credito_diferencias=pd.DataFrame([
+                {"Concepto":"Abono a capital registrado en libros y no en banco","Valor":0.0,"Observación":""},
+                {"Concepto":"Abono a capital registrado en banco y no en libros","Valor":0.0,"Observación":""},
+                {"Concepto":"Intereses registrados en banco y no en libros","Valor":0.0,"Observación":""},
+                {"Concepto":"Seguros","Valor":0.0,"Observación":""},
+                {"Concepto":"Comisiones y otros cargos bancarios","Valor":0.0,"Observación":""},
+                {"Concepto":"Pagos/cuotas pendientes de registrar","Valor":0.0,"Observación":""},
+                {"Concepto":"Abonos extraordinarios","Valor":0.0,"Observación":""},
+                {"Concepto":"Reclasificaciones contables","Valor":0.0,"Observación":""},
+                {"Concepto":"Diferencia pendiente de identificar","Valor":0.0,"Observación":""},
+                {"Concepto":"Otro","Valor":0.0,"Observación":""}
+            ])
+        diferencias_cb_df=st.data_editor(
+            st.session_state.credito_diferencias,
+            num_rows="dynamic",use_container_width=True,key="editor_credito_diferencias",
+            column_config={
+                "Concepto":st.column_config.TextColumn("Concepto",width="large"),
+                "Valor":st.column_config.NumberColumn("Valor",min_value=0.0,step=1000.0,format="$ %,.2f"),
+                "Observación":st.column_config.TextColumn("Observación",width="large")
+            }
+        )
         obs_cb=st.text_area("Observaciones",key="credito_observaciones")
-        preparado_cb=st.text_input("Preparado por",value=usuario_actual["nombre"],key="credito_preparado_por"); revisado_cb=st.text_input("Revisado por",key="credito_revisado_por")
+        preparado_cb=st.text_input("Preparado por",value=usuario_actual["nombre"],key="credito_preparado_por")
+        revisado_cb=st.text_input("Revisado por",key="credito_revisado_por")
+
         logo_bytes=obtener_logo_empresa(empresa)
         excel_cb,nombre_excel_cb=preparar_excel_credito_bancario(empresa,mes,fecha_elaboracion,entidad_credito,numero_credito,fecha_inicio,fecha_vencimiento,tasa,saldo_libros_cb,saldo_extracto_cb,diferencias_cb_df,obs_cb,logo_bytes)
         pdf_cb,nombre_pdf_cb=generar_pdf_credito_bancario(empresa,mes,fecha_elaboracion,entidad_credito,numero_credito,fecha_inicio,fecha_vencimiento,tasa,saldo_libros_cb,saldo_extracto_cb,diferencias_cb_df,obs_cb,logo_bytes)
-        d1,d2=st.columns(2); d1.download_button("📊 Descargar Excel",data=excel_cb,file_name=nombre_excel_cb,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True); d2.download_button("📄 Descargar PDF",data=pdf_cb,file_name=nombre_pdf_cb,mime="application/pdf",use_container_width=True)
-        datos_extra={"especial":"credito_bancario","entidad_financiera":entidad_credito,"numero_credito":numero_credito,"fecha_inicio":str(fecha_inicio),"fecha_vencimiento":str(fecha_vencimiento),"tasa":tasa,"diferencias":json.loads(diferencias_cb_df.to_json(orient="records")),"observaciones_credito":obs_cb}
+        d1,d2=st.columns(2)
+        d1.download_button("📊 Descargar Excel",data=excel_cb,file_name=nombre_excel_cb,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",use_container_width=True)
+        d2.download_button("📄 Descargar PDF",data=pdf_cb,file_name=nombre_pdf_cb,mime="application/pdf",use_container_width=True)
+
+        datos_extra={"especial":"credito_bancario","entidad_financiera":entidad_credito,"numero_credito":numero_credito,"fecha_inicio":str(fecha_inicio),"fecha_vencimiento":str(fecha_vencimiento),"tasa":tasa,"cuota":cuota,"diferencia_formula":"saldo_libros - saldo_extracto","diferencias":json.loads(diferencias_cb_df.to_json(orient="records")),"observaciones_credito":obs_cb}
         st.divider(); q1,q2=st.columns(2)
         with q1:
             if st.button("💾 Guardar Crédito como Borrador",key="guardar_credito_borrador"):
-                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,entidad_credito,numero_credito,tipo,saldo_libros_cb,saldo_extracto_cb,diferencia_cb,datos_extra,preparado_cb,revisado_cb,"Borrador",id_edicion); st.success(f"💾 Conciliación CONC-{id_g:06d} guardada como Borrador."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
+                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,entidad_credito,numero_credito,tipo,saldo_libros_cb,saldo_extracto_cb,diferencia_cb,datos_extra,preparado_cb,revisado_cb,"Borrador",id_edicion)
+                st.success(f"💾 Conciliación CONC-{id_g:06d} guardada como Borrador."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
         with q2:
             if st.button("🚀 Enviar Crédito a Revisión",key="enviar_credito_revision",type="primary"):
-                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,entidad_credito,numero_credito,tipo,saldo_libros_cb,saldo_extracto_cb,diferencia_cb,datos_extra,preparado_cb,revisado_cb,"Pendiente de revisión",id_edicion); st.success(f"🚀 Conciliación CONC-{id_g:06d} enviada a Revisión."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
+                id_g=guardar_conciliacion_especial(empresa,nit,mes,fecha_elaboracion,entidad_credito,numero_credito,tipo,saldo_libros_cb,saldo_extracto_cb,diferencia_cb,datos_extra,preparado_cb,revisado_cb,"Pendiente de revisión",id_edicion)
+                st.success(f"🚀 Conciliación CONC-{id_g:06d} enviada a Revisión."); st.session_state.pop("conciliacion_a_editar",None); st.rerun()
         st.stop()
 
     if es_tc:
