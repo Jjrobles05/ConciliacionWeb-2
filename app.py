@@ -849,7 +849,7 @@ def renderizar_bloque_firmas_ui(preparado_por, fecha_preparacion="", revisado_po
     with f1:
         st.markdown("**PREPARÓ**")
         st.write(f"👤 {preparado_por or 'Pendiente'}")
-        st.caption(f"Fecha: {preparado_fecha or 'Se registra al guardar'}")
+        st.caption(f"Fecha: {fecha_preparacion or 'Se registra al guardar'}")
         st.markdown("Firma: ____________________")
     with f2:
         st.markdown("**REVISÓ**")
