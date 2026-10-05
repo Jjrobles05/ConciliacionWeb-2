@@ -185,6 +185,38 @@ def inicializar_db():
             FOREIGN KEY (arqueo_id) REFERENCES arqueos_caja(id)
         )
     """)
+    # Migración segura: versiones anteriores de la app pueden no tener cuenta_id en créditos.
+    try:
+        c.execute("ALTER TABLE creditos ADD COLUMN cuenta_id INTEGER")
+    except Exception:
+        pass
+    # Maestro único: cada elemento por conciliar se clasifica como Bancaria, Caja o Crédito.
+    try:
+        c.execute("ALTER TABLE cuentas_bancarias ADD COLUMN tipo_conciliacion TEXT NOT NULL DEFAULT 'Bancaria'")
+    except Exception:
+        pass
+    try:
+        c.execute("ALTER TABLE cajas ADD COLUMN cuenta_id INTEGER")
+    except Exception:
+        pass
+    # Registros creados en versiones anteriores: si una cuenta ya está ligada a un crédito/caja,
+    # la clasificamos automáticamente en el maestro único.
+    try:
+        c.execute("""UPDATE cuentas_bancarias SET tipo_conciliacion='Crédito'
+                     WHERE id IN (SELECT cuenta_id FROM creditos WHERE cuenta_id IS NOT NULL)""")
+    except Exception:
+        pass
+    try:
+        c.execute("""UPDATE cuentas_bancarias SET tipo_conciliacion='Caja'
+                     WHERE id IN (SELECT cuenta_id FROM cajas WHERE cuenta_id IS NOT NULL)""")
+    except Exception:
+        pass
+    # Las cuentas existentes sin relación especializada pertenecen a la conciliación bancaria.
+    try:
+        c.execute("UPDATE cuentas_bancarias SET tipo_conciliacion='Bancaria' WHERE tipo_conciliacion IS NULL OR TRIM(tipo_conciliacion)=''")
+    except Exception:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -404,47 +436,140 @@ def reiniciar_datos_aplicativo():
         conn.close()
 
 
-def obtener_cuentas(empresa_id=None):
+def obtener_cuentas(empresa_id=None, tipo_conciliacion=None):
     try:
         conn = conectar_db()
         c = conn.cursor()
         query = """
             SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta,
-                   c.empresa_id, e.razon_social AS empresa_nombre
+                   c.empresa_id, e.razon_social AS empresa_nombre,
+                   COALESCE(c.tipo_conciliacion, 'Bancaria') AS tipo_conciliacion
             FROM cuentas_bancarias c
             LEFT JOIN empresas e ON c.empresa_id = e.id
         """
+        params = []
+        filtros = []
         if empresa_id:
-            query += " WHERE c.empresa_id = ? ORDER BY c.banco, c.numero_cuenta"
-            c.execute(query, (int(empresa_id),))
-        else:
-            query += " ORDER BY c.banco, c.numero_cuenta"
-            c.execute(query)
+            filtros.append("c.empresa_id = ?")
+            params.append(int(empresa_id))
+        if tipo_conciliacion:
+            filtros.append("COALESCE(c.tipo_conciliacion, 'Bancaria') = ?")
+            params.append(str(tipo_conciliacion))
+        if filtros:
+            query += " WHERE " + " AND ".join(filtros)
+        query += " ORDER BY c.banco, c.numero_cuenta"
+        c.execute(query, tuple(params))
         rows = c.fetchall()
         conn.close()
-        if rows:
-            return pd.DataFrame(rows, columns=['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre'])
+        cols = ['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre', 'tipo_conciliacion']
+        return pd.DataFrame(rows, columns=cols) if rows else pd.DataFrame(columns=cols)
     except Exception:
-        pass
-    return pd.DataFrame(columns=['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre'])
+        return pd.DataFrame(columns=['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre', 'tipo_conciliacion'])
 
 
-def actualizar_cuenta_db(cuenta_id, banco, numero_cuenta, tipo_cuenta, empresa_id):
+def guardar_elemento_conciliacion_db(tipo_conciliacion, empresa_id, usuario_id, datos):
+    """Crea el registro en el maestro único y su registro especializado."""
+    tipo = str(tipo_conciliacion).strip()
+    conn = conectar_db()
+    c = conn.cursor()
+    try:
+        if tipo == 'Bancaria':
+            banco = str(datos.get('banco', '')).strip()
+            numero = str(datos.get('numero_cuenta', '')).strip()
+            tipo_cuenta = str(datos.get('tipo_cuenta', 'Cuenta de ahorros')).strip()
+            if not banco or not numero:
+                return False, 'Debes indicar el banco y el número de cuenta.'
+            c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? AND banco=? AND numero_cuenta=?",
+                      (int(empresa_id), banco, numero))
+            if c.fetchone():
+                return False, 'Ya existe un registro con ese banco y número para esta empresa.'
+            c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id, tipo_conciliacion) VALUES (?,?,?,?,?)",
+                      (banco, numero, tipo_cuenta, int(empresa_id), 'Bancaria'))
+            cuenta_id = int(c.lastrowid)
+            conn.commit()
+            return True, cuenta_id
+
+        if tipo == 'Caja':
+            nombre = str(datos.get('nombre_caja', '')).strip()
+            responsable = str(datos.get('responsable', '')).strip()
+            fondo = float(datos.get('fondo_autorizado', 0) or 0)
+            if not nombre:
+                return False, 'Debes indicar el nombre de la caja.'
+            c.execute("SELECT id FROM cajas WHERE empresa_id=? AND nombre_caja=? AND activo=1",
+                      (int(empresa_id), nombre))
+            if c.fetchone():
+                return False, 'Ya existe una caja activa con ese nombre para esta empresa.'
+            c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? AND numero_cuenta=? AND tipo_conciliacion='Caja'",
+                      (int(empresa_id), nombre))
+            if c.fetchone():
+                return False, 'Ya existe un registro de caja con ese nombre.'
+            c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id, tipo_conciliacion) VALUES (?,?,?,?,?)",
+                      ('CAJA', nombre, 'Caja', int(empresa_id), 'Caja'))
+            cuenta_id = int(c.lastrowid)
+            c.execute("INSERT INTO cajas (empresa_id,nombre_caja,responsable,fondo_autorizado,activo,fecha_creacion,creado_por,cuenta_id) VALUES (?,?,?,?,1,?,?,?)",
+                      (int(empresa_id), nombre, responsable, fondo, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), int(usuario_id), cuenta_id))
+            caja_id = int(c.lastrowid)
+            conn.commit()
+            return True, caja_id
+
+        if tipo == 'Crédito':
+            entidad = str(datos.get('entidad_financiera', '')).strip()
+            numero = str(datos.get('numero_credito', '')).strip()
+            descripcion = str(datos.get('descripcion', '') or '').strip()
+            fecha_inicio = str(datos.get('fecha_inicio', '') or '')
+            if not entidad or not numero:
+                return False, 'Debes indicar la entidad financiera y el número de crédito.'
+            c.execute("SELECT id FROM creditos WHERE empresa_id=? AND numero_credito=? AND activo=1",
+                      (int(empresa_id), numero))
+            if c.fetchone():
+                return False, 'Ya existe un crédito activo con ese número para esta empresa.'
+            c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? AND numero_cuenta=? AND tipo_conciliacion='Crédito'",
+                      (int(empresa_id), numero))
+            if c.fetchone():
+                return False, 'Ya existe un registro de crédito con ese número.'
+            c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id, tipo_conciliacion) VALUES (?,?,?,?,?)",
+                      (entidad, numero, 'Crédito', int(empresa_id), 'Crédito'))
+            cuenta_id = int(c.lastrowid)
+            c.execute("INSERT INTO creditos (empresa_id,cuenta_id,entidad_financiera,numero_credito,descripcion,fecha_inicio,activo,fecha_creacion,creado_por) VALUES (?,?,?,?,?,?,1,?,?)",
+                      (int(empresa_id), cuenta_id, entidad, numero, descripcion, fecha_inicio, datetime.now().strftime('%Y-%m-%d %H:%M:%S'), int(usuario_id)))
+            credito_id = int(c.lastrowid)
+            conn.commit()
+            return True, credito_id
+
+        return False, 'Tipo de conciliación no válido.'
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f'No fue posible registrar el elemento: {type(e).__name__}: {e}'
+    finally:
+        conn.close()
+
+
+def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
+    ok, res = guardar_elemento_conciliacion_db('Bancaria', empresa_id, None, {
+        'banco': banco, 'numero_cuenta': numero_cuenta, 'tipo_cuenta': tipo_cuenta
+    })
+    if not ok:
+        raise ValueError(res)
+    return res
+
+
+def actualizar_cuenta_db(cuenta_id, banco, numero_cuenta, tipo_cuenta, empresa_id, tipo_conciliacion='Bancaria'):
     conn = conectar_db()
     c = conn.cursor()
     try:
         c.execute("SELECT id FROM cuentas_bancarias WHERE banco=? AND numero_cuenta=? AND id<>? AND empresa_id=?",
-                  (str(banco).strip(), str(numero_cuenta).strip(), int(cuenta_id), empresa_id))
+                  (str(banco).strip(), str(numero_cuenta).strip(), int(cuenta_id), int(empresa_id)))
         if c.fetchone():
-            return False, "Ya existe una cuenta con ese número para esta empresa."
-        c.execute("UPDATE cuentas_bancarias SET banco=?, numero_cuenta=?, tipo_cuenta=?, empresa_id=? WHERE id=?",
-                  (str(banco).strip(), str(numero_cuenta).strip(), str(tipo_cuenta), empresa_id, int(cuenta_id)))
+            return False, "Ya existe un elemento con ese banco/número para esta empresa."
+        c.execute("UPDATE cuentas_bancarias SET banco=?, numero_cuenta=?, tipo_cuenta=?, empresa_id=?, tipo_conciliacion=? WHERE id=?",
+                  (str(banco).strip(), str(numero_cuenta).strip(), str(tipo_cuenta), int(empresa_id), str(tipo_conciliacion), int(cuenta_id)))
         conn.commit()
-        return True, "Cuenta bancaria actualizada correctamente."
+        return True, "Elemento actualizado correctamente."
     except Exception as e:
         try: conn.rollback()
         except Exception: pass
-        return False, f"No fue posible actualizar la cuenta: {type(e).__name__}: {e}"
+        return False, f"No fue posible actualizar el elemento: {type(e).__name__}: {e}"
     finally:
         conn.close()
 
@@ -455,50 +580,50 @@ def eliminar_cuenta_db(cuenta_id):
     try:
         c.execute("SELECT COUNT(*) FROM conciliaciones WHERE cuenta_id=?", (int(cuenta_id),))
         conciliaciones = int(c.fetchone()[0] or 0)
-        if conciliaciones:
-            return False, f"No se puede eliminar esta cuenta porque tiene {conciliaciones} conciliación(es) asociada(s). Primero elimina las conciliaciones."
+        c.execute("SELECT COUNT(*) FROM conciliaciones_creditos cc JOIN creditos cr ON cc.credito_id=cr.id WHERE cr.cuenta_id=?", (int(cuenta_id),))
+        conciliaciones_credito = int(c.fetchone()[0] or 0)
+        c.execute("SELECT COUNT(*) FROM arqueos_caja ac JOIN cajas ca ON ac.caja_id=ca.id WHERE ca.cuenta_id=?", (int(cuenta_id),))
+        arqueos_caja = int(c.fetchone()[0] or 0)
+        if conciliaciones or conciliaciones_credito or arqueos_caja:
+            partes = []
+            if conciliaciones: partes.append(f"{conciliaciones} conciliación(es) bancaria(s)")
+            if conciliaciones_credito: partes.append(f"{conciliaciones_credito} conciliación(es) de crédito")
+            if arqueos_caja: partes.append(f"{arqueos_caja} arqueo(s) de caja")
+            return False, "No se puede eliminar este elemento porque tiene información histórica asociada: " + ", ".join(partes) + "."
+        c.execute("DELETE FROM creditos WHERE cuenta_id=?", (int(cuenta_id),))
+        c.execute("DELETE FROM cajas WHERE cuenta_id=?", (int(cuenta_id),))
         c.execute("DELETE FROM cuentas_bancarias WHERE id=?", (int(cuenta_id),))
         conn.commit()
-        return True, "Cuenta bancaria eliminada correctamente."
+        return True, "Elemento eliminado correctamente."
     except Exception as e:
         try: conn.rollback()
         except Exception: pass
-        return False, f"No fue posible eliminar la cuenta: {type(e).__name__}: {e}"
+        return False, f"No fue posible eliminar el elemento: {type(e).__name__}: {e}"
     finally:
         conn.close()
 
 
 def seleccionar_cuenta_para_editar(cuenta_id):
-    """Callback de Streamlit: activa exclusivamente el modo edición."""
     st.session_state["cuenta_a_editar"] = int(cuenta_id)
     st.session_state["cuenta_a_eliminar"] = None
 
 
 def seleccionar_cuenta_para_eliminar(cuenta_id):
-    """Callback de Streamlit: activa exclusivamente la confirmación de eliminación."""
     st.session_state["cuenta_a_eliminar"] = int(cuenta_id)
     st.session_state["cuenta_a_editar"] = None
 
 
-def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id):
-    conn = conectar_db()
-    c = conn.cursor()
-    c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id) VALUES (?, ?, ?, ?)",
-              (banco.strip(), numero_cuenta.strip(), tipo_cuenta, empresa_id))
-    conn.commit()
-    last_id = c.lastrowid
-    conn.close()
-    return last_id
-
-
-def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id):
+def obtener_cuentas_rotadas_por_usuario(empresa_id, mes_num, usuario_id, tipo_conciliacion='Bancaria'):
     if not empresa_id:
         return pd.DataFrame()
     conn = conectar_db()
     c = conn.cursor()
     c.execute("SELECT id, nombre FROM usuarios WHERE empresa_id = ? AND activo = 1 AND rol = 'Preparador' ORDER BY id", (int(empresa_id),))
     usr_rows = c.fetchall()
-    c.execute("SELECT id, banco, numero_cuenta, tipo_cuenta FROM cuentas_bancarias WHERE empresa_id = ? ORDER BY id", (int(empresa_id),))
+    c.execute("""SELECT id, banco, numero_cuenta, tipo_cuenta
+                 FROM cuentas_bancarias
+                 WHERE empresa_id = ? AND COALESCE(tipo_conciliacion,'Bancaria') = ?
+                 ORDER BY id""", (int(empresa_id), str(tipo_conciliacion)))
     cta_rows = c.fetchall()
     conn.close()
     if not cta_rows:
@@ -859,28 +984,29 @@ def obtener_usuarios():
 def obtener_creditos(empresa_id=None):
     try:
         conn=conectar_db(); c=conn.cursor()
-        q="""SELECT cr.id,cr.empresa_id,cr.entidad_financiera,cr.numero_credito,cr.descripcion,cr.fecha_inicio,cr.activo,e.razon_social
+        q="""SELECT cr.id,cr.empresa_id,cr.cuenta_id,cr.entidad_financiera,cr.numero_credito,cr.descripcion,cr.fecha_inicio,cr.activo,e.razon_social
              FROM creditos cr LEFT JOIN empresas e ON cr.empresa_id=e.id WHERE cr.activo=1"""
         p=[]
         if empresa_id: q += " AND cr.empresa_id=?"; p.append(int(empresa_id))
         q += " ORDER BY cr.entidad_financiera,cr.numero_credito"; c.execute(q,tuple(p)); rows=c.fetchall(); conn.close()
-        cols=['id','empresa_id','entidad_financiera','numero_credito','descripcion','fecha_inicio','activo','empresa']
+        cols=['id','empresa_id','cuenta_id','entidad_financiera','numero_credito','descripcion','fecha_inicio','activo','empresa']
         return pd.DataFrame(rows,columns=cols) if rows else pd.DataFrame(columns=cols)
-    except Exception: return pd.DataFrame(columns=['id','empresa_id','entidad_financiera','numero_credito','descripcion','fecha_inicio','activo','empresa'])
+    except Exception: return pd.DataFrame(columns=['id','empresa_id','cuenta_id','entidad_financiera','numero_credito','descripcion','fecha_inicio','activo','empresa'])
 
 
-def guardar_credito_db(empresa_id,entidad,numero,descripcion,fecha_inicio,usuario_id):
+def guardar_credito_db(empresa_id, cuenta_id, entidad, numero, descripcion, fecha_inicio, usuario_id):
     conn=conectar_db(); c=conn.cursor()
     try:
-        c.execute("SELECT id FROM creditos WHERE empresa_id=? AND numero_credito=? AND activo=1",(int(empresa_id),str(numero).strip()))
+        c.execute("SELECT id FROM creditos WHERE empresa_id=? AND numero_credito=? AND activo=1",
+                  (int(empresa_id),str(numero).strip()))
         if c.fetchone(): return False,"Ya existe un crédito activo con ese número para esta empresa."
-        c.execute("INSERT INTO creditos (empresa_id,entidad_financiera,numero_credito,descripcion,fecha_inicio,activo,fecha_creacion,creado_por) VALUES (?,?,?,?,?,1,?,?)",
-                  (int(empresa_id),str(entidad).strip(),str(numero).strip(),str(descripcion or '').strip(),str(fecha_inicio or ''),datetime.now().strftime('%Y-%m-%d %H:%M:%S'),int(usuario_id)))
+        c.execute("INSERT INTO creditos (empresa_id,cuenta_id,entidad_financiera,numero_credito,descripcion,fecha_inicio,activo,fecha_creacion,creado_por) VALUES (?,?,?,?,?,?,1,?,?)",
+                  (int(empresa_id), int(cuenta_id) if cuenta_id else None, str(entidad).strip(), str(numero).strip(),
+                   str(descripcion or '').strip(), str(fecha_inicio or ''), datetime.now().strftime('%Y-%m-%d %H:%M:%S'), int(usuario_id)))
         last=int(c.lastrowid); conn.commit(); return True,last
     except Exception as e:
         conn.rollback(); return False,f"No fue posible registrar el crédito: {type(e).__name__}: {e}"
     finally: conn.close()
-
 
 def guardar_conciliacion_credito_db(credito_id,empresa_id,periodo,saldo_libros,saldo_extracto,observaciones,soporte,nombre_soporte,preparado_por,workflow_status='Borrador'):
     diferencia=float(saldo_libros or 0)-float(saldo_extracto or 0)
@@ -897,12 +1023,14 @@ def guardar_conciliacion_credito_db(credito_id,empresa_id,periodo,saldo_libros,s
 
 def obtener_cajas(empresa_id=None):
     try:
-        conn=conectar_db(); c=conn.cursor(); q="""SELECT ca.id,ca.empresa_id,ca.nombre_caja,ca.responsable,ca.fondo_autorizado,e.razon_social FROM cajas ca LEFT JOIN empresas e ON ca.empresa_id=e.id WHERE ca.activo=1"""; p=[]
+        conn=conectar_db(); c=conn.cursor(); q="""SELECT ca.id,ca.empresa_id,ca.nombre_caja,ca.responsable,ca.fondo_autorizado,ca.cuenta_id,e.razon_social
+             FROM cajas ca LEFT JOIN empresas e ON ca.empresa_id=e.id
+             WHERE ca.activo=1 AND (ca.cuenta_id IS NOT NULL OR EXISTS (SELECT 1 FROM cuentas_bancarias cb WHERE cb.empresa_id=ca.empresa_id AND cb.numero_cuenta=ca.nombre_caja AND COALESCE(cb.tipo_conciliacion,'Bancaria')='Caja'))"""; p=[]
         if empresa_id: q += " AND ca.empresa_id=?"; p.append(int(empresa_id))
         q += " ORDER BY ca.nombre_caja"; c.execute(q,tuple(p)); rows=c.fetchall(); conn.close()
-        cols=['id','empresa_id','nombre_caja','responsable','fondo_autorizado','empresa']
+        cols=['id','empresa_id','nombre_caja','responsable','fondo_autorizado','cuenta_id','empresa']
         return pd.DataFrame(rows,columns=cols) if rows else pd.DataFrame(columns=cols)
-    except Exception: return pd.DataFrame(columns=['id','empresa_id','nombre_caja','responsable','fondo_autorizado','empresa'])
+    except Exception: return pd.DataFrame(columns=['id','empresa_id','nombre_caja','responsable','fondo_autorizado','cuenta_id','empresa'])
 
 
 def guardar_caja_db(empresa_id,nombre,responsable,fondo,usuario_id):
@@ -947,9 +1075,9 @@ def guardar_arqueo_caja_db(caja_id,empresa_id,fecha_arqueo,periodo,saldo_inicial
 
 def obtener_conciliaciones_creditos(empresa_nombre=None):
     try:
-        conn=conectar_db(); c=conn.cursor(); q="""SELECT cc.id,cc.periodo,cc.saldo_libros,cc.saldo_extracto,cc.diferencia,cc.resultado,cc.workflow_status,cc.fecha_creacion,cr.entidad_financiera,cr.numero_credito,e.razon_social FROM conciliaciones_creditos cc JOIN creditos cr ON cc.credito_id=cr.id LEFT JOIN empresas e ON cc.empresa_id=e.id"""; p=()
+        conn=conectar_db(); c=conn.cursor(); q="""SELECT cc.id,cc.periodo,cc.saldo_libros,cc.saldo_extracto,cc.diferencia,cc.resultado,cc.workflow_status,cc.fecha_creacion,cr.entidad_financiera,cr.numero_credito,cb.banco,cb.numero_cuenta,e.razon_social FROM conciliaciones_creditos cc JOIN creditos cr ON cc.credito_id=cr.id LEFT JOIN cuentas_bancarias cb ON cr.cuenta_id=cb.id LEFT JOIN empresas e ON cc.empresa_id=e.id"""; p=()
         if empresa_nombre and empresa_nombre!='Todas las empresas': q+=' WHERE e.razon_social=?'; p=(empresa_nombre,)
-        q+=' ORDER BY cc.id DESC'; c.execute(q,p); rows=c.fetchall(); conn.close(); cols=['id','periodo','saldo_libros','saldo_extracto','diferencia','resultado','workflow_status','fecha_creacion','entidad_financiera','numero_credito','empresa']
+        q+=' ORDER BY cc.id DESC'; c.execute(q,p); rows=c.fetchall(); conn.close(); cols=['id','periodo','saldo_libros','saldo_extracto','diferencia','resultado','workflow_status','fecha_creacion','entidad_financiera','numero_credito','banco','numero_cuenta','empresa']
         return pd.DataFrame(rows,columns=cols) if rows else pd.DataFrame(columns=cols)
     except Exception: return pd.DataFrame()
 
@@ -970,25 +1098,42 @@ def vista_conciliacion_creditos(empresa_activa_id,empresa_activa_nombre,empresas
         if empresas_df.empty: st.warning('Primero debes registrar una empresa.'); return
         empresa_activa_id=int(st.selectbox('Empresa',empresas_df['id'].tolist(),format_func=lambda x: empresas_df.loc[empresas_df['id']==x,'nombre'].values[0],key='credito_empresa'))
         empresa_activa_nombre=empresas_df.loc[empresas_df['id']==empresa_activa_id,'nombre'].values[0]
+
+    # Igual que la conciliación bancaria: la cuenta a conciliar sale del maestro Bancos y Cuentas.
+    mes=st.selectbox('Mes',['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'],index=datetime.now().month-1,key='credito_mes')
+    anio=st.number_input('Año',value=datetime.now().year,step=1,key='credito_anio')
+    mes_num=['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'].index(mes)+1
+    periodo=f'{mes.upper()} {anio}'
+    cuentas_asig_df=obtener_cuentas_rotadas_por_usuario(empresa_activa_id,mes_num,usuario_actual['id'],'Crédito')
+    if cuentas_asig_df.empty:
+        cuentas_asig_df=obtener_cuentas(empresa_activa_id).rename(columns={'empresa_nombre':'empresa'})
+    if cuentas_asig_df.empty:
+        st.warning('⚠️ No hay cuentas bancarias registradas para esta empresa. Registra primero la cuenta en 🏦 Bancos y Cuentas.')
+        return
+    st.info('ℹ️ La cuenta del crédito se selecciona desde 🏦 Bancos y Cuentas, igual que en la conciliación bancaria.')
+    cta_sel=st.selectbox('Cuenta / Tarjeta Registrada',cuentas_asig_df['id'].tolist(),format_func=lambda x: f"{cuentas_asig_df.loc[cuentas_asig_df['id']==x,'banco'].values[0]} - {cuentas_asig_df.loc[cuentas_asig_df['id']==x,'numero_cuenta'].values[0]}",key='credito_cuenta_sel')
+    cuenta_fila=cuentas_asig_df[cuentas_asig_df['id']==cta_sel].iloc[0]
+    banco_cuenta=str(cuenta_fila['banco'])
+    numero_cuenta=str(cuenta_fila['numero_cuenta'])
+    tipo_cuenta=str(cuenta_fila['tipo_cuenta'])
+    st.caption(f'Cuenta seleccionada: **{banco_cuenta} — {numero_cuenta}** | Tipo: **{tipo_cuenta}**')
+
     creditos=obtener_creditos(empresa_activa_id)
-    with st.expander('➕ Registrar nuevo crédito',expanded=creditos.empty):
-        with st.form('form_nuevo_credito'):
-            entidad=st.text_input('Entidad financiera'); numero=st.text_input('Número de crédito'); descripcion=st.text_input('Descripción'); fecha=st.date_input('Fecha de inicio',value=datetime.now().date())
-            if st.form_submit_button('Guardar crédito',type='primary'):
-                if not entidad.strip() or not numero.strip(): st.error('Entidad financiera y número de crédito son obligatorios.')
-                else:
-                    ok,res=guardar_credito_db(empresa_activa_id,entidad,numero,descripcion,fecha.isoformat(),usuario_actual['id'])
-                    if ok: st.success('Crédito registrado correctamente.'); st.rerun()
-                    else: st.error(res)
-    creditos=obtener_creditos(empresa_activa_id)
+    creditos_cuenta=creditos[creditos['cuenta_id'].fillna(-1).astype(int)==int(cta_sel)] if ('cuenta_id' in creditos.columns and not creditos.empty) else pd.DataFrame()
+    if creditos_cuenta.empty:
+        st.warning('⚠️ Esta cuenta está clasificada como Crédito, pero todavía no tiene un crédito asociado. Regístralo desde 🏦 Bancos y Cuentas.')
+        return
     if creditos.empty: return
-    credito_id=st.selectbox('Crédito a conciliar',creditos['id'].tolist(),format_func=lambda x:f"{creditos.loc[creditos['id']==x,'entidad_financiera'].values[0]} - {creditos.loc[creditos['id']==x,'numero_credito'].values[0]}",key='credito_sel')
+    creditos_cuenta=creditos[creditos['cuenta_id'].fillna(-1).astype(int)==int(cta_sel)] if 'cuenta_id' in creditos.columns else creditos
+    if creditos_cuenta.empty: creditos_cuenta=creditos
+    credito_id=st.selectbox('Crédito a conciliar',creditos_cuenta['id'].tolist(),format_func=lambda x:f"{creditos_cuenta.loc[creditos_cuenta['id']==x,'entidad_financiera'].values[0]} - {creditos_cuenta.loc[creditos_cuenta['id']==x,'numero_credito'].values[0]}",key='credito_sel')
     col1,col2=st.columns(2)
     with col1:
-        mes=st.selectbox('Mes',['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'],index=datetime.now().month-1,key='credito_mes'); anio=st.number_input('Año',value=datetime.now().year,step=1,key='credito_anio'); periodo=f'{mes.upper()} {anio}'
         saldo_libros=st.number_input('Saldo según libros',min_value=0.0,step=1000.0,format='%.2f',key='credito_saldo_libros')
     with col2:
-        saldo_extracto=st.number_input('Saldo según extracto del banco',min_value=0.0,step=1000.0,format='%.2f',key='credito_saldo_extracto'); soporte=st.file_uploader('Adjuntar extracto del crédito',type=['pdf','xlsx','xls','csv'],key='credito_soporte'); observaciones=st.text_area('Observaciones',key='credito_obs')
+        saldo_extracto=st.number_input('Saldo según extracto del banco',min_value=0.0,step=1000.0,format='%.2f',key='credito_saldo_extracto')
+    soporte=st.file_uploader('Adjuntar extracto del crédito',type=['pdf','xlsx','xls','csv'],key='credito_soporte')
+    observaciones=st.text_area('Observaciones',key='credito_obs')
     diferencia=float(saldo_libros)-float(saldo_extracto); resultado='CUADRA' if abs(diferencia)<0.005 else 'NO CUADRA'
     r1,r2,r3=st.columns(3); r1.metric('Saldo libros',formatear_moneda(saldo_libros)); r2.metric('Saldo extracto',formatear_moneda(saldo_extracto)); r3.metric('Diferencia',formatear_moneda(diferencia))
     if resultado=='CUADRA': st.success('✅ CUADRA: el saldo de libros coincide con el extracto.')
@@ -1009,17 +1154,9 @@ def vista_cuadre_caja(empresa_activa_id,empresa_activa_nombre,empresas_df,usuari
         if empresas_df.empty: st.warning('Primero debes registrar una empresa.'); return
         empresa_activa_id=int(st.selectbox('Empresa',empresas_df['id'].tolist(),format_func=lambda x: empresas_df.loc[empresas_df['id']==x,'nombre'].values[0],key='caja_empresa')); empresa_activa_nombre=empresas_df.loc[empresas_df['id']==empresa_activa_id,'nombre'].values[0]
     cajas=obtener_cajas(empresa_activa_id)
-    with st.expander('➕ Registrar nueva caja',expanded=cajas.empty):
-        with st.form('form_nueva_caja'):
-            nombre=st.text_input('Nombre de la caja',value='Caja General'); responsable=st.text_input('Responsable'); fondo=st.number_input('Fondo autorizado',min_value=0.0,step=1000.0,format='%.2f')
-            if st.form_submit_button('Guardar caja',type='primary'):
-                if not nombre.strip(): st.error('El nombre de la caja es obligatorio.')
-                else:
-                    ok,res=guardar_caja_db(empresa_activa_id,nombre,responsable,fondo,usuario_actual['id'])
-                    if ok: st.success('Caja registrada correctamente.'); st.rerun()
-                    else: st.error(res)
-    cajas=obtener_cajas(empresa_activa_id)
-    if cajas.empty: return
+    if cajas.empty:
+        st.warning('⚠️ No hay cajas registradas. Créala desde 🏦 Bancos y Cuentas seleccionando el tipo de conciliación Caja.')
+        return
     caja_id=st.selectbox('Caja',cajas['id'].tolist(),format_func=lambda x:f"{cajas.loc[cajas['id']==x,'nombre_caja'].values[0]} - {cajas.loc[cajas['id']==x,'responsable'].values[0] or 'Sin responsable'}",key='caja_sel'); caja_sel=cajas[cajas['id']==caja_id].iloc[0]
     c1,c2,c3=st.columns(3)
     with c1: fecha=st.date_input('Fecha del arqueo',value=datetime.now().date(),key='caja_fecha')
@@ -1606,7 +1743,7 @@ def vista_conciliacion_bancaria(empresa_activa_id, empresa_activa_nombre, empres
                     st.text_input("Cuenta / Tarjeta", value=cuenta, disabled=True)
                     st.text_input("Tipo", value=tipo, disabled=True)
                 else:
-                    cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(empresa_id_form if "empresa_id_form" in locals() else empresa_activa_id, mes_num, usuario_actual["id"])
+                    cuentas_asig_df = obtener_cuentas_rotadas_por_usuario(empresa_id_form if "empresa_id_form" in locals() else empresa_activa_id, mes_num, usuario_actual["id"], 'Bancaria')
                     if not cuentas_asig_df.empty:
                         st.info("ℹ️ **Cuentas asignadas para tu perfil este mes:**")
                         cta_sel = st.selectbox(
@@ -2119,42 +2256,75 @@ elif menu_seleccionado == "🏢 Empresas":
             st.divider()
 
 elif menu_seleccionado == "🏦 Bancos y Cuentas":
-    st.title("🏦 Maestro de Bancos y Cuentas Bancarias")
+    st.title("🏦 Maestro de Elementos por Conciliar")
 
     # ==========================================================
-    # REGISTRAR CUENTA
+    # MAESTRO ÚNICO DE ELEMENTOS POR CONCILIAR
     # ==========================================================
     if rol_actual == "Administrador":
-        with st.expander("➕ Registrar nueva cuenta bancaria"):
-            with st.form("form_cuenta_maestro"):
-                banco = st.text_input("Banco")
-                num = st.text_input("Número de Cuenta / Tarjeta")
-                tipo = st.selectbox(
-                    "Tipo de Cuenta",
-                    ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"]
-                )
+        with st.expander("➕ Registrar nuevo elemento por conciliar", expanded=False):
+            tipo_nuevo = st.radio(
+                "¿Qué deseas crear?",
+                ["🏦 Banco", "💵 Caja", "💳 Crédito"],
+                horizontal=True,
+                key="tipo_nuevo_elemento"
+            )
+            with st.form("form_elemento_conciliacion"):
                 emp_id = None
                 if not empresas_df.empty:
                     emp_id = st.selectbox(
                         "Asociar a Empresa",
                         empresas_df["id"].tolist(),
-                        format_func=lambda x: empresas_df.loc[
-                            empresas_df["id"] == x, "nombre"
-                        ].values[0]
+                        format_func=lambda x: empresas_df.loc[empresas_df["id"] == x, "nombre"].values[0],
+                        key="elemento_empresa"
                     )
 
-                if st.form_submit_button("Guardar Cuenta", type="primary"):
-                    if not banco.strip() or not num.strip():
-                        st.error("Debes indicar el banco y el número de cuenta.")
-                    elif emp_id is None:
-                        st.error("Debes asociar la cuenta a una empresa.")
+                if tipo_nuevo == "🏦 Banco":
+                    banco = st.text_input("Banco", key="elemento_banco")
+                    num = st.text_input("Número de Cuenta / Tarjeta", key="elemento_numero")
+                    tipo_cuenta = st.selectbox("Tipo de Cuenta", ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito"], key="elemento_tipo_cuenta")
+                elif tipo_nuevo == "💵 Caja":
+                    nombre_caja = st.text_input("Nombre de la caja", value="Caja General", key="elemento_nombre_caja")
+                    responsable = st.text_input("Responsable", key="elemento_responsable")
+                    fondo = st.number_input("Fondo autorizado", min_value=0.0, step=1000.0, format="%.2f", key="elemento_fondo")
+                else:
+                    entidad = st.text_input("Entidad financiera", key="elemento_entidad")
+                    numero_credito = st.text_input("Número de crédito", key="elemento_numero_credito")
+                    descripcion = st.text_input("Descripción", key="elemento_descripcion")
+                    fecha_inicio = st.date_input("Fecha de inicio", value=datetime.now().date(), key="elemento_fecha_inicio")
+
+                guardar_elemento = st.form_submit_button("💾 Crear elemento", type="primary")
+
+            if guardar_elemento:
+                if emp_id is None:
+                    st.error("Debes asociar el elemento a una empresa.")
+                elif tipo_nuevo == "🏦 Banco":
+                    ok, res = guardar_elemento_conciliacion_db("Bancaria", emp_id, usuario_actual["id"], {
+                        "banco": banco, "numero_cuenta": num, "tipo_cuenta": tipo_cuenta
+                    })
+                    if ok:
+                        st.success("🏦 Banco creado. Se podrá conciliar desde Conciliación bancaria.")
+                        st.rerun()
                     else:
-                        try:
-                            guardar_cuenta(banco, num, tipo, emp_id)
-                            st.success("Cuenta guardada exitosamente.")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"No fue posible guardar la cuenta: {e}")
+                        st.error(res)
+                elif tipo_nuevo == "💵 Caja":
+                    ok, res = guardar_elemento_conciliacion_db("Caja", emp_id, usuario_actual["id"], {
+                        "nombre_caja": nombre_caja, "responsable": responsable, "fondo_autorizado": fondo
+                    })
+                    if ok:
+                        st.success("💵 Caja creada. Se podrá conciliar desde Cuadre de cajas.")
+                        st.rerun()
+                    else:
+                        st.error(res)
+                else:
+                    ok, res = guardar_elemento_conciliacion_db("Crédito", emp_id, usuario_actual["id"], {
+                        "entidad_financiera": entidad, "numero_credito": numero_credito, "descripcion": descripcion, "fecha_inicio": fecha_inicio.isoformat()
+                    })
+                    if ok:
+                        st.success("💳 Crédito creado. Se podrá conciliar desde Conciliación de créditos.")
+                        st.rerun()
+                    else:
+                        st.error(res)
 
     # ==========================================================
     # ESTADO DE EDICIÓN / ELIMINACIÓN
@@ -2169,7 +2339,7 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
     st.subheader("📋 Cuentas registradas")
 
     if cuentas_df.empty:
-        st.info("No hay cuentas bancarias registradas para la empresa seleccionada.")
+        st.info("No hay elementos por conciliar registrados para la empresa seleccionada.")
     else:
         for _, cuenta_fila in cuentas_df.iterrows():
             cuenta_id = int(cuenta_fila["id"])
@@ -2182,8 +2352,9 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                 col_info, col_editar, col_eliminar = st.columns([6, 1.2, 1.2])
 
                 with col_info:
-                    st.markdown(f"**🏦 {banco_txt} — {numero_txt}**")
-                    st.caption(f"Tipo: {tipo_txt} | Empresa: {empresa_txt}")
+                    tipo_icono = "💵" if str(cuenta_fila.get("tipo_conciliacion", "Bancaria")) == "Caja" else ("💳" if str(cuenta_fila.get("tipo_conciliacion", "Bancaria")) == "Crédito" else "🏦")
+                    st.markdown(f"**{tipo_icono} {banco_txt} — {numero_txt}**")
+                    st.caption(f"Tipo de conciliación: {str(cuenta_fila.get('tipo_conciliacion', 'Bancaria'))} | Tipo: {tipo_txt} | Empresa: {empresa_txt}")
 
                 if rol_actual == "Administrador":
                     with col_editar:
@@ -2245,6 +2416,8 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                     tipos,
                     index=indice_tipo
                 )
+                tipo_conciliacion_actual = str(cuenta_edit.get("tipo_conciliacion", "Bancaria"))
+                st.info(f"Tipo de conciliación: **{tipo_conciliacion_actual}**. Para cambiar Banco/Caja/Crédito, es más seguro crear un nuevo elemento y no romper conciliaciones existentes.")
 
                 if empresas_df.empty:
                     st.error("No existen empresas registradas para asociar esta cuenta.")
@@ -2288,7 +2461,8 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                             edit_banco,
                             edit_num,
                             edit_tipo,
-                            int(edit_empresa)
+                            int(edit_empresa),
+                            tipo_conciliacion_actual
                         )
                         if ok:
                             st.session_state["cuenta_a_editar"] = None
