@@ -97,27 +97,6 @@ def inicializar_db():
             FOREIGN KEY(empresa_id) REFERENCES empresas(id)
         )
     """)
-    # Información específica de los créditos bancarios.
-    # Se crea de forma compatible con instalaciones existentes.
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS creditos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            empresa_id INTEGER NOT NULL,
-            cuenta_id INTEGER NOT NULL,
-            entidad_financiera TEXT NOT NULL,
-            numero_credito TEXT NOT NULL,
-            descripcion TEXT,
-            fecha_inicio TEXT,
-            fecha_vencimiento TEXT,
-            tasa_interes TEXT,
-            activo INTEGER NOT NULL DEFAULT 1,
-            fecha_creacion TEXT NOT NULL,
-            creado_por INTEGER,
-            FOREIGN KEY(empresa_id) REFERENCES empresas(id),
-            FOREIGN KEY(cuenta_id) REFERENCES cuentas_bancarias(id),
-            UNIQUE(empresa_id, numero_credito)
-        )
-    """)
     c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -386,28 +365,56 @@ def obtener_cuentas(empresa_id=None):
 
 
 def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id, datos_credito=None, usuario_id=None):
-    """Guarda cualquier cuenta bancaria, incluyendo Crédito bancario, como una cuenta normal."""
+    """Registra Crédito bancario exactamente igual que cualquier otra cuenta bancaria."""
     banco = str(banco or "").strip()
     numero_cuenta = str(numero_cuenta or "").strip()
     tipo_cuenta = str(tipo_cuenta or "").strip()
-    if not banco or not numero_cuenta or not empresa_id:
+    if not banco or not numero_cuenta or empresa_id is None:
         raise ValueError("Banco, número de cuenta y empresa son obligatorios.")
 
-    conn = conectar_db(); c = conn.cursor()
+    tipos_validos = ["Cuenta de ahorros", "Cuenta corriente", "Tarjeta de crédito", "Caja", "Crédito bancario"]
+    if tipo_cuenta not in tipos_validos:
+        raise ValueError("El tipo de cuenta seleccionado no es válido.")
+
+    conn = conectar_db()
+    c = conn.cursor()
     try:
-        c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? AND banco=? AND numero_cuenta=?",
-                  (int(empresa_id), banco, numero_cuenta))
+        empresa_id = int(empresa_id)
+        c.execute("SELECT id FROM empresas WHERE id=?", (empresa_id,))
+        if not c.fetchone():
+            raise ValueError("La empresa seleccionada no existe.")
+
+        c.execute("""SELECT id FROM cuentas_bancarias
+                     WHERE empresa_id=? AND banco=? AND numero_cuenta=? LIMIT 1""",
+                  (empresa_id, banco, numero_cuenta))
         existente = c.fetchone()
+
         if existente:
             cuenta_id = int(existente[0])
-            c.execute("UPDATE cuentas_bancarias SET tipo_cuenta=? WHERE id=?", (tipo_cuenta, cuenta_id))
+            c.execute("UPDATE cuentas_bancarias SET tipo_cuenta=? WHERE id=?",
+                      (tipo_cuenta, cuenta_id))
         else:
-            c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id) VALUES (?, ?, ?, ?)",
-                      (banco, numero_cuenta, tipo_cuenta, int(empresa_id)))
+            c.execute("""INSERT INTO cuentas_bancarias
+                         (banco, numero_cuenta, tipo_cuenta, empresa_id)
+                         VALUES (?, ?, ?, ?)""",
+                      (banco, numero_cuenta, tipo_cuenta, empresa_id))
+            cuenta_id = int(c.lastrowid)
+
         conn.commit()
+
+        # Verificación real: la cuenta debe existir después del COMMIT.
+        c.execute("""SELECT id, banco, numero_cuenta, tipo_cuenta, empresa_id
+                     FROM cuentas_bancarias WHERE id=?""", (cuenta_id,))
+        verificada = c.fetchone()
+        if not verificada:
+            raise RuntimeError("La cuenta no quedó registrada en la base de datos.")
+
+        return cuenta_id
     except Exception:
-        try: conn.rollback()
-        except Exception: pass
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         raise
     finally:
         conn.close()
@@ -1940,8 +1947,8 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                         st.error("Debes asociar la cuenta a una empresa.")
                     else:
                         try:
-                            guardar_cuenta(banco, num, tipo, emp_id)
-                            st.success("✅ Cuenta guardada exitosamente.")
+                            cuenta_guardada_id = guardar_cuenta(banco, num, tipo, emp_id)
+                            st.success(f"✅ Cuenta guardada exitosamente. ID: {cuenta_guardada_id}")
                             st.rerun()
                         except Exception as e:
                             st.error(f"No fue posible guardar la cuenta: {type(e).__name__}: {e}")
