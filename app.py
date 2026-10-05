@@ -97,6 +97,59 @@ def inicializar_db():
             FOREIGN KEY(empresa_id) REFERENCES empresas(id)
         )
     """)
+    # Compatibilidad con bases Turso antiguas:
+    # algunas instalaciones tienen conciliaciones.cuenta_id -> cuentas(id),
+    # mientras que la aplicación actual usa cuentas_bancarias(id).
+    # Mantenemos ambos catálogos sincronizados por ID para que la FK antigua
+    # siga siendo válida sin perder el catálogo actual ni el historial.
+    try:
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS cuentas (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                empresa_id INTEGER NOT NULL,
+                banco TEXT NOT NULL,
+                numero_cuenta TEXT NOT NULL,
+                tipo_cuenta TEXT NOT NULL,
+                FOREIGN KEY (empresa_id) REFERENCES empresas(id)
+            )
+        """)
+        c.execute("""
+            SELECT id, empresa_id, banco, numero_cuenta, tipo_cuenta
+            FROM cuentas_bancarias
+            ORDER BY id
+        """)
+        cuentas_actuales = c.fetchall()
+
+        for cuenta in cuentas_actuales:
+            cuenta_id, empresa_id_cta, banco_cta, numero_cta, tipo_cta = cuenta
+            # Si el ID ya existe en la tabla legacy, lo alineamos con
+            # cuentas_bancarias. Esto hace que conciliaciones.cuenta_id
+            # apunte al mismo registro lógico.
+            c.execute("SELECT id FROM cuentas WHERE id=?", (int(cuenta_id),))
+            if c.fetchone():
+                c.execute("""
+                    UPDATE cuentas
+                       SET empresa_id=?, banco=?, numero_cuenta=?, tipo_cuenta=?
+                     WHERE id=?
+                """, (
+                    int(empresa_id_cta), str(banco_cta), str(numero_cta),
+                    str(tipo_cta), int(cuenta_id)
+                ))
+            else:
+                c.execute("""
+                    INSERT INTO cuentas
+                        (id, empresa_id, banco, numero_cuenta, tipo_cuenta)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (
+                    int(cuenta_id), int(empresa_id_cta), str(banco_cta),
+                    str(numero_cta), str(tipo_cta)
+                ))
+        conn.commit()
+    except Exception:
+        # No detener una instalación nueva por compatibilidad de una tabla
+        # legacy; el esquema actual sigue funcionando con cuentas_bancarias.
+        pass
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS usuarios (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -287,8 +340,12 @@ def limpiar_datos_operativos():
     try:
         c.execute("DELETE FROM conciliaciones")
         c.execute("DELETE FROM cuentas_bancarias")
+        try:
+            c.execute("DELETE FROM cuentas")
+        except Exception:
+            pass
 
-        for tabla in ["conciliaciones", "cuentas_bancarias"]:
+        for tabla in ["conciliaciones", "cuentas_bancarias", "cuentas"]:
             try:
                 c.execute("DELETE FROM sqlite_sequence WHERE name=?", (tabla,))
             except Exception:
@@ -318,10 +375,14 @@ def reiniciar_datos_aplicativo():
     try:
         c.execute("DELETE FROM conciliaciones")
         c.execute("DELETE FROM cuentas_bancarias")
+        try:
+            c.execute("DELETE FROM cuentas")
+        except Exception:
+            pass
         c.execute("DELETE FROM usuarios")
         c.execute("DELETE FROM empresas")
 
-        for tabla in ["conciliaciones", "cuentas_bancarias", "usuarios", "empresas"]:
+        for tabla in ["conciliaciones", "cuentas_bancarias", "cuentas", "usuarios", "empresas"]:
             try:
                 c.execute("DELETE FROM sqlite_sequence WHERE name=?", (tabla,))
             except Exception:
