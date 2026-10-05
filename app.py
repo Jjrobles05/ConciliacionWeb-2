@@ -1109,6 +1109,18 @@ def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, c
         })
         observaciones=json.dumps(payload, ensure_ascii=False)
         fecha_creacion=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # En algunas versiones/esquemas de Turso puede existir una restricción de unicidad
+        # por empresa + cuenta + período. Si no viene un id de edición, reutilizamos la
+        # conciliación existente de ese período en lugar de provocar un IntegrityError.
+        if not id_edicion:
+            c.execute("""SELECT id FROM conciliaciones
+                         WHERE empresa_id=? AND cuenta_id=? AND periodo=?
+                         ORDER BY id DESC LIMIT 1""",
+                      (empresa_id, cuenta_id, str(mes)))
+            existente = c.fetchone()
+            if existente:
+                id_edicion = int(existente[0])
+
         if id_edicion:
             c.execute("""UPDATE conciliaciones SET empresa_id=?, cuenta_id=?, periodo=?, saldo_libro=?, saldo_banco=?,
                          estado=?, preparado_por=?, revisado_por=?, fecha_creacion=?, dictamen=?, observaciones=? WHERE id=?""",
@@ -1956,20 +1968,171 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                 if es_caja_hist or es_credito_hist:
                     st.info(f"📌 Tipo de conciliación: **{tipo_cta}**")
                     datos_especiales = datos
+                    wf_actual = c_data.get("workflow_status", "Pendiente de revisión")
+
                     if es_caja_hist:
-                        compras_h=pd.DataFrame(datos_especiales.get("compras",[])); efectivo_h=pd.DataFrame(datos_especiales.get("efectivo",[]))
-                        excel_h,nombre_h=preparar_excel_caja(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("responsable",c_data.get("preparado_por","")),datos_especiales.get("saldo_inicial",0),datos_especiales.get("fondo_autorizado",0),compras_h,efectivo_h,datos_especiales.get("observaciones_caja",""),obtener_logo_empresa(c_data.get("empresa")),datos_especiales.get("preparado_por_usuario",c_data.get("preparado_por","")),datos_especiales.get("revisado_por_usuario",c_data.get("revisado_por","")),datos_especiales.get("aprobado_por_usuario",""),datos_especiales.get("fecha_preparacion",""),datos_especiales.get("fecha_revision",""),datos_especiales.get("fecha_aprobacion",""),c_data.get("workflow_status","Pendiente de revisión"))
-                        pdf_h,_=generar_pdf_caja(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("responsable",c_data.get("preparado_por","")),datos_especiales.get("saldo_inicial",0),datos_especiales.get("fondo_autorizado",0),compras_h,efectivo_h,datos_especiales.get("observaciones_caja",""),obtener_logo_empresa(c_data.get("empresa")))
+                        compras_h = pd.DataFrame(datos_especiales.get("compras", []))
+                        efectivo_h = pd.DataFrame(datos_especiales.get("efectivo", []))
+                        excel_h, nombre_h = preparar_excel_caja(
+                            c_data.get("empresa"), c_data.get("mes"), datos_especiales.get("fecha_elaboracion", ""),
+                            datos_especiales.get("responsable", c_data.get("preparado_por", "")),
+                            datos_especiales.get("saldo_inicial", 0), datos_especiales.get("fondo_autorizado", 0),
+                            compras_h, efectivo_h, datos_especiales.get("observaciones_caja", ""), obtener_logo_empresa(c_data.get("empresa")),
+                            datos_especiales.get("preparado_por_usuario", c_data.get("preparado_por", "")),
+                            datos_especiales.get("revisado_por_usuario", c_data.get("revisado_por", "")),
+                            datos_especiales.get("aprobado_por_usuario", ""), datos_especiales.get("fecha_preparacion", ""),
+                            datos_especiales.get("fecha_revision", ""), datos_especiales.get("fecha_aprobacion", ""), wf_actual
+                        )
+                        pdf_h, _ = generar_pdf_caja(
+                            c_data.get("empresa"), c_data.get("mes"), datos_especiales.get("fecha_elaboracion", ""),
+                            datos_especiales.get("responsable", c_data.get("preparado_por", "")),
+                            datos_especiales.get("saldo_inicial", 0), datos_especiales.get("fondo_autorizado", 0),
+                            compras_h, efectivo_h, datos_especiales.get("observaciones_caja", ""), obtener_logo_empresa(c_data.get("empresa")),
+                            datos_especiales.get("preparado_por_usuario", c_data.get("preparado_por", "")),
+                            datos_especiales.get("revisado_por_usuario", c_data.get("revisado_por", "")),
+                            datos_especiales.get("aprobado_por_usuario", ""), datos_especiales.get("fecha_preparacion", ""),
+                            datos_especiales.get("fecha_revision", ""), datos_especiales.get("fecha_aprobacion", ""), wf_actual
+                        )
                     else:
-                        dif_h=pd.DataFrame(datos_especiales.get("diferencias",[]))
-                        excel_h,nombre_h=preparar_excel_credito_bancario(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("entidad_financiera",c_data.get("banco","")),datos_especiales.get("numero_credito",c_data.get("cuenta","")),datos_especiales.get("fecha_inicio",""),datos_especiales.get("fecha_vencimiento",""),datos_especiales.get("tasa",""),c_data.get("saldo_libros",0),c_data.get("saldo_extracto",0),dif_h,datos_especiales.get("observaciones_credito",""),obtener_logo_empresa(c_data.get("empresa")))
-                        pdf_h,_=generar_pdf_credito_bancario(c_data.get("empresa"),c_data.get("mes"),datos_especiales.get("fecha_elaboracion",""),datos_especiales.get("entidad_financiera",c_data.get("banco","")),datos_especiales.get("numero_credito",c_data.get("cuenta","")),datos_especiales.get("fecha_inicio",""),datos_especiales.get("fecha_vencimiento",""),datos_especiales.get("tasa",""),c_data.get("saldo_libros",0),c_data.get("saldo_extracto",0),dif_h,datos_especiales.get("observaciones_credito",""),obtener_logo_empresa(c_data.get("empresa")),datos_especiales.get("preparado_por_usuario",c_data.get("preparado_por","")),datos_especiales.get("revisado_por_usuario",c_data.get("revisado_por","")),datos_especiales.get("aprobado_por_usuario",""),datos_especiales.get("fecha_preparacion",""),datos_especiales.get("fecha_revision",""),datos_especiales.get("fecha_aprobacion",""),c_data.get("workflow_status","Pendiente de revisión"))
-                    h1,h2,h3=st.columns(3)
-                    with h1:
-                        if st.button("✏️ Editar Conciliación",key=f"btn_edit_{fila['id']}"):
-                            st.session_state.conciliacion_a_editar=fila['id']; st.session_state.pop("datos_cargados_edit",None); st.session_state.menu_override="📝 Nueva Conciliación"; st.rerun()
-                    with h2: st.download_button("📊 Descargar Excel",data=excel_h,file_name=nombre_h,mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",key=f"dlx_{fila['id']}")
-                    with h3: st.download_button("📄 Descargar PDF",data=pdf_h,file_name=nombre_h.replace(".xlsx",".pdf"),mime="application/pdf",key=f"dlp_{fila['id']}")
+                        dif_h = pd.DataFrame(datos_especiales.get("diferencias", []))
+                        excel_h, nombre_h = preparar_excel_credito_bancario(
+                            c_data.get("empresa"), c_data.get("mes"), datos_especiales.get("fecha_elaboracion", ""),
+                            datos_especiales.get("entidad_financiera", c_data.get("banco", "")),
+                            datos_especiales.get("numero_credito", c_data.get("cuenta", "")),
+                            datos_especiales.get("fecha_inicio", ""), datos_especiales.get("fecha_vencimiento", ""),
+                            datos_especiales.get("tasa", ""), c_data.get("saldo_libros", 0), c_data.get("saldo_extracto", 0),
+                            dif_h, datos_especiales.get("observaciones_credito", ""), obtener_logo_empresa(c_data.get("empresa")),
+                            datos_especiales.get("preparado_por_usuario", c_data.get("preparado_por", "")),
+                            datos_especiales.get("revisado_por_usuario", c_data.get("revisado_por", "")),
+                            datos_especiales.get("aprobado_por_usuario", ""), datos_especiales.get("fecha_preparacion", ""),
+                            datos_especiales.get("fecha_revision", ""), datos_especiales.get("fecha_aprobacion", ""), wf_actual
+                        )
+                        pdf_h, _ = generar_pdf_credito_bancario(
+                            c_data.get("empresa"), c_data.get("mes"), datos_especiales.get("fecha_elaboracion", ""),
+                            datos_especiales.get("entidad_financiera", c_data.get("banco", "")),
+                            datos_especiales.get("numero_credito", c_data.get("cuenta", "")),
+                            datos_especiales.get("fecha_inicio", ""), datos_especiales.get("fecha_vencimiento", ""),
+                            datos_especiales.get("tasa", ""), c_data.get("saldo_libros", 0), c_data.get("saldo_extracto", 0),
+                            dif_h, datos_especiales.get("observaciones_credito", ""), obtener_logo_empresa(c_data.get("empresa")),
+                            datos_especiales.get("preparado_por_usuario", c_data.get("preparado_por", "")),
+                            datos_especiales.get("revisado_por_usuario", c_data.get("revisado_por", "")),
+                            datos_especiales.get("aprobado_por_usuario", ""), datos_especiales.get("fecha_preparacion", ""),
+                            datos_especiales.get("fecha_revision", ""), datos_especiales.get("fecha_aprobacion", ""), wf_actual
+                        )
+
+                    # ===== AUDITORÍA ESPECIAL COMPLETA =====
+                    a1, a2, a3, a4 = st.tabs([
+                        "📋 Resumen y Evidencia", "✅ Checklist de Control",
+                        "🚩 Hallazgos y Riesgo", "⚡ Dictamen y Decisión"
+                    ])
+
+                    with a1:
+                        st.subheader("📋 Resumen de la conciliación")
+                        r1, r2 = st.columns(2)
+                        with r1:
+                            st.write(f"🏢 **Empresa:** {c_data.get('empresa', 'N/A')} | **NIT:** {c_data.get('nit', 'N/A')}")
+                            st.write(f"📅 **Período:** {c_data.get('mes', 'N/A')} | **Fecha:** {datos_especiales.get('fecha_elaboracion', 'N/A')}")
+                            st.write(f"🏦 **Entidad/Banco:** {datos_especiales.get('entidad_financiera', c_data.get('banco', 'N/A'))}")
+                        with r2:
+                            st.write(f"💳 **Cuenta/Crédito:** {datos_especiales.get('numero_credito', c_data.get('cuenta', 'N/A'))}")
+                            st.write(f"👤 **Preparado por:** {datos_especiales.get('preparado_por_usuario', c_data.get('preparado_por', 'N/A'))}")
+                            st.write(f"🔎 **Estado:** {wf_actual}")
+
+                        if es_caja_hist:
+                            total_compras_h = float(pd.to_numeric(compras_h.get("Total pagado", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not compras_h.empty else 0.0
+                            efectivo_h_total = 0.0
+                            if not efectivo_h.empty:
+                                if "Monto" in efectivo_h.columns:
+                                    efectivo_h_total = float(pd.to_numeric(efectivo_h["Monto"], errors="coerce").fillna(0).sum())
+                                elif "Valor" in efectivo_h.columns:
+                                    efectivo_h_total = float(pd.to_numeric(efectivo_h["Valor"], errors="coerce").fillna(0).sum())
+                            saldo_ini_h = float(datos_especiales.get("saldo_inicial", 0) or 0)
+                            saldo_teorico_h = saldo_ini_h - total_compras_h
+                            diferencia_h = efectivo_h_total - saldo_teorico_h
+                            df_res = pd.DataFrame([
+                                {"Concepto":"Saldo inicial para compras", "Valor":saldo_ini_h},
+                                {"Concepto":"Total compras", "Valor":total_compras_h},
+                                {"Concepto":"Saldo teórico final", "Valor":saldo_teorico_h},
+                                {"Concepto":"Efectivo físico final", "Valor":efectivo_h_total},
+                                {"Concepto":"Diferencia (sobrante/faltante)", "Valor":diferencia_h},
+                                {"Concepto":"Resultado del arqueo", "Valor":"CUADRA" if abs(diferencia_h)<0.005 else ("SOBRANTE" if diferencia_h>0 else "FALTANTE")}
+                            ])
+                            df_res["Valor"] = df_res.apply(lambda r: formatear_moneda(r["Valor"]) if r["Concepto"] != "Resultado del arqueo" else r["Valor"], axis=1)
+                            st.dataframe(df_res, use_container_width=True, hide_index=True)
+                            st.write(f"🧾 **Compras registradas:** {len(compras_h)}")
+                        else:
+                            saldo_lib_h = float(c_data.get("saldo_libros", 0) or 0)
+                            saldo_ext_h = float(c_data.get("saldo_extracto", 0) or 0)
+                            dif_saldos_h = saldo_lib_h - saldo_ext_h
+                            st.dataframe(pd.DataFrame([
+                                {"Concepto":"Saldo según libros", "Valor":formatear_moneda(saldo_lib_h)},
+                                {"Concepto":"Saldo según extracto del crédito", "Valor":formatear_moneda(saldo_ext_h)},
+                                {"Concepto":"Diferencia", "Valor":formatear_moneda(dif_saldos_h)},
+                                {"Concepto":"Tasa", "Valor":datos_especiales.get("tasa", "")},
+                                {"Concepto":"Vencimiento", "Valor":datos_especiales.get("fecha_vencimiento", "")}
+                            ]), use_container_width=True, hide_index=True)
+                            st.dataframe(formatear_columna_valor(dif_h.copy()), use_container_width=True, hide_index=True)
+
+                        cexp1, cexp2, cexp3 = st.columns(3)
+                        with cexp1:
+                            if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
+                                st.session_state.conciliacion_a_editar = fila['id']; st.session_state.pop("datos_cargados_edit", None); st.session_state.menu_override = "📝 Nueva Conciliación"; st.rerun()
+                        with cexp2:
+                            st.download_button("📊 Descargar Excel", data=excel_h, file_name=nombre_h, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dlx_{fila['id']}")
+                        with cexp3:
+                            st.download_button("📄 Descargar PDF", data=pdf_h, file_name=nombre_h.replace(".xlsx", ".pdf"), mime="application/pdf", key=f"dlp_{fila['id']}")
+
+                    with a2:
+                        st.subheader("✅ Checklist de Control Interno")
+                        st.caption("El revisor debe verificar cada punto antes de aprobar.")
+                        if es_caja_hist:
+                            chk1 = st.checkbox("El saldo inicial y fondo autorizado tienen soporte.", key=f"esp_chk1_{fila['id']}")
+                            chk2 = st.checkbox("Las compras tienen factura/soporte y forma de pago verificable.", key=f"esp_chk2_{fila['id']}")
+                            chk3 = st.checkbox("El total de compras coincide con los soportes revisados.", key=f"esp_chk3_{fila['id']}")
+                            chk4 = st.checkbox("El efectivo físico fue verificado mediante arqueo.", key=f"esp_chk4_{fila['id']}")
+                            chk5 = st.checkbox("La diferencia final está justificada o el arqueo cuadra.", key=f"esp_chk5_{fila['id']}")
+                        else:
+                            chk1 = st.checkbox("El contrato/extracto del crédito fue verificado.", key=f"esp_chk1_{fila['id']}")
+                            chk2 = st.checkbox("El saldo según libros coincide con el auxiliar contable.", key=f"esp_chk2_{fila['id']}")
+                            chk3 = st.checkbox("El saldo del extracto fue verificado contra el documento oficial.", key=f"esp_chk3_{fila['id']}")
+                            chk4 = st.checkbox("Intereses, seguros, comisiones y abonos están correctamente registrados.", key=f"esp_chk4_{fila['id']}")
+                            chk5 = st.checkbox("Las diferencias pendientes tienen explicación y soporte.", key=f"esp_chk5_{fila['id']}")
+
+                    with a3:
+                        st.subheader("🚩 Hallazgos y evaluación de riesgo")
+                        if es_caja_hist:
+                            opciones_h = ["Sin hallazgos", "Compra sin soporte", "Diferencia de caja no justificada", "Fondo no soportado", "Error en registro de compra", "Otro"]
+                        else:
+                            opciones_h = ["Sin hallazgos", "Diferencia de saldos no justificada", "Pago no registrado", "Intereses/seguros/comisiones no registrados", "Abono o reclasificación no registrada", "Falta soporte del crédito", "Otro"]
+                        hallazgo_esp = st.selectbox("Categoría del hallazgo", opciones_h, key=f"esp_hallazgo_{fila['id']}")
+                        detalle_esp = st.text_area("Detalle / observaciones del auditor", key=f"esp_detalle_{fila['id']}")
+                        if es_caja_hist:
+                            st.caption("Resultado esperado: CUADRA. Un sobrante o faltante debe quedar explicado antes de aprobar.")
+                        else:
+                            st.caption("Resultado esperado: diferencia identificada y conciliada, o explicación documentada antes de aprobar.")
+
+                    with a4:
+                        st.subheader("⚡ Dictamen y decisión")
+                        decision_esp = st.radio("Seleccione Acción:", ["✅ Aprobar Conciliación", "❌ Devolver a Corrección"], key=f"esp_dec_{fila['id']}")
+                        checklist_esp = {"chk_1":chk1, "chk_2":chk2, "chk_3":chk3, "chk_4":chk4, "chk_5":chk5}
+                        if "Aprobar" in decision_esp:
+                            if st.button("✅ Confirmar y Emitir Aprobación", key=f"esp_aprobar_{fila['id']}", type="primary"):
+                                if not all(checklist_esp.values()):
+                                    st.error("Debes completar todas las verificaciones del checklist antes de aprobar.")
+                                elif hallazgo_esp != "Sin hallazgos" and not detalle_esp.strip():
+                                    st.error("Debes detallar el hallazgo antes de aprobar.")
+                                else:
+                                    actualizar_estado_auditoria(fila["id"], "Aprobada", usuario_actual["nombre"], checklist=checklist_esp)
+                                    st.success("🎉 Conciliación aprobada y auditada correctamente.")
+                                    st.rerun()
+                        else:
+                            if st.button("❌ Confirmar y Devolver al Preparador", key=f"esp_devolver_{fila['id']}"):
+                                if not detalle_esp.strip():
+                                    st.error("Debes ingresar el detalle de las observaciones antes de devolver.")
+                                else:
+                                    actualizar_estado_auditoria(fila["id"], "Requiere corrección", usuario_actual["nombre"], motivo_correccion=detalle_esp, tipo_hallazgo=hallazgo_esp, checklist=checklist_esp)
+                                    st.warning("⚠️ Conciliación devuelta al preparador con los hallazgos registrados.")
+                                    st.rerun()
                     continue
 
                 if es_tc:
