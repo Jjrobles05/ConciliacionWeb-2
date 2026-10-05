@@ -2903,7 +2903,7 @@ elif menu_seleccionado == "📋 Historial":
                         "ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS", "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"
                     )
 
-                c_act1, c_act2, c_act3 = st.columns(3)
+                c_act1, c_act2, c_act3, c_act4 = st.columns(4)
                 with c_act1:
                     if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
                         st.session_state.conciliacion_a_editar = fila['id']
@@ -2921,6 +2921,30 @@ elif menu_seleccionado == "📋 Historial":
                     pdf_bytes = generar_pdf_conciliacion(c_data, datos, nombres_titulos)
                     nombre_pdf = f"CONCILIACION_{consecutivo_str}_{limpiar_nombre_archivo(c_data.get('empresa'))}.pdf"
                     st.download_button("📄 Descargar PDF", data=pdf_bytes, file_name=nombre_pdf, mime="application/pdf")
+
+                with c_act4:
+                    if rol_actual == "Administrador":
+                        if st.button("🗑️ Eliminar", key=f"btn_delete_conc_{fila['id']}", use_container_width=True):
+                            st.session_state.conciliacion_a_eliminar = int(fila['id'])
+                            st.rerun()
+
+                if rol_actual == "Administrador" and int(st.session_state.get("conciliacion_a_eliminar", -1)) == int(fila['id']):
+                    st.warning(f"⚠️ ¿Está seguro de eliminar la conciliación **{consecutivo_str}**? Esta acción no se puede deshacer.")
+                    d1, d2 = st.columns(2)
+                    with d1:
+                        if st.button("🗑️ Sí, eliminar conciliación", key=f"confirm_delete_conc_{fila['id']}", type="primary", use_container_width=True):
+                            eliminar_conciliacion_db(int(fila['id']))
+                            st.session_state.pop("conciliacion_a_eliminar", None)
+                            st.success(f"✅ {consecutivo_str} eliminada correctamente.")
+                            try:
+                                st.cache_data.clear()
+                            except Exception:
+                                pass
+                            st.rerun()
+                    with d2:
+                        if st.button("❌ Cancelar", key=f"cancel_delete_conc_{fila['id']}", use_container_width=True):
+                            st.session_state.pop("conciliacion_a_eliminar", None)
+                            st.rerun()
 
 elif menu_seleccionado == "👥 Usuarios":
     st.title("👥 Gestión de Usuarios y Roles")
