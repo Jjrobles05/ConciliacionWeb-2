@@ -1073,6 +1073,135 @@ def guardar_arqueo_caja_db(caja_id,empresa_id,fecha_arqueo,periodo,saldo_inicial
     finally: conn.close()
 
 
+
+def obtener_detalle_conciliacion_credito(id_conciliacion):
+    try:
+        conn=conectar_db(); c=conn.cursor()
+        c.execute("""SELECT cc.id,cc.empresa_id,cc.periodo,cc.saldo_libros,cc.saldo_extracto,cc.diferencia,
+                    cc.resultado,cc.observaciones,cc.nombre_soporte,cc.preparado_por,cc.revisado_por,
+                    cc.fecha_creacion,cc.fecha_revision,cc.workflow_status,cc.motivo_correccion,
+                    cr.entidad_financiera,cr.numero_credito,cr.descripcion,cb.banco,cb.numero_cuenta,e.razon_social,e.nit
+                    FROM conciliaciones_creditos cc
+                    JOIN creditos cr ON cc.credito_id=cr.id
+                    LEFT JOIN cuentas_bancarias cb ON cr.cuenta_id=cb.id
+                    LEFT JOIN empresas e ON cc.empresa_id=e.id WHERE cc.id=?""",(int(id_conciliacion),))
+        row=c.fetchone(); conn.close()
+        if not row: return None
+        return {'id':row[0],'empresa_id':row[1],'periodo':row[2],'saldo_libros':float(row[3] or 0),
+                'saldo_extracto':float(row[4] or 0),'diferencia':float(row[5] or 0),'resultado':row[6] or '',
+                'observaciones':row[7] or '','nombre_soporte':row[8] or '','preparado_por':row[9] or '',
+                'revisado_por':row[10] or '','fecha_creacion':row[11] or '','fecha_revision':row[12] or '',
+                'workflow_status':row[13] or 'Borrador','motivo_correccion':row[14] or '',
+                'entidad_financiera':row[15] or '','numero_credito':row[16] or '','descripcion':row[17] or '',
+                'banco':row[18] or '','numero_cuenta':row[19] or '','empresa':row[20] or '','nit':row[21] or ''}
+    except Exception:
+        return None
+
+
+def actualizar_estado_credito_auditoria(id_conciliacion,nuevo_estado,revisado_por,motivo_correccion=''):
+    conn=conectar_db(); c=conn.cursor()
+    try:
+        c.execute("UPDATE conciliaciones_creditos SET workflow_status=?,revisado_por=?,fecha_revision=?,motivo_correccion=? WHERE id=?",
+                  (nuevo_estado,int(revisado_por) if str(revisado_por).isdigit() else None,datetime.now().strftime('%Y-%m-%d %H:%M:%S'),str(motivo_correccion or ''),int(id_conciliacion)))
+        conn.commit(); return True
+    except Exception:
+        conn.rollback(); return False
+    finally: conn.close()
+
+
+def obtener_detalle_arqueo_caja(id_arqueo):
+    try:
+        conn=conectar_db(); c=conn.cursor()
+        c.execute("""SELECT ac.id,ac.empresa_id,ac.fecha_arqueo,ac.periodo,ac.saldo_inicial,ac.fondo_autorizado,
+                    ac.total_compras,ac.saldo_teorico,ac.efectivo_fisico,ac.diferencia,ac.resultado,ac.observaciones,
+                    ac.preparado_por,ac.revisado_por,ac.fecha_creacion,ac.fecha_revision,ac.workflow_status,
+                    ac.motivo_correccion,ca.nombre_caja,ca.responsable,e.razon_social,e.nit
+                    FROM arqueos_caja ac JOIN cajas ca ON ac.caja_id=ca.id LEFT JOIN empresas e ON ac.empresa_id=e.id
+                    WHERE ac.id=?""",(int(id_arqueo),))
+        row=c.fetchone()
+        if not row: conn.close(); return None
+        c.execute("SELECT numero_item,fecha_compra,proveedor,concepto,factura_soporte,forma_pago,valor_compra,iva_otros,total_pagado,observaciones FROM arqueos_caja_compras WHERE arqueo_id=? ORDER BY numero_item",(int(id_arqueo),))
+        compras=c.fetchall()
+        c.execute("SELECT tipo,denominacion,cantidad,valor_total FROM arqueos_caja_efectivo WHERE arqueo_id=? ORDER BY tipo,denominacion",(int(id_arqueo),))
+        efectivo=c.fetchall(); conn.close()
+        return {'id':row[0],'empresa_id':row[1],'fecha_arqueo':row[2] or '','periodo':row[3] or '',
+                'saldo_inicial':float(row[4] or 0),'fondo_autorizado':float(row[5] or 0),'total_compras':float(row[6] or 0),
+                'saldo_teorico':float(row[7] or 0),'efectivo_fisico':float(row[8] or 0),'diferencia':float(row[9] or 0),
+                'resultado':row[10] or '','observaciones':row[11] or '','preparado_por':row[12] or '',
+                'revisado_por':row[13] or '','fecha_creacion':row[14] or '','fecha_revision':row[15] or '',
+                'workflow_status':row[16] or 'Borrador','motivo_correccion':row[17] or '',
+                'caja':row[18] or '','responsable':row[19] or '','empresa':row[20] or '','nit':row[21] or '',
+                'compras':compras,'efectivo':efectivo}
+    except Exception:
+        return None
+
+
+def actualizar_estado_caja_auditoria(id_arqueo,nuevo_estado,revisado_por,motivo_correccion=''):
+    conn=conectar_db(); c=conn.cursor()
+    try:
+        c.execute("UPDATE arqueos_caja SET workflow_status=?,revisado_por=?,fecha_revision=?,motivo_correccion=? WHERE id=?",
+                  (nuevo_estado,int(revisado_por) if str(revisado_por).isdigit() else None,datetime.now().strftime('%Y-%m-%d %H:%M:%S'),str(motivo_correccion or ''),int(id_arqueo)))
+        conn.commit(); return True
+    except Exception:
+        conn.rollback(); return False
+    finally: conn.close()
+
+
+def generar_excel_credito_reporte(data):
+    wb=Workbook(); ws=wb.active; ws.title='Conciliación Crédito'
+    ws.append(['REPORTE DE CONCILIACIÓN DE CRÉDITO']); ws.append([])
+    datos=[('Empresa',data.get('empresa')),('NIT',data.get('nit')),('Banco',data.get('banco')),('Cuenta',data.get('numero_cuenta')),
+           ('Entidad financiera',data.get('entidad_financiera')),('Número de crédito',data.get('numero_credito')),('Período',data.get('periodo')),
+           ('Saldo según libros',data.get('saldo_libros')),('Saldo según extracto',data.get('saldo_extracto')),('Diferencia',data.get('diferencia')),
+           ('Resultado',data.get('resultado')),('Estado',data.get('workflow_status')),('Preparado por',data.get('preparado_por')),('Revisado por',data.get('revisado_por')),
+           ('Fecha creación',data.get('fecha_creacion')),('Fecha revisión',data.get('fecha_revision')),('Observaciones',data.get('observaciones'))]
+    for k,v in datos: ws.append([k,v])
+    for cell in ws[1]: cell.font=Font(bold=True,size=14)
+    for row in range(3,20): ws.cell(row,1).font=Font(bold=True)
+    ws.column_dimensions['A'].width=28; ws.column_dimensions['B'].width=55
+    for row in range(10,13): ws.cell(row,2).number_format='$ #,##0.00'
+    bio=io.BytesIO(); wb.save(bio); bio.seek(0); return bio.getvalue()
+
+
+def generar_pdf_credito_reporte(data):
+    bio=io.BytesIO(); doc=SimpleDocTemplate(bio,pagesize=portrait(letter),rightMargin=35,leftMargin=35,topMargin=35,bottomMargin=35)
+    styles=getSampleStyleSheet(); story=[Paragraph('REPORTE DE CONCILIACIÓN DE CRÉDITO',styles['Title']),Spacer(1,12)]
+    rows=[['Campo','Valor'],['Empresa',data.get('empresa','')],['NIT',data.get('nit','')],['Banco',data.get('banco','')],['Cuenta',data.get('numero_cuenta','')],['Entidad financiera',data.get('entidad_financiera','')],['Número de crédito',data.get('numero_credito','')],['Período',data.get('periodo','')],['Saldo libros',formatear_moneda(data.get('saldo_libros',0))],['Saldo extracto',formatear_moneda(data.get('saldo_extracto',0))],['Diferencia',formatear_moneda(data.get('diferencia',0))],['Resultado',data.get('resultado','')],['Estado',data.get('workflow_status','')],['Preparado por',str(data.get('preparado_por',''))],['Revisado por',str(data.get('revisado_por',''))],['Observaciones',data.get('observaciones','')]]
+    t=Table(rows,colWidths=[150,350]); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1F4E78')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.5,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('PADDING',(0,0),(-1,-1),6)])); story.append(t); doc.build(story); return bio.getvalue()
+
+
+def generar_excel_caja_reporte(data):
+    wb=Workbook(); ws=wb.active; ws.title='Arqueo de Caja'
+    ws.append(['REPORTE DE CUADRE DE CAJA']); ws.append([])
+    datos=[('Empresa',data.get('empresa')),('NIT',data.get('nit')),('Caja',data.get('caja')),('Responsable',data.get('responsable')),('Fecha',data.get('fecha_arqueo')),('Período',data.get('periodo')),('Saldo inicial',data.get('saldo_inicial')),('Fondo autorizado',data.get('fondo_autorizado')),('Total compras',data.get('total_compras')),('Saldo teórico',data.get('saldo_teorico')),('Efectivo físico',data.get('efectivo_fisico')),('Diferencia',data.get('diferencia')),('Resultado',data.get('resultado')),('Estado',data.get('workflow_status')),('Preparado por',data.get('preparado_por')),('Revisado por',data.get('revisado_por')),('Observaciones',data.get('observaciones'))]
+    for k,v in datos: ws.append([k,v])
+    ws.append([]); ws.append(['DETALLE DE COMPRAS']); ws.append(['N°','Fecha','Proveedor','Concepto','Factura/Soporte','Forma de pago','Valor compra','IVA/otros','Total pagado','Observaciones'])
+    for r in data.get('compras',[]): ws.append(list(r))
+    ws.append([]); ws.append(['CONTEO FÍSICO']); ws.append(['Tipo','Denominación','Cantidad','Valor total'])
+    for r in data.get('efectivo',[]): ws.append(list(r))
+    for cell in ws[1]: cell.font=Font(bold=True,size=14)
+    for col in ['A','B','C','D','E','F','G','H','I','J']: ws.column_dimensions[col].width=18
+    for row in ws.iter_rows():
+        for cell in row:
+            if cell.column in [7,8,9,4] and isinstance(cell.value,(int,float)): cell.number_format='$ #,##0.00'
+    bio=io.BytesIO(); wb.save(bio); bio.seek(0); return bio.getvalue()
+
+
+def generar_pdf_caja_reporte(data):
+    bio=io.BytesIO(); doc=SimpleDocTemplate(bio,pagesize=portrait(letter),rightMargin=30,leftMargin=30,topMargin=30,bottomMargin=30)
+    styles=getSampleStyleSheet(); story=[Paragraph('REPORTE DE CUADRE DE CAJA',styles['Title']),Spacer(1,12)]
+    resumen=[['Campo','Valor'],['Empresa',data.get('empresa','')],['Caja',data.get('caja','')],['Responsable',data.get('responsable','')],['Fecha',data.get('fecha_arqueo','')],['Período',data.get('periodo','')],['Saldo inicial',formatear_moneda(data.get('saldo_inicial',0))],['Total compras',formatear_moneda(data.get('total_compras',0))],['Saldo teórico',formatear_moneda(data.get('saldo_teorico',0))],['Efectivo físico',formatear_moneda(data.get('efectivo_fisico',0))],['Diferencia',formatear_moneda(data.get('diferencia',0))],['Resultado',data.get('resultado','')],['Estado',data.get('workflow_status','')],['Observaciones',data.get('observaciones','')]]
+    t=Table(resumen,colWidths=[150,350]); t.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#1F4E78')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),('GRID',(0,0),(-1,-1),0.5,colors.grey),('VALIGN',(0,0),(-1,-1),'TOP'),('PADDING',(0,0),(-1,-1),5)])); story.append(t); story.append(Spacer(1,12)); story.append(Paragraph('Detalle de compras',styles['Heading2']))
+    compras=[['N°','Fecha','Proveedor','Concepto','Valor','IVA/otros','Total']]
+    for r in data.get('compras',[]): compras.append([str(r[0]),str(r[1]),str(r[2]),str(r[3]),formatear_moneda(r[6]),formatear_moneda(r[7]),formatear_moneda(r[8])])
+    if len(compras)>1:
+        t2=Table(compras,colWidths=[25,55,95,145,65,65,65]); t2.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#5B9BD5')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.4,colors.grey),('FONTSIZE',(0,0),(-1,-1),7),('VALIGN',(0,0),(-1,-1),'TOP')])); story.append(t2)
+    story.append(Spacer(1,12)); story.append(Paragraph('Conteo físico de efectivo',styles['Heading2']))
+    ef=[['Tipo','Denominación','Cantidad','Valor total']]+[[str(r[0]),formatear_moneda(r[1]),str(r[2]),formatear_moneda(r[3])] for r in data.get('efectivo',[])]
+    if len(ef)>1:
+        t3=Table(ef,colWidths=[100,100,80,120]); t3.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#5B9BD5')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),0.4,colors.grey),('FONTSIZE',(0,0),(-1,-1),8)])); story.append(t3)
+    doc.build(story); return bio.getvalue()
+
 def obtener_conciliaciones_creditos(empresa_nombre=None):
     try:
         conn=conectar_db(); c=conn.cursor(); q="""SELECT cc.id,cc.periodo,cc.saldo_libros,cc.saldo_extracto,cc.diferencia,cc.resultado,cc.workflow_status,cc.fecha_creacion,cr.entidad_financiera,cr.numero_credito,cb.banco,cb.numero_cuenta,e.razon_social FROM conciliaciones_creditos cc JOIN creditos cr ON cc.credito_id=cr.id LEFT JOIN cuentas_bancarias cb ON cr.cuenta_id=cb.id LEFT JOIN empresas e ON cc.empresa_id=e.id"""; p=()
@@ -1144,7 +1273,14 @@ def vista_conciliacion_creditos(empresa_activa_id,empresa_activa_nombre,empresas
     with b2:
         if st.button('🚀 Enviar a Revisión',key='btn_credito_revision',type='primary'): guardar_conciliacion_credito_db(credito_id,empresa_activa_id,periodo,saldo_libros,saldo_extracto,observaciones,soporte,soporte.name if soporte else '',usuario_actual['id'],'Pendiente de revisión'); st.success('Conciliación de crédito enviada a Revisión.')
     hist=obtener_conciliaciones_creditos(empresa_activa_nombre)
-    if not hist.empty: st.divider(); st.subheader('📋 Conciliaciones de créditos registradas'); st.dataframe(hist,use_container_width=True,hide_index=True)
+    if not hist.empty:
+        st.divider(); st.subheader('📋 Conciliaciones de créditos registradas'); st.dataframe(hist,use_container_width=True,hide_index=True)
+        rep_id=st.selectbox('Generar reporte del crédito',hist['id'].tolist(),format_func=lambda x:f"CRED-{int(x):06d}",key='credito_rep_id')
+        rep=obtener_detalle_conciliacion_credito(rep_id)
+        if rep:
+            rc1,rc2=st.columns(2)
+            with rc1: st.download_button('📊 Descargar Excel',data=generar_excel_credito_reporte(rep),file_name=f"CREDITO_{int(rep_id):06d}.xlsx",mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key=f'cred_excel_{rep_id}')
+            with rc2: st.download_button('📄 Descargar PDF',data=generar_pdf_credito_reporte(rep),file_name=f"CREDITO_{int(rep_id):06d}.pdf",mime='application/pdf',key=f'cred_pdf_{rep_id}')
 
 
 def vista_cuadre_caja(empresa_activa_id,empresa_activa_nombre,empresas_df,usuario_actual):
@@ -1189,7 +1325,14 @@ def vista_cuadre_caja(empresa_activa_id,empresa_activa_nombre,empresas_df,usuari
         if st.button('🚀 Enviar a Revisión',key='btn_caja_revision',type='primary'):
             guardar_arqueo_caja_db(caja_id,empresa_activa_id,fecha,periodo,saldo_inicial,fondo,compras,efectivo,obs,usuario_actual['id'],'Pendiente de revisión'); st.success('Arqueo de caja enviado a Revisión.')
     hist=obtener_arqueos_caja(empresa_activa_nombre)
-    if not hist.empty: st.divider(); st.subheader('📋 Arqueos de caja registrados'); st.dataframe(hist,use_container_width=True,hide_index=True)
+    if not hist.empty:
+        st.divider(); st.subheader('📋 Arqueos de caja registrados'); st.dataframe(hist,use_container_width=True,hide_index=True)
+        rep_id=st.selectbox('Generar reporte del arqueo',hist['id'].tolist(),format_func=lambda x:f"CAJA-{int(x):06d}",key='caja_rep_id')
+        rep=obtener_detalle_arqueo_caja(rep_id)
+        if rep:
+            rc1,rc2=st.columns(2)
+            with rc1: st.download_button('📊 Descargar Excel',data=generar_excel_caja_reporte(rep),file_name=f"CAJA_{int(rep_id):06d}.xlsx",mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key=f'caja_excel_{rep_id}')
+            with rc2: st.download_button('📄 Descargar PDF',data=generar_pdf_caja_reporte(rep),file_name=f"CAJA_{int(rep_id):06d}.pdf",mime='application/pdf',key=f'caja_pdf_{rep_id}')
 
 
 def obtener_opciones_menu(rol):
@@ -2118,6 +2261,60 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                                 st.warning("⚠️ Conciliación devuelta al preparador.")
                                 st.rerun()
 
+
+    # ==========================================================
+    # AUDITORÍA DE CRÉDITOS Y CAJAS
+    # ==========================================================
+    st.divider()
+    st.subheader("💳💵 Conciliaciones de Créditos y Cuadres de Caja")
+    st.caption("Los registros enviados a revisión desde Créditos y Caja también aparecen aquí para aprobación o devolución.")
+
+    creditos_aud = obtener_conciliaciones_creditos(empresa_activa_nombre)
+    creditos_pend = creditos_aud[creditos_aud['workflow_status'] == 'Pendiente de revisión'] if not creditos_aud.empty else pd.DataFrame()
+    if not creditos_pend.empty:
+        st.markdown("### 💳 Créditos pendientes")
+        for _, fila in creditos_pend.iterrows():
+            with st.expander(f"💳 CRED-{int(fila['id']):06d} | {fila.get('empresa','')} | {fila.get('banco','')} - {fila.get('numero_cuenta','')} | {fila.get('entidad_financiera','')} {fila.get('numero_credito','')} | {fila.get('periodo','')}"):
+                d=obtener_detalle_conciliacion_credito(fila['id'])
+                if d:
+                    c1,c2,c3=st.columns(3); c1.metric('Saldo libros',formatear_moneda(d['saldo_libros'])); c2.metric('Saldo extracto',formatear_moneda(d['saldo_extracto'])); c3.metric('Diferencia',formatear_moneda(d['diferencia']))
+                    st.write(f"**Resultado:** {d['resultado']}  |  **Preparado por:** {d['preparado_por']}")
+                    if d['observaciones']: st.info(d['observaciones'])
+                    accion=st.radio('Decisión de auditoría',['✅ Aprobar','❌ Devolver a corrección'],horizontal=True,key=f'cred_dec_{fila["id"]}')
+                    if accion.startswith('❌'):
+                        motivo=st.text_area('Observación para el preparador',key=f'cred_mot_{fila["id"]}')
+                        if st.button('❌ Confirmar devolución',key=f'cred_dev_{fila["id"]}'):
+                            if not motivo.strip(): st.error('Debes indicar el motivo de la devolución.')
+                            elif actualizar_estado_credito_auditoria(fila['id'],'Requiere corrección',usuario_actual['id'],motivo): st.warning('Crédito devuelto al preparador.'); st.rerun()
+                    else:
+                        if st.button('✅ Aprobar conciliación de crédito',key=f'cred_apr_{fila["id"]}',type='primary'):
+                            if actualizar_estado_credito_auditoria(fila['id'],'Aprobada',usuario_actual['id']): st.success('Conciliación de crédito aprobada.'); st.rerun()
+    else:
+        st.info('No hay conciliaciones de crédito pendientes de auditoría.')
+
+    cajas_aud = obtener_arqueos_caja(empresa_activa_nombre)
+    cajas_pend = cajas_aud[cajas_aud['workflow_status'] == 'Pendiente de revisión'] if not cajas_aud.empty else pd.DataFrame()
+    if not cajas_pend.empty:
+        st.markdown("### 💵 Cuadres de caja pendientes")
+        for _, fila in cajas_pend.iterrows():
+            with st.expander(f"💵 CAJA-{int(fila['id']):06d} | {fila.get('empresa','')} | {fila.get('caja','')} | {fila.get('periodo','')}"):
+                d=obtener_detalle_arqueo_caja(fila['id'])
+                if d:
+                    c1,c2,c3,c4=st.columns(4); c1.metric('Saldo teórico',formatear_moneda(d['saldo_teorico'])); c2.metric('Efectivo físico',formatear_moneda(d['efectivo_fisico'])); c3.metric('Diferencia',formatear_moneda(d['diferencia'])); c4.metric('Resultado',d['resultado'])
+                    st.write(f"**Responsable:** {d['responsable']}  |  **Preparado por:** {d['preparado_por']}")
+                    if d['observaciones']: st.info(d['observaciones'])
+                    accion=st.radio('Decisión de auditoría',['✅ Aprobar','❌ Devolver a corrección'],horizontal=True,key=f'caja_dec_{fila["id"]}')
+                    if accion.startswith('❌'):
+                        motivo=st.text_area('Observación para el preparador',key=f'caja_mot_{fila["id"]}')
+                        if st.button('❌ Confirmar devolución',key=f'caja_dev_{fila["id"]}'):
+                            if not motivo.strip(): st.error('Debes indicar el motivo de la devolución.')
+                            elif actualizar_estado_caja_auditoria(fila['id'],'Requiere corrección',usuario_actual['id'],motivo): st.warning('Arqueo de caja devuelto al preparador.'); st.rerun()
+                    else:
+                        if st.button('✅ Aprobar cuadre de caja',key=f'caja_apr_{fila["id"]}',type='primary'):
+                            if actualizar_estado_caja_auditoria(fila['id'],'Aprobada',usuario_actual['id']): st.success('Cuadre de caja aprobado.'); st.rerun()
+    else:
+        st.info('No hay cuadres de caja pendientes de auditoría.')
+
 elif menu_seleccionado == "📊 Dashboard":
     st.title("📊 DASHBOARD Y CENTRO DE CONTROL FINANCIERO")
     if empresa_activa_nombre != "Todas las empresas":
@@ -2739,9 +2936,51 @@ elif menu_seleccionado == "⚙️ Administración":
 
 elif menu_seleccionado == "📄 Reportes":
     st.title("📄 Reportes y Descargas")
-    historial = obtener_historial(empresa_activa_nombre)
-    if not historial.empty:
-        csv = historial.to_csv(index=False).encode('utf-8')
-        st.download_button("📥 Descargar Historial Completo (CSV)", data=csv, file_name=f"historial_{limpiar_nombre_archivo(empresa_activa_nombre)}.csv", mime="text/csv")
-    else:
-        st.info("No hay información registrada para generar reportes.")
+    st.caption("Genera reportes en Excel y PDF de las conciliaciones bancarias, créditos y cuadres de caja.")
+    tab_b, tab_c, tab_k = st.tabs(["🏦 Bancarias", "💳 Créditos", "💵 Cajas"])
+
+    with tab_b:
+        historial=obtener_historial(empresa_activa_nombre)
+        if historial.empty:
+            st.info("No hay conciliaciones bancarias registradas.")
+        else:
+            st.dataframe(historial[['id','empresa','banco','cuenta','mes','workflow_status','resultado_final']],use_container_width=True,hide_index=True)
+            rid=st.selectbox('Seleccione conciliación bancaria',historial['id'].tolist(),format_func=lambda x:f"CONC-{int(x):06d}",key='rep_banco_id')
+            c_data=obtener_conciliacion_por_id(rid)
+            if c_data:
+                try: datos=json.loads(c_data.get('datos_json','{}'))
+                except Exception: datos={}
+                nombres={'t1':'SALIDAS NO REGISTRADAS EN EXTRACTO','t2':'SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS','t3':'ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS','t4':'ENTRADAS NO EVIDENCIADAS EN EXTRACTOS'}
+                pdf=generar_pdf_conciliacion(c_data,datos,nombres)
+                excel=c_data.get('excel')
+                r1,r2=st.columns(2)
+                with r1:
+                    if excel: st.download_button('📊 Descargar Excel',data=bytes(excel),file_name=f"CONCILIACION_{int(rid):06d}.xlsx",mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key=f'rep_banco_excel_{rid}')
+                with r2: st.download_button('📄 Descargar PDF',data=pdf,file_name=f"CONCILIACION_{int(rid):06d}.pdf",mime='application/pdf',key=f'rep_banco_pdf_{rid}')
+
+    with tab_c:
+        hist=obtener_conciliaciones_creditos(empresa_activa_nombre)
+        if hist.empty:
+            st.info("No hay conciliaciones de crédito registradas.")
+        else:
+            st.dataframe(hist[['id','empresa','banco','numero_cuenta','entidad_financiera','numero_credito','periodo','diferencia','resultado','workflow_status']],use_container_width=True,hide_index=True)
+            rid=st.selectbox('Seleccione conciliación de crédito',hist['id'].tolist(),format_func=lambda x:f"CRED-{int(x):06d}",key='rep_credito_id')
+            d=obtener_detalle_conciliacion_credito(rid)
+            if d:
+                r1,r2=st.columns(2)
+                with r1: st.download_button('📊 Descargar Excel',data=generar_excel_credito_reporte(d),file_name=f"CREDITO_{int(rid):06d}.xlsx",mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key=f'rep_cred_excel_{rid}')
+                with r2: st.download_button('📄 Descargar PDF',data=generar_pdf_credito_reporte(d),file_name=f"CREDITO_{int(rid):06d}.pdf",mime='application/pdf',key=f'rep_cred_pdf_{rid}')
+
+    with tab_k:
+        hist=obtener_arqueos_caja(empresa_activa_nombre)
+        if hist.empty:
+            st.info("No hay cuadres de caja registrados.")
+        else:
+            st.dataframe(hist[['id','empresa','caja','fecha_arqueo','periodo','total_compras','saldo_teorico','efectivo_fisico','diferencia','resultado','workflow_status']],use_container_width=True,hide_index=True)
+            rid=st.selectbox('Seleccione arqueo de caja',hist['id'].tolist(),format_func=lambda x:f"CAJA-{int(x):06d}",key='rep_caja_id')
+            d=obtener_detalle_arqueo_caja(rid)
+            if d:
+                r1,r2=st.columns(2)
+                with r1: st.download_button('📊 Descargar Excel',data=generar_excel_caja_reporte(d),file_name=f"CAJA_{int(rid):06d}.xlsx",mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',key=f'rep_caja_excel_{rid}')
+                with r2: st.download_button('📄 Descargar PDF',data=generar_pdf_caja_reporte(d),file_name=f"CAJA_{int(rid):06d}.pdf",mime='application/pdf',key=f'rep_caja_pdf_{rid}')
+
