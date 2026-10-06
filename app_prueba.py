@@ -71,15 +71,7 @@ def conectar_db():
 # 3. CREACIÓN Y ESTRUCTURA DE TABLAS
 # ==========================================
 def inicializar_db():
-    """
-    INICIO SEGURO: esta rutina NO elimina datos existentes.
-
-    Al arrancar la aplicación solamente crea estructuras que no existan,
-    agrega el campo logo si falta y mantiene la compatibilidad del catálogo
-    legacy `cuentas` con `cuentas_bancarias`. Las rutinas de limpieza/borrado
-    están separadas y solo se ejecutan desde sus acciones explícitas de
-    Administración/Historial.
-    """
+    """Crea únicamente las tablas si no existen usando el esquema Turso actual."""
     conn = conectar_db()
     c = conn.cursor()
     c.execute("""
@@ -2170,7 +2162,16 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                         cexp1, cexp2, cexp3 = st.columns(3)
                         with cexp1:
                             if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                                st.session_state.conciliacion_a_editar = fila['id']; st.session_state.pop("datos_cargados_edit", None); st.session_state.menu_override = "📝 Nueva Conciliación"; st.rerun()
+                                st.session_state.conciliacion_a_editar = int(fila['id'])
+                                st.session_state.pop("datos_cargados_edit", None)
+                                for _k in ["tabla1", "tabla2", "tabla3", "tabla4", "tabla5",
+                                            "caja_compras", "caja_efectivo", "caja_responsable",
+                                            "caja_saldo_inicial", "caja_fondo", "caja_obs",
+                                            "credito_entidad", "credito_numero", "credito_fecha_inicio",
+                                            "credito_fecha_vencimiento", "credito_tasa", "credito_saldo_libros",
+                                            "credito_saldo_extracto", "credito_diferencias", "credito_observaciones"]:
+                                    st.session_state.pop(_k, None)
+                                st.session_state.menu_override = "📝 Nueva Conciliación"; st.rerun()
                         with cexp2:
                             st.download_button("📊 Descargar Excel", data=excel_h, file_name=nombre_h, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dlx_{fila['id']}")
                         with cexp3:
@@ -2679,18 +2680,24 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 del st.session_state.datos_cargados_edit
             st.rerun()
 
-    if "tabla1" not in st.session_state or id_edicion:
-        st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
-    if "tabla2" not in st.session_state or id_edicion:
-        st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla3" not in st.session_state or id_edicion:
-        st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla4" not in st.session_state or id_edicion:
-        st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla5" not in st.session_state or id_edicion:
-        st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
+    # IMPORTANTE: no reinicializar las tablas en cada rerun cuando se está editando.
+    # Streamlit rerun ocurre al modificar cualquier campo; si se vacían aquí,
+    # la conciliación devuelta pierde visualmente los movimientos cargados.
+    if not id_edicion:
+        st.session_state.setdefault("tabla1", pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"]))
+        st.session_state.setdefault("tabla2", pd.DataFrame(columns=["Fecha", "Concepto", "Valor"]))
+        st.session_state.setdefault("tabla3", pd.DataFrame(columns=["Fecha", "Concepto", "Valor"]))
+        st.session_state.setdefault("tabla4", pd.DataFrame(columns=["Fecha", "Concepto", "Valor"]))
+        st.session_state.setdefault("tabla5", pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]))
 
     if id_edicion and "datos_cargados_edit" not in st.session_state:
+        # Al entrar por primera vez a una corrección, partir de tablas vacías
+        # y luego cargar exclusivamente los datos de esta conciliación.
+        st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
+        st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
+        st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
+        st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
+        st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
         c_edit = obtener_conciliacion_por_id(id_edicion)
         if c_edit:
             try:
@@ -3163,8 +3170,16 @@ elif menu_seleccionado == "📋 Historial":
                 c_act1, c_act2, c_act3, c_act4 = st.columns(4)
                 with c_act1:
                     if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                        st.session_state.conciliacion_a_editar = fila['id']
+                        st.session_state.conciliacion_a_editar = int(fila['id'])
                         st.session_state.pop("datos_cargados_edit", None)
+                        # Limpiar solo el estado temporal de edición; NO toca Turso.
+                        for _k in ["tabla1", "tabla2", "tabla3", "tabla4", "tabla5",
+                                    "caja_compras", "caja_efectivo", "caja_responsable",
+                                    "caja_saldo_inicial", "caja_fondo", "caja_obs",
+                                    "credito_entidad", "credito_numero", "credito_fecha_inicio",
+                                    "credito_fecha_vencimiento", "credito_tasa", "credito_saldo_libros",
+                                    "credito_saldo_extracto", "credito_diferencias", "credito_observaciones"]:
+                            st.session_state.pop(_k, None)
                         st.session_state.menu_override = "📝 Nueva Conciliación"
                         st.rerun()
 
