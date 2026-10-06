@@ -19,15 +19,6 @@ from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 
-
-def _limpiar_cache_lecturas():
-    """Invalida únicamente las lecturas cacheadas después de una escritura."""
-    try:
-        st.cache_data.clear()
-    except Exception:
-        pass
-
-
 # ==========================================
 # 1. CONFIGURACIÓN DE PÁGINA
 # ==========================================
@@ -79,9 +70,16 @@ def conectar_db():
 # ==========================================
 # 3. CREACIÓN Y ESTRUCTURA DE TABLAS
 # ==========================================
-@st.cache_resource
 def inicializar_db():
-    """Inicializa el esquema una sola vez por proceso de Streamlit."""
+    """
+    INICIO SEGURO: esta rutina NO elimina datos existentes.
+
+    Al arrancar la aplicación solamente crea estructuras que no existan,
+    agrega el campo logo si falta y mantiene la compatibilidad del catálogo
+    legacy `cuentas` con `cuentas_bancarias`. Las rutinas de limpieza/borrado
+    están separadas y solo se ejecutan desde sus acciones explícitas de
+    Administración/Historial.
+    """
     conn = conectar_db()
     c = conn.cursor()
     c.execute("""
@@ -207,24 +205,6 @@ def inicializar_db():
             UNIQUE(cuenta_id, anio, mes)
         )
     """)
-    # Índices de rendimiento: no cambian campos, formularios ni reglas del aplicativo.
-    for sentencia in (
-        "CREATE INDEX IF NOT EXISTS idx_conc_empresa ON conciliaciones(empresa_id)",
-        "CREATE INDEX IF NOT EXISTS idx_conc_cuenta ON conciliaciones(cuenta_id)",
-        "CREATE INDEX IF NOT EXISTS idx_conc_periodo ON conciliaciones(periodo)",
-        "CREATE INDEX IF NOT EXISTS idx_conc_dictamen ON conciliaciones(dictamen)",
-        "CREATE INDEX IF NOT EXISTS idx_conc_empresa_cuenta_periodo ON conciliaciones(empresa_id, cuenta_id, periodo)",
-        "CREATE INDEX IF NOT EXISTS idx_asig_empresa_periodo ON asignaciones_cuentas(empresa_id, anio, mes)",
-        "CREATE INDEX IF NOT EXISTS idx_asig_usuario_periodo ON asignaciones_cuentas(usuario_id, anio, mes)",
-        "CREATE INDEX IF NOT EXISTS idx_asig_cuenta_periodo ON asignaciones_cuentas(cuenta_id, anio, mes)",
-        "CREATE INDEX IF NOT EXISTS idx_cuentas_banc_empresa ON cuentas_bancarias(empresa_id)",
-        "CREATE INDEX IF NOT EXISTS idx_usuarios_empresa_rol_activo ON usuarios(empresa_id, rol, activo)",
-    ):
-        try:
-            c.execute(sentencia)
-        except Exception:
-            pass
-
     conn.commit()
     conn.close()
 
@@ -233,7 +213,6 @@ inicializar_db()
 # ==========================================
 # 4. CONSULTAS A LA BASE DE DATOS
 # ==========================================
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_empresas():
     try:
         conn = conectar_db()
@@ -247,7 +226,6 @@ def obtener_empresas():
         return pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_empresa_por_id(empresa_id):
     try:
         conn = conectar_db()
@@ -262,7 +240,6 @@ def obtener_empresa_por_id(empresa_id):
     return None
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_logo_empresa(nombre_empresa):
     """Obtiene el logo BLOB de la empresa para mostrarlo en la app y reportes."""
     if not nombre_empresa:
@@ -295,7 +272,6 @@ def guardar_empresa(nombre, nit, logo_bytes=None):
             return False, f"El NIT {nit} ya está registrado para la empresa {existente[1]}."
         c.execute("INSERT INTO empresas (nit, razon_social, logo) VALUES (?, ?, ?)", (nit, nombre, logo_bytes))
         conn.commit()
-        _limpiar_cache_lecturas()
         return True, "Empresa registrada con éxito."
     except Exception as e:
         try: conn.rollback()
@@ -320,7 +296,6 @@ def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
         else:
             c.execute("UPDATE empresas SET razon_social=?, nit=? WHERE id=?", (nombre, nit, int(empresa_id)))
         conn.commit()
-        _limpiar_cache_lecturas()
         return True, "Empresa actualizada con éxito."
     except Exception as e:
         try: conn.rollback()
@@ -348,7 +323,6 @@ def eliminar_empresa_db(empresa_id):
             return False, "No se puede eliminar: la empresa tiene " + ", ".join(partes) + "."
         c.execute("DELETE FROM empresas WHERE id=?", (int(empresa_id),))
         conn.commit()
-        _limpiar_cache_lecturas()
         return True, "Empresa eliminada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -364,7 +338,6 @@ def eliminar_conciliacion_db(conciliacion_id):
     c = conn.cursor()
     c.execute("DELETE FROM conciliaciones WHERE id=?", (int(conciliacion_id),))
     conn.commit()
-    _limpiar_cache_lecturas()
     conn.close()
 
 
@@ -387,7 +360,6 @@ def limpiar_datos_operativos():
                 pass
 
         conn.commit()
-        _limpiar_cache_lecturas()
         return True, "Se eliminaron bancos, cuentas y conciliaciones. Empresas y usuarios se conservaron."
     except Exception as e:
         try:
@@ -425,7 +397,6 @@ def reiniciar_datos_aplicativo():
                 pass
 
         conn.commit()
-        _limpiar_cache_lecturas()
         return True, "El aplicativo quedó completamente limpio. Ahora puedes crear el primer Administrador."
     except Exception as e:
         try:
@@ -437,7 +408,6 @@ def reiniciar_datos_aplicativo():
         conn.close()
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_cuentas(empresa_id=None):
     try:
         conn = conectar_db()
@@ -500,7 +470,6 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id, datos_credito=
             cuenta_id = int(c.lastrowid)
 
         conn.commit()
-        _limpiar_cache_lecturas()
 
         # Verificación real: la cuenta debe existir después del COMMIT.
         c.execute("""SELECT id, banco, numero_cuenta, tipo_cuenta, empresa_id
@@ -527,7 +496,6 @@ def actualizar_cuenta_db(cuenta_id, banco, numero_cuenta, tipo_cuenta, empresa_i
         if c.rowcount == 0:
             return False, "No se encontró la cuenta para actualizar."
         conn.commit()
-        _limpiar_cache_lecturas()
         return True, "Cuenta actualizada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -555,7 +523,6 @@ def eliminar_cuenta_db(cuenta_id):
             return False, "No se puede eliminar esta cuenta porque tiene " + " y ".join(partes) + "."
         c.execute("DELETE FROM cuentas_bancarias WHERE id=?", (int(cuenta_id),))
         conn.commit()
-        _limpiar_cache_lecturas()
         return True, f"Cuenta {fila[0]} - {fila[1]} eliminada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -648,7 +615,6 @@ def generar_pdf_asignaciones(asignaciones_df, empresa, anio, mes_num):
     return buffer.getvalue(), nombre
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_asignaciones_mes(empresa_id, anio, mes_num):
     """Devuelve las asignaciones fijas de un mes para una empresa."""
     if not empresa_id:
@@ -672,7 +638,6 @@ def obtener_asignaciones_mes(empresa_id, anio, mes_num):
         conn.close()
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def contar_asignaciones_mes(empresa_id, anio, mes_num):
     if not empresa_id:
         return 0
@@ -719,7 +684,6 @@ def generar_asignacion_mensual(empresa_id, anio, mes_num):
                          VALUES (?,?,?,?,?,?)""",
                       (int(empresa_id), cuenta_id, usuario_id, int(anio), int(mes_num), fecha))
         conn.commit()
-        _limpiar_cache_lecturas()
         resumen={uid:0 for uid in usuarios}
         for idx in range(len(cuentas)):
             resumen[usuarios[idx % len(usuarios)]] += 1
@@ -789,7 +753,6 @@ def asignar_cuentas_nuevas_mes(empresa_id, anio, mes_num):
             resumen_nuevas[usuario_id] += 1
 
         conn.commit()
-        _limpiar_cache_lecturas()
         detalle = ', '.join(
             f"{nombres[uid]}: +{resumen_nuevas[uid]} (total {cargas[uid]})"
             for uid in usuarios if resumen_nuevas[uid] > 0
@@ -806,7 +769,6 @@ def asignar_cuentas_nuevas_mes(empresa_id, anio, mes_num):
         conn.close()
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def contar_cuentas_sin_asignar_mes(empresa_id, anio, mes_num):
     if not empresa_id:
         return 0
@@ -828,7 +790,6 @@ def contar_cuentas_sin_asignar_mes(empresa_id, anio, mes_num):
         conn.close()
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_cuentas_rotadas_por_usuario(empresa_id, anio, mes_num, usuario_id):
     """Para Preparadores devuelve SOLO sus cuentas asignadas en el mes. Para otros roles devuelve todas."""
     if not empresa_id:
@@ -1023,7 +984,6 @@ def guardar_conciliacion_historial(
                      observaciones))
             last_id = int(c.lastrowid)
         conn.commit()
-        _limpiar_cache_lecturas()
         return last_id
     finally:
         conn.close()
@@ -1039,7 +999,6 @@ def _decodificar_observaciones(texto):
         return {}
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_historial(empresa_nombre=None):
     """Lee TODAS las conciliaciones guardadas y las prepara para Historial/Auditoría/Reportes."""
     conn = None
@@ -1109,7 +1068,6 @@ def obtener_historial(empresa_nombre=None):
                 pass
 
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_conciliacion_por_id(id_conciliacion):
     try:
         conn = conectar_db()
@@ -1189,7 +1147,7 @@ def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, mot
         datos.setdefault('fecha_aprobacion', '')
     c.execute("UPDATE conciliaciones SET revisado_por=?, dictamen=?, observaciones=? WHERE id=?",
               (revisado_por, nuevo_estado, json.dumps(datos,ensure_ascii=False), int(id_conciliacion)))
-    conn.commit(); _limpiar_cache_lecturas(); conn.close()
+    conn.commit(); conn.close()
 
 
 # ==========================================
@@ -1270,7 +1228,7 @@ def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, c
                     # No hay registro previo que pueda explicar el conflicto.
                     # Conservamos el error original para que Turso lo reporte en logs.
                     raise exc
-        conn.commit(); _limpiar_cache_lecturas(); return last_id
+        conn.commit(); return last_id
     except Exception:
         try: conn.rollback()
         except Exception: pass
@@ -1396,7 +1354,6 @@ def verificar_password(password, salt, password_hash):
     _, digest = hash_password(password, salt)
     return hmac.compare_digest(digest, password_hash)
 
-@st.cache_data(ttl=30, show_spinner=False)
 def contar_usuarios():
     try:
         conn = conectar_db()
@@ -1417,7 +1374,6 @@ def crear_usuario(usuario, nombre, password, rol, empresa_id=None):
         VALUES (?, ?, ?, ?, ?, 1, ?, ?)
     ''', (str(usuario).strip().lower(), nombre.strip(), password_hash, salt, rol, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), empresa_id))
     conn.commit()
-    _limpiar_cache_lecturas()
     last_id = c.lastrowid
     conn.close()
     return last_id
@@ -1427,7 +1383,6 @@ def actualizar_empresa_usuario(usuario_id, empresa_id):
     c = conn.cursor()
     c.execute("UPDATE usuarios SET empresa_id=? WHERE id=?", (empresa_id, int(usuario_id)))
     conn.commit()
-    _limpiar_cache_lecturas()
     conn.close()
 
 def actualizar_rol_usuario(usuario_id, nuevo_rol):
@@ -1435,7 +1390,6 @@ def actualizar_rol_usuario(usuario_id, nuevo_rol):
     c = conn.cursor()
     c.execute("UPDATE usuarios SET rol=? WHERE id=?", (nuevo_rol, int(usuario_id)))
     conn.commit()
-    _limpiar_cache_lecturas()
     conn.close()
 
 def autenticar_usuario(usuario, password):
@@ -1473,7 +1427,6 @@ def cambiar_contrasena_usuario(usuario_id, contrasena_actual, nueva_contrasena):
         c.execute("UPDATE usuarios SET password_hash=?, salt=? WHERE id=?",
                   (nuevo_hash, nuevo_salt, int(usuario_id)))
         conn.commit()
-        _limpiar_cache_lecturas()
         return True, "Contraseña cambiada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -1519,7 +1472,6 @@ def actualizar_usuario_db(usuario_id, usuario, nombre, rol, activo, empresa_id=N
         if c.rowcount == 0:
             return False, "No se encontró el usuario."
         conn.commit()
-        _limpiar_cache_lecturas()
         return True, "Usuario actualizado correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -1545,7 +1497,6 @@ def eliminar_usuario_db(usuario_id, usuario_actual_id=None):
                 return False, "No se puede eliminar al único Administrador activo."
         c.execute("DELETE FROM usuarios WHERE id=?", (int(usuario_id),))
         conn.commit()
-        _limpiar_cache_lecturas()
         return True, f"Usuario '{fila[0]}' eliminado correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -1554,7 +1505,6 @@ def eliminar_usuario_db(usuario_id, usuario_actual_id=None):
     finally:
         conn.close()
 
-@st.cache_data(ttl=30, show_spinner=False)
 def obtener_usuarios():
     try:
         conn = conectar_db(); c = conn.cursor()
