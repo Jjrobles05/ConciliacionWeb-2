@@ -557,7 +557,11 @@ def preparar_excel_asignaciones(asignaciones_df, empresa, anio, mes_num):
         ws.column_dimensions[chr(64+col)].width = ancho
     fila += 2
     fila = escribir_seccion(ws, fila, "FIRMAS Y TRAZABILIDAD", 7)
-    sig = [("PREPARÓ", preparado_por or "Pendiente", "Fecha: Se registra al guardar"), ("REVISÓ", revisado_por or "Pendiente de revisión", "Fecha: Pendiente"), ("APROBÓ", "Pendiente de aprobación", "Fecha: Pendiente")]
+    # Este reporte de asignaciones no recibe usuarios de firma; no referenciar
+    # variables externas para evitar NameError al abrir Bancos y Cuentas.
+    sig = [("PREPARÓ", "Pendiente", "Fecha: Se registra al guardar"),
+           ("REVISÓ", "Pendiente de revisión", "Fecha: Pendiente"),
+           ("APROBÓ", "Pendiente de aprobación", "Fecha: Pendiente")]
     for idx,(rol,nombre,fecha_txt) in enumerate(sig):
         col=1+idx*2
         ws.cell(fila,col).value=rol; ws.cell(fila,col).font=Font(bold=True)
