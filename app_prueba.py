@@ -70,6 +70,7 @@ def conectar_db():
 # ==========================================
 # 3. CREACIÓN Y ESTRUCTURA DE TABLAS
 # ==========================================
+@st.cache_resource(show_spinner=False)
 def inicializar_db():
     """Crea únicamente las tablas si no existen usando el esquema Turso actual."""
     conn = conectar_db()
@@ -205,6 +206,7 @@ inicializar_db()
 # ==========================================
 # 4. CONSULTAS A LA BASE DE DATOS
 # ==========================================
+@st.cache_data(show_spinner=False)
 def obtener_empresas():
     try:
         conn = conectar_db()
@@ -218,6 +220,7 @@ def obtener_empresas():
         return pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
 
 
+@st.cache_data(show_spinner=False)
 def obtener_empresa_por_id(empresa_id):
     try:
         conn = conectar_db()
@@ -232,6 +235,7 @@ def obtener_empresa_por_id(empresa_id):
     return None
 
 
+@st.cache_data(show_spinner=False)
 def obtener_logo_empresa(nombre_empresa):
     """Obtiene el logo BLOB de la empresa para mostrarlo en la app y reportes."""
     if not nombre_empresa:
@@ -264,6 +268,7 @@ def guardar_empresa(nombre, nit, logo_bytes=None):
             return False, f"El NIT {nit} ya está registrado para la empresa {existente[1]}."
         c.execute("INSERT INTO empresas (nit, razon_social, logo) VALUES (?, ?, ?)", (nit, nombre, logo_bytes))
         conn.commit()
+        st.cache_data.clear()
         return True, "Empresa registrada con éxito."
     except Exception as e:
         try: conn.rollback()
@@ -288,6 +293,7 @@ def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
         else:
             c.execute("UPDATE empresas SET razon_social=?, nit=? WHERE id=?", (nombre, nit, int(empresa_id)))
         conn.commit()
+        st.cache_data.clear()
         return True, "Empresa actualizada con éxito."
     except Exception as e:
         try: conn.rollback()
@@ -315,6 +321,7 @@ def eliminar_empresa_db(empresa_id):
             return False, "No se puede eliminar: la empresa tiene " + ", ".join(partes) + "."
         c.execute("DELETE FROM empresas WHERE id=?", (int(empresa_id),))
         conn.commit()
+        st.cache_data.clear()
         return True, "Empresa eliminada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -352,6 +359,7 @@ def limpiar_datos_operativos():
                 pass
 
         conn.commit()
+        st.cache_data.clear()
         return True, "Se eliminaron bancos, cuentas y conciliaciones. Empresas y usuarios se conservaron."
     except Exception as e:
         try:
@@ -389,6 +397,7 @@ def reiniciar_datos_aplicativo():
                 pass
 
         conn.commit()
+        st.cache_data.clear()
         return True, "El aplicativo quedó completamente limpio. Ahora puedes crear el primer Administrador."
     except Exception as e:
         try:
@@ -400,6 +409,7 @@ def reiniciar_datos_aplicativo():
         conn.close()
 
 
+@st.cache_data(show_spinner=False)
 def obtener_cuentas(empresa_id=None):
     try:
         conn = conectar_db()
@@ -462,6 +472,7 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id, datos_credito=
             cuenta_id = int(c.lastrowid)
 
         conn.commit()
+        st.cache_data.clear()
 
         # Verificación real: la cuenta debe existir después del COMMIT.
         c.execute("""SELECT id, banco, numero_cuenta, tipo_cuenta, empresa_id
@@ -488,6 +499,7 @@ def actualizar_cuenta_db(cuenta_id, banco, numero_cuenta, tipo_cuenta, empresa_i
         if c.rowcount == 0:
             return False, "No se encontró la cuenta para actualizar."
         conn.commit()
+        st.cache_data.clear()
         return True, "Cuenta actualizada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -515,6 +527,7 @@ def eliminar_cuenta_db(cuenta_id):
             return False, "No se puede eliminar esta cuenta porque tiene " + " y ".join(partes) + "."
         c.execute("DELETE FROM cuentas_bancarias WHERE id=?", (int(cuenta_id),))
         conn.commit()
+        st.cache_data.clear()
         return True, f"Cuenta {fila[0]} - {fila[1]} eliminada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -607,6 +620,7 @@ def generar_pdf_asignaciones(asignaciones_df, empresa, anio, mes_num):
     return buffer.getvalue(), nombre
 
 
+@st.cache_data(show_spinner=False)
 def obtener_asignaciones_mes(empresa_id, anio, mes_num):
     """Devuelve las asignaciones fijas de un mes para una empresa."""
     if not empresa_id:
@@ -630,6 +644,7 @@ def obtener_asignaciones_mes(empresa_id, anio, mes_num):
         conn.close()
 
 
+@st.cache_data(show_spinner=False)
 def contar_asignaciones_mes(empresa_id, anio, mes_num):
     if not empresa_id:
         return 0
@@ -676,6 +691,7 @@ def generar_asignacion_mensual(empresa_id, anio, mes_num):
                          VALUES (?,?,?,?,?,?)""",
                       (int(empresa_id), cuenta_id, usuario_id, int(anio), int(mes_num), fecha))
         conn.commit()
+        st.cache_data.clear()
         resumen={uid:0 for uid in usuarios}
         for idx in range(len(cuentas)):
             resumen[usuarios[idx % len(usuarios)]] += 1
@@ -745,6 +761,7 @@ def asignar_cuentas_nuevas_mes(empresa_id, anio, mes_num):
             resumen_nuevas[usuario_id] += 1
 
         conn.commit()
+        st.cache_data.clear()
         detalle = ', '.join(
             f"{nombres[uid]}: +{resumen_nuevas[uid]} (total {cargas[uid]})"
             for uid in usuarios if resumen_nuevas[uid] > 0
@@ -761,6 +778,7 @@ def asignar_cuentas_nuevas_mes(empresa_id, anio, mes_num):
         conn.close()
 
 
+@st.cache_data(show_spinner=False)
 def contar_cuentas_sin_asignar_mes(empresa_id, anio, mes_num):
     if not empresa_id:
         return 0
@@ -782,6 +800,7 @@ def contar_cuentas_sin_asignar_mes(empresa_id, anio, mes_num):
         conn.close()
 
 
+@st.cache_data(show_spinner=False)
 def obtener_cuentas_rotadas_por_usuario(empresa_id, anio, mes_num, usuario_id):
     """Para Preparadores devuelve SOLO sus cuentas asignadas en el mes. Para otros roles devuelve todas."""
     if not empresa_id:
@@ -808,14 +827,48 @@ def obtener_cuentas_rotadas_por_usuario(empresa_id, anio, mes_num, usuario_id):
         conn.close()
 
 
+def _numero_desde_excel(valor):
+    """Convierte importes pegados desde Excel en formato colombiano o estadounidense."""
+    if valor is None:
+        return 0.0
+    v = str(valor).strip().replace("$", "").replace(" ", "")
+    if not v:
+        return 0.0
+    # Si hay punto y coma, el último separador se interpreta como decimal.
+    if "." in v and "," in v:
+        if v.rfind(",") > v.rfind("."):
+            v = v.replace(".", "").replace(",", ".")
+        else:
+            v = v.replace(",", "")
+    elif "," in v:
+        # Una coma final seguida por 1-2 dígitos suele ser decimal; otras son miles.
+        tail = v.rsplit(",", 1)[-1]
+        if len(tail) in (1, 2):
+            v = v.replace(".", "").replace(",", ".")
+        else:
+            v = v.replace(",", "")
+    elif v.count(".") > 1:
+        bits = v.split(".")
+        if len(bits[-1]) in (1, 2):
+            v = "".join(bits[:-1]) + "." + bits[-1]
+        else:
+            v = "".join(bits)
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def parsear_texto_pegado(texto, columnas_esperadas):
-    if not texto or not texto.strip():
+    """Parsea filas copiadas desde Excel/Sheets (TAB entre columnas, salto entre filas)."""
+    if not texto or not str(texto).strip():
         return None
-    lines = [l.strip() for l in texto.strip().splitlines() if l.strip()]
+    lines = [line.rstrip("\r") for line in str(texto).strip().splitlines() if line.strip()]
     rows = []
     for line in lines:
-        parts = line.split('\t') if '\t' in line else line.split(',')
-        parts = [p.strip() for p in parts]
+        # Excel copia columnas con TAB. La coma solo se usa como respaldo si no hay TAB.
+        parts = line.split("\t") if "\t" in line else line.split(",")
+        parts = [part.strip() for part in parts]
         if len(parts) < len(columnas_esperadas):
             parts += [""] * (len(columnas_esperadas) - len(parts))
         else:
@@ -824,15 +877,11 @@ def parsear_texto_pegado(texto, columnas_esperadas):
         for idx, col in enumerate(columnas_esperadas):
             val = parts[idx]
             if col == "Valor" or col not in ["Fecha", "Beneficiario", "Documento", "Concepto"]:
-                val_limpio = val.replace("$", "").replace(".", "").replace(",", ".").replace(" ", "")
-                try:
-                    row_dict[col] = float(val_limpio)
-                except ValueError:
-                    row_dict[col] = 0.0
+                row_dict[col] = _numero_desde_excel(val)
             else:
                 row_dict[col] = val
         rows.append(row_dict)
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=columnas_esperadas)
 
 
 def _json_datos_conciliacion(empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
@@ -976,6 +1025,7 @@ def guardar_conciliacion_historial(
                      observaciones))
             last_id = int(c.lastrowid)
         conn.commit()
+        st.cache_data.clear()
         return last_id
     finally:
         conn.close()
@@ -991,6 +1041,7 @@ def _decodificar_observaciones(texto):
         return {}
 
 
+@st.cache_data(show_spinner=False)
 def obtener_historial(empresa_nombre=None):
     """Lee TODAS las conciliaciones guardadas y las prepara para Historial/Auditoría/Reportes."""
     conn = None
@@ -1060,6 +1111,7 @@ def obtener_historial(empresa_nombre=None):
                 pass
 
 
+@st.cache_data(show_spinner=False)
 def obtener_conciliacion_por_id(id_conciliacion):
     try:
         conn = conectar_db()
@@ -1139,7 +1191,7 @@ def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, mot
         datos.setdefault('fecha_aprobacion', '')
     c.execute("UPDATE conciliaciones SET revisado_por=?, dictamen=?, observaciones=? WHERE id=?",
               (revisado_por, nuevo_estado, json.dumps(datos,ensure_ascii=False), int(id_conciliacion)))
-    conn.commit(); conn.close()
+    conn.commit(); st.cache_data.clear(); conn.close()
 
 
 # ==========================================
@@ -1220,7 +1272,7 @@ def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, c
                     # No hay registro previo que pueda explicar el conflicto.
                     # Conservamos el error original para que Turso lo reporte en logs.
                     raise exc
-        conn.commit(); return last_id
+        conn.commit(); st.cache_data.clear(); return last_id
     except Exception:
         try: conn.rollback()
         except Exception: pass
@@ -1346,6 +1398,7 @@ def verificar_password(password, salt, password_hash):
     _, digest = hash_password(password, salt)
     return hmac.compare_digest(digest, password_hash)
 
+@st.cache_data(show_spinner=False)
 def contar_usuarios():
     try:
         conn = conectar_db()
@@ -1419,6 +1472,7 @@ def cambiar_contrasena_usuario(usuario_id, contrasena_actual, nueva_contrasena):
         c.execute("UPDATE usuarios SET password_hash=?, salt=? WHERE id=?",
                   (nuevo_hash, nuevo_salt, int(usuario_id)))
         conn.commit()
+        st.cache_data.clear()
         return True, "Contraseña cambiada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -1464,6 +1518,7 @@ def actualizar_usuario_db(usuario_id, usuario, nombre, rol, activo, empresa_id=N
         if c.rowcount == 0:
             return False, "No se encontró el usuario."
         conn.commit()
+        st.cache_data.clear()
         return True, "Usuario actualizado correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -1489,6 +1544,7 @@ def eliminar_usuario_db(usuario_id, usuario_actual_id=None):
                 return False, "No se puede eliminar al único Administrador activo."
         c.execute("DELETE FROM usuarios WHERE id=?", (int(usuario_id),))
         conn.commit()
+        st.cache_data.clear()
         return True, f"Usuario '{fila[0]}' eliminado correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -1497,6 +1553,7 @@ def eliminar_usuario_db(usuario_id, usuario_actual_id=None):
     finally:
         conn.close()
 
+@st.cache_data(show_spinner=False)
 def obtener_usuarios():
     try:
         conn = conectar_db(); c = conn.cursor()
@@ -1648,10 +1705,16 @@ with st.sidebar:
 
     st.divider()
     opciones_menu = obtener_opciones_menu(rol_actual)
+    # Conservar el módulo activo durante los reruns de Streamlit. Esto es
+    # especialmente importante al editar una conciliación: presionar Enter
+    # en una celda provoca un rerun, pero no debe devolver al usuario al Dashboard.
     if "menu_override" in st.session_state:
-        menu_seleccionado = st.session_state.pop("menu_override")
-    else:
-        menu_seleccionado = st.radio("Navegación principal", opciones_menu)
+        _menu_forzado = st.session_state.pop("menu_override")
+        if _menu_forzado in opciones_menu:
+            st.session_state["menu_principal"] = _menu_forzado
+    if st.session_state.get("menu_principal") not in opciones_menu:
+        st.session_state["menu_principal"] = opciones_menu[0]
+    menu_seleccionado = st.radio("Navegación principal", opciones_menu, key="menu_principal")
 
     st.divider()
     if st.button("🚪 Cerrar sesión"):
@@ -2671,15 +2734,15 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 del st.session_state.datos_cargados_edit
             st.rerun()
 
-    if "tabla1" not in st.session_state or id_edicion:
+    if "tabla1" not in st.session_state:
         st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
-    if "tabla2" not in st.session_state or id_edicion:
+    if "tabla2" not in st.session_state:
         st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla3" not in st.session_state or id_edicion:
+    if "tabla3" not in st.session_state:
         st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla4" not in st.session_state or id_edicion:
+    if "tabla4" not in st.session_state:
         st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla5" not in st.session_state or id_edicion:
+    if "tabla5" not in st.session_state:
         st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
 
     if id_edicion and "datos_cargados_edit" not in st.session_state:
@@ -2931,8 +2994,9 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.divider()
     st.subheader("Saldos")
     c1, c2 = st.columns(2)
-    val_ext = float(obtener_conciliacion_por_id(id_edicion).get("saldo_extracto", 0.0)) if id_edicion else 0.0
-    val_lib = float(obtener_conciliacion_por_id(id_edicion).get("saldo_libros", 0.0)) if id_edicion else 0.0
+    _datos_edicion = obtener_conciliacion_por_id(id_edicion) if id_edicion else {}
+    val_ext = float((_datos_edicion or {}).get("saldo_extracto", 0.0))
+    val_lib = float((_datos_edicion or {}).get("saldo_libros", 0.0))
     with c1:
         saldo_extracto = st.number_input("Saldo según Extracto", value=val_ext, format="%.2f", key="form_saldo_extracto")
     with c2:
@@ -2948,7 +3012,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     cols_t1 = ["Fecha", "Beneficiario", "Documento", "Valor"]
     c_p1, c_b1, c_del1 = st.columns([3, 1, 1])
     with c_p1:
-        txt_t1 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Beneficiario | Documento | Valor):", key="paste_t1")
+        txt_t1 = st.text_area("📋 Pegue aquí la lista de Excel (Fecha, Beneficiario, Documento y Valor; una fila por movimiento):", key="paste_t1", height=180, placeholder="Copie las filas en Excel y péguelas aquí. Mantenga las columnas separadas por TAB.")
     with c_b1:
         if st.button("+ Cargar Ítems 1", key="btn_parse_t1"):
             df_p1 = parsear_texto_pegado(txt_t1, cols_t1)
@@ -2967,7 +3031,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     cols_t2 = ["Fecha", "Concepto", "Valor"]
     c_p2, c_b2, c_del2 = st.columns([3, 1, 1])
     with c_p2:
-        txt_t2 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t2")
+        txt_t2 = st.text_area("📋 Pegue aquí la lista de Excel (Fecha, Concepto y Valor; una fila por movimiento):", key="paste_t2", height=160, placeholder="Copie las filas en Excel y péguelas aquí. Mantenga las columnas separadas por TAB.")
     with c_b2:
         if st.button("+ Cargar Ítems 2", key="btn_parse_t2"):
             df_p2 = parsear_texto_pegado(txt_t2, cols_t2)
@@ -2986,7 +3050,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     cols_t3 = ["Fecha", "Concepto", "Valor"]
     c_p3, c_b3, c_del3 = st.columns([3, 1, 1])
     with c_p3:
-        txt_t3 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t3")
+        txt_t3 = st.text_area("📋 Pegue aquí la lista de Excel (Fecha, Concepto y Valor; una fila por movimiento):", key="paste_t3", height=160, placeholder="Copie las filas en Excel y péguelas aquí. Mantenga las columnas separadas por TAB.")
     with c_b3:
         if st.button("+ Cargar Ítems 3", key="btn_parse_t3"):
             df_p3 = parsear_texto_pegado(txt_t3, cols_t3)
@@ -3005,7 +3069,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     cols_t4 = ["Fecha", "Concepto", "Valor"]
     c_p4, c_b4, c_del4 = st.columns([3, 1, 1])
     with c_p4:
-        txt_t4 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t4")
+        txt_t4 = st.text_area("📋 Pegue aquí la lista de Excel (Fecha, Concepto y Valor; una fila por movimiento):", key="paste_t4", height=160, placeholder="Copie las filas en Excel y péguelas aquí. Mantenga las columnas separadas por TAB.")
     with c_b4:
         if st.button("+ Cargar Ítems 4", key="btn_parse_t4"):
             df_p4 = parsear_texto_pegado(txt_t4, cols_t4)
@@ -3026,7 +3090,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     cols_t5 = ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
     c_p5, c_b5, c_del5 = st.columns([3, 1, 1])
     with c_p5:
-        txt_t5 = st.text_input("📋 Pegar ítems desde Excel para Gastos Bancarios:", key="paste_t5")
+        txt_t5 = st.text_area("📋 Pegue aquí la lista de gastos bancarios copiada desde Excel (una fila por movimiento):", key="paste_t5", height=180, placeholder="Copie las filas en Excel y péguelas aquí. Mantenga las columnas separadas por TAB.")
     with c_b5:
         if st.button("+ Cargar Ítems 5", key="btn_parse_t5"):
             df_p5 = parsear_texto_pegado(txt_t5, cols_t5)
@@ -3044,12 +3108,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     m4 = total_columna(entradas_extracto)
 
     if es_tc:
-        # Tarjeta de crédito: abonos no registrados (+), compras no
-        # contabilizadas (+), débitos bancarios no contabilizados (-),
-        # compras no evidenciadas en extractos (-).
-        # El orden de las tablas en pantalla es t1..t4, por eso:
-        # diferencia = t4 + t2 - t3 - t1.
-        diferencia_conciliada = m4 + m2 - m3 - m1
+        diferencia_conciliada = m1 + m2 - m3 + m4
     else:
         diferencia_conciliada = m1 - m2 + m3 - m4
 
