@@ -827,14 +827,48 @@ def obtener_cuentas_rotadas_por_usuario(empresa_id, anio, mes_num, usuario_id):
         conn.close()
 
 
+def _numero_desde_excel(valor):
+    """Convierte importes pegados desde Excel en formato colombiano o estadounidense."""
+    if valor is None:
+        return 0.0
+    v = str(valor).strip().replace("$", "").replace(" ", "")
+    if not v:
+        return 0.0
+    # Si hay punto y coma, el último separador se interpreta como decimal.
+    if "." in v and "," in v:
+        if v.rfind(",") > v.rfind("."):
+            v = v.replace(".", "").replace(",", ".")
+        else:
+            v = v.replace(",", "")
+    elif "," in v:
+        # Una coma final seguida por 1-2 dígitos suele ser decimal; otras son miles.
+        tail = v.rsplit(",", 1)[-1]
+        if len(tail) in (1, 2):
+            v = v.replace(".", "").replace(",", ".")
+        else:
+            v = v.replace(",", "")
+    elif v.count(".") > 1:
+        bits = v.split(".")
+        if len(bits[-1]) in (1, 2):
+            v = "".join(bits[:-1]) + "." + bits[-1]
+        else:
+            v = "".join(bits)
+    try:
+        return float(v)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def parsear_texto_pegado(texto, columnas_esperadas):
-    if not texto or not texto.strip():
+    """Parsea filas copiadas desde Excel/Sheets (TAB entre columnas, salto entre filas)."""
+    if not texto or not str(texto).strip():
         return None
-    lines = [l.strip() for l in texto.strip().splitlines() if l.strip()]
+    lines = [line.rstrip("\r") for line in str(texto).strip().splitlines() if line.strip()]
     rows = []
     for line in lines:
-        parts = line.split('\t') if '\t' in line else line.split(',')
-        parts = [p.strip() for p in parts]
+        # Excel copia columnas con TAB. La coma solo se usa como respaldo si no hay TAB.
+        parts = line.split("\t") if "\t" in line else line.split(",")
+        parts = [part.strip() for part in parts]
         if len(parts) < len(columnas_esperadas):
             parts += [""] * (len(columnas_esperadas) - len(parts))
         else:
@@ -843,15 +877,11 @@ def parsear_texto_pegado(texto, columnas_esperadas):
         for idx, col in enumerate(columnas_esperadas):
             val = parts[idx]
             if col == "Valor" or col not in ["Fecha", "Beneficiario", "Documento", "Concepto"]:
-                val_limpio = val.replace("$", "").replace(".", "").replace(",", ".").replace(" ", "")
-                try:
-                    row_dict[col] = float(val_limpio)
-                except ValueError:
-                    row_dict[col] = 0.0
+                row_dict[col] = _numero_desde_excel(val)
             else:
                 row_dict[col] = val
         rows.append(row_dict)
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=columnas_esperadas)
 
 
 def _json_datos_conciliacion(empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
@@ -2704,15 +2734,15 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 del st.session_state.datos_cargados_edit
             st.rerun()
 
-    if "tabla1" not in st.session_state or id_edicion:
+    if "tabla1" not in st.session_state:
         st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
-    if "tabla2" not in st.session_state or id_edicion:
+    if "tabla2" not in st.session_state:
         st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla3" not in st.session_state or id_edicion:
+    if "tabla3" not in st.session_state:
         st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla4" not in st.session_state or id_edicion:
+    if "tabla4" not in st.session_state:
         st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla5" not in st.session_state or id_edicion:
+    if "tabla5" not in st.session_state:
         st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
 
     if id_edicion and "datos_cargados_edit" not in st.session_state:
@@ -2979,10 +3009,11 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.subheader(f"1. {nombres_titulos['t1']}")
     salidas_extracto_df = formatear_columna_valor(st.session_state.tabla1)
     salidas_extracto = st.data_editor(salidas_extracto_df, num_rows="dynamic", use_container_width=True, key="editor_tabla1", column_config=config_monetaria(["Valor"]))
+    st.metric(f"Subtotal — {nombres_titulos['t1']}", formatear_moneda(total_columna(salidas_extracto)))
     cols_t1 = ["Fecha", "Beneficiario", "Documento", "Valor"]
     c_p1, c_b1, c_del1 = st.columns([3, 1, 1])
     with c_p1:
-        txt_t1 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Beneficiario | Documento | Valor):", key="paste_t1")
+        txt_t1 = st.text_area("📋 Pegue aquí la lista de Excel (Fecha, Beneficiario, Documento y Valor; una fila por movimiento):", key="paste_t1", height=180, placeholder="Copie las filas en Excel y péguelas aquí. Mantenga las columnas separadas por TAB.")
     with c_b1:
         if st.button("+ Cargar Ítems 1", key="btn_parse_t1"):
             df_p1 = parsear_texto_pegado(txt_t1, cols_t1)
@@ -2998,10 +3029,11 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.subheader(f"2. {nombres_titulos['t2']}")
     salidas_libros_df = formatear_columna_valor(st.session_state.tabla2)
     salidas_libros = st.data_editor(salidas_libros_df, num_rows="dynamic", use_container_width=True, key="editor_tabla2", column_config=config_monetaria(["Valor"]))
+    st.metric(f"Subtotal — {nombres_titulos['t2']}", formatear_moneda(total_columna(salidas_libros)))
     cols_t2 = ["Fecha", "Concepto", "Valor"]
     c_p2, c_b2, c_del2 = st.columns([3, 1, 1])
     with c_p2:
-        txt_t2 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t2")
+        txt_t2 = st.text_area("📋 Pegue aquí la lista de Excel (Fecha, Concepto y Valor; una fila por movimiento):", key="paste_t2", height=160, placeholder="Copie las filas en Excel y péguelas aquí. Mantenga las columnas separadas por TAB.")
     with c_b2:
         if st.button("+ Cargar Ítems 2", key="btn_parse_t2"):
             df_p2 = parsear_texto_pegado(txt_t2, cols_t2)
@@ -3017,10 +3049,11 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.subheader(f"3. {nombres_titulos['t3']}")
     entradas_libros_df = formatear_columna_valor(st.session_state.tabla3)
     entradas_libros = st.data_editor(entradas_libros_df, num_rows="dynamic", use_container_width=True, key="editor_tabla3", column_config=config_monetaria(["Valor"]))
+    st.metric(f"Subtotal — {nombres_titulos['t3']}", formatear_moneda(total_columna(entradas_libros)))
     cols_t3 = ["Fecha", "Concepto", "Valor"]
     c_p3, c_b3, c_del3 = st.columns([3, 1, 1])
     with c_p3:
-        txt_t3 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t3")
+        txt_t3 = st.text_area("📋 Pegue aquí la lista de Excel (Fecha, Concepto y Valor; una fila por movimiento):", key="paste_t3", height=160, placeholder="Copie las filas en Excel y péguelas aquí. Mantenga las columnas separadas por TAB.")
     with c_b3:
         if st.button("+ Cargar Ítems 3", key="btn_parse_t3"):
             df_p3 = parsear_texto_pegado(txt_t3, cols_t3)
@@ -3036,10 +3069,11 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.subheader(f"4. {nombres_titulos['t4']}")
     entradas_extracto_df = formatear_columna_valor(st.session_state.tabla4)
     entradas_extracto = st.data_editor(entradas_extracto_df, num_rows="dynamic", use_container_width=True, key="editor_tabla4", column_config=config_monetaria(["Valor"]))
+    st.metric(f"Subtotal — {nombres_titulos['t4']}", formatear_moneda(total_columna(entradas_extracto)))
     cols_t4 = ["Fecha", "Concepto", "Valor"]
     c_p4, c_b4, c_del4 = st.columns([3, 1, 1])
     with c_p4:
-        txt_t4 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t4")
+        txt_t4 = st.text_area("📋 Pegue aquí la lista de Excel (Fecha, Concepto y Valor; una fila por movimiento):", key="paste_t4", height=160, placeholder="Copie las filas en Excel y péguelas aquí. Mantenga las columnas separadas por TAB.")
     with c_b4:
         if st.button("+ Cargar Ítems 4", key="btn_parse_t4"):
             df_p4 = parsear_texto_pegado(txt_t4, cols_t4)
@@ -3060,7 +3094,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     cols_t5 = ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
     c_p5, c_b5, c_del5 = st.columns([3, 1, 1])
     with c_p5:
-        txt_t5 = st.text_input("📋 Pegar ítems desde Excel para Gastos Bancarios:", key="paste_t5")
+        txt_t5 = st.text_area("📋 Pegue aquí la lista de gastos bancarios copiada desde Excel (una fila por movimiento):", key="paste_t5", height=180, placeholder="Copie las filas en Excel y péguelas aquí. Mantenga las columnas separadas por TAB.")
     with c_b5:
         if st.button("+ Cargar Ítems 5", key="btn_parse_t5"):
             df_p5 = parsear_texto_pegado(txt_t5, cols_t5)
@@ -3076,6 +3110,11 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     m2 = total_columna(salidas_libros)
     m3 = total_columna(entradas_libros)
     m4 = total_columna(entradas_extracto)
+
+    # Total general informativo: suma de los subtotales absolutos de todos los conceptos.
+    total_general_justificar = m1 + m2 + m3 + m4
+    st.markdown("### Total general de diferencias por justificar")
+    st.metric("TOTAL GENERAL", formatear_moneda(total_general_justificar))
 
     if es_tc:
         diferencia_conciliada = m1 + m2 - m3 + m4
