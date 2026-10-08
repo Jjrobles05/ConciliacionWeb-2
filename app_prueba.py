@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import secrets
 import random
+import base64
+import zipfile
 from datetime import datetime
 import pandas as pd
 import streamlit as st
@@ -201,6 +203,169 @@ def inicializar_db():
     conn.close()
 
 inicializar_db()
+
+# ==========================================
+# 3B. COPIAS DE SEGURIDAD Y RESTAURACIÓN
+# ==========================================
+def _backup_encode_value(value):
+    """Serializa valores SQLite incluyendo BLOB sin perder información."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"__tipo__": "blob", "valor": base64.b64encode(bytes(value)).decode("ascii")}
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return {"__tipo__": "texto", "valor": str(value)}
+
+
+def _backup_decode_value(value):
+    if isinstance(value, dict) and value.get("__tipo__") == "blob":
+        return base64.b64decode(value.get("valor", ""))
+    if isinstance(value, dict) and value.get("__tipo__") == "texto":
+        return value.get("valor", "")
+    return value
+
+
+def crear_copia_seguridad_bytes():
+    """Crea una copia completa de la base conectada, sin modificarla."""
+    conn = conectar_db()
+    try:
+        c = conn.cursor()
+        c.execute("""
+            SELECT type, name, tbl_name, sql
+            FROM sqlite_master
+            WHERE name NOT LIKE 'sqlite_%'
+              AND sql IS NOT NULL
+              AND type IN ('table', 'index', 'trigger', 'view')
+            ORDER BY CASE type WHEN 'table' THEN 1 WHEN 'index' THEN 2 WHEN 'trigger' THEN 3 ELSE 4 END, name
+        """)
+        objetos = c.fetchall()
+        tablas = []
+        esquemas = []
+
+        for tipo, nombre, tbl_name, sql in objetos:
+            esquemas.append({
+                "type": tipo,
+                "name": nombre,
+                "tbl_name": tbl_name,
+                "sql": sql
+            })
+
+        nombres_tablas = [
+            str(nombre) for tipo, nombre, _tbl, _sql in objetos
+            if tipo == "table"
+        ]
+        for nombre in nombres_tablas:
+            c.execute(f'SELECT * FROM "{nombre.replace(chr(34), chr(34)*2)}"')
+            columnas = [d[0] for d in c.description or []]
+            filas = [[_backup_encode_value(v) for v in fila] for fila in c.fetchall()]
+            tablas.append({"name": nombre, "columns": columnas, "rows": filas})
+
+        respaldo = {
+            "formato": "ConciliacionWeb-Turso-Backup",
+            "version": 1,
+            "fecha": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "tablas": tablas,
+            "esquemas": esquemas
+        }
+        contenido = json.dumps(respaldo, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        salida = io.BytesIO()
+        with zipfile.ZipFile(salida, "w", compression=zipfile.ZIP_DEFLATED) as z:
+            z.writestr("backup.json", contenido)
+            z.writestr("README.txt", (
+                "COPIA DE SEGURIDAD - CONCILIACION WEB\n\n"
+                "Este archivo contiene una copia de los datos y esquemas encontrados en la base conectada.\n"
+                "La creación de la copia es una operación de lectura y no modifica la base de datos.\n"
+            ))
+        return salida.getvalue()
+    finally:
+        conn.close()
+
+
+def leer_copia_seguridad(archivo_bytes):
+    """Valida y carga una copia sin tocar la base de datos."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(archivo_bytes), "r") as z:
+            if "backup.json" not in z.namelist():
+                raise ValueError("El ZIP no contiene backup.json.")
+            data = json.loads(z.read("backup.json").decode("utf-8"))
+        if data.get("formato") != "ConciliacionWeb-Turso-Backup":
+            raise ValueError("El archivo no corresponde al formato de respaldo de Conciliación Web.")
+        if not isinstance(data.get("tablas"), list) or not isinstance(data.get("esquemas"), list):
+            raise ValueError("La estructura de la copia está incompleta.")
+        return data
+    except zipfile.BadZipFile as e:
+        raise ValueError("El archivo seleccionado no es un ZIP válido.") from e
+    except json.JSONDecodeError as e:
+        raise ValueError("El archivo de respaldo está dañado o incompleto.") from e
+
+
+def restaurar_copia_seguridad(backup_data):
+    """Restaura datos y objetos del respaldo dentro de una transacción."""
+    conn = conectar_db()
+    try:
+        c = conn.cursor()
+        try:
+            c.execute("PRAGMA foreign_keys=OFF")
+        except Exception:
+            pass
+        c.execute("BEGIN")
+
+        # Crear tablas que no existan. Las tablas existentes conservan su estructura.
+        esquemas = backup_data.get("esquemas", [])
+        tablas_backup = [x for x in esquemas if x.get("type") == "table" and x.get("sql")]
+        for obj in tablas_backup:
+            nombre = str(obj["name"])
+            sql = str(obj["sql"])
+            c.execute(sql if "IF NOT EXISTS" in sql.upper() else _agregar_if_not_exists(sql))
+
+        # Vaciar únicamente las tablas que vienen en la copia y cargar sus filas originales.
+        for tabla in backup_data.get("tablas", []):
+            nombre = str(tabla.get("name", ""))
+            columnas = [str(x) for x in tabla.get("columns", [])]
+            if not nombre or not columnas:
+                continue
+            ident = nombre.replace('"', '""')
+            c.execute(f'DELETE FROM "{ident}"')
+            cols_sql = ", ".join(f'"{x.replace(chr(34), chr(34)*2)}"' for x in columnas)
+            placeholders = ", ".join(["?"] * len(columnas))
+            filas = [[_backup_decode_value(v) for v in fila] for fila in tabla.get("rows", [])]
+            if filas:
+                c.executemany(f'INSERT INTO "{ident}" ({cols_sql}) VALUES ({placeholders})', filas)
+
+        # Crear índices, triggers y vistas que no existan.
+        for obj in esquemas:
+            if obj.get("type") not in ("index", "trigger", "view") or not obj.get("sql"):
+                continue
+            sql = str(obj["sql"])
+            try:
+                c.execute(sql if "IF NOT EXISTS" in sql.upper() else _agregar_if_not_exists(sql))
+            except Exception:
+                # Los índices automáticos o ya existentes no deben impedir la restauración de datos.
+                pass
+
+        conn.commit()
+        try:
+            c.execute("PRAGMA foreign_keys=ON")
+        except Exception:
+            pass
+        return True, "Restauración completada correctamente."
+    except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False, f"No fue posible restaurar la copia. La transacción fue revertida: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
+
+def _agregar_if_not_exists(sql):
+    texto = str(sql).strip()
+    patron = re.compile(r"^(CREATE\s+(?:UNIQUE\s+)?(?:INDEX|TRIGGER|VIEW|TABLE)\s+)(?!IF\s+NOT\s+EXISTS)(.+)$", re.IGNORECASE | re.DOTALL)
+    m = patron.match(texto)
+    if not m:
+        return texto
+    return m.group(1) + "IF NOT EXISTS " + m.group(2)
+
 
 # ==========================================
 # 4. CONSULTAS A LA BASE DE DATOS
@@ -2162,16 +2327,7 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                         cexp1, cexp2, cexp3 = st.columns(3)
                         with cexp1:
                             if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                                st.session_state.conciliacion_a_editar = int(fila['id'])
-                                st.session_state.pop("datos_cargados_edit", None)
-                                for _k in ["tabla1", "tabla2", "tabla3", "tabla4", "tabla5",
-                                            "caja_compras", "caja_efectivo", "caja_responsable",
-                                            "caja_saldo_inicial", "caja_fondo", "caja_obs",
-                                            "credito_entidad", "credito_numero", "credito_fecha_inicio",
-                                            "credito_fecha_vencimiento", "credito_tasa", "credito_saldo_libros",
-                                            "credito_saldo_extracto", "credito_diferencias", "credito_observaciones"]:
-                                    st.session_state.pop(_k, None)
-                                st.session_state.menu_override = "📝 Nueva Conciliación"; st.rerun()
+                                st.session_state.conciliacion_a_editar = fila['id']; st.session_state.pop("datos_cargados_edit", None); st.session_state.menu_override = "📝 Nueva Conciliación"; st.rerun()
                         with cexp2:
                             st.download_button("📊 Descargar Excel", data=excel_h, file_name=nombre_h, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dlx_{fila['id']}")
                         with cexp3:
@@ -2680,24 +2836,18 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 del st.session_state.datos_cargados_edit
             st.rerun()
 
-    # IMPORTANTE: no reinicializar las tablas en cada rerun cuando se está editando.
-    # Streamlit rerun ocurre al modificar cualquier campo; si se vacían aquí,
-    # la conciliación devuelta pierde visualmente los movimientos cargados.
-    if not id_edicion:
-        st.session_state.setdefault("tabla1", pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"]))
-        st.session_state.setdefault("tabla2", pd.DataFrame(columns=["Fecha", "Concepto", "Valor"]))
-        st.session_state.setdefault("tabla3", pd.DataFrame(columns=["Fecha", "Concepto", "Valor"]))
-        st.session_state.setdefault("tabla4", pd.DataFrame(columns=["Fecha", "Concepto", "Valor"]))
-        st.session_state.setdefault("tabla5", pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]))
+    if "tabla1" not in st.session_state or id_edicion:
+        st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
+    if "tabla2" not in st.session_state or id_edicion:
+        st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
+    if "tabla3" not in st.session_state or id_edicion:
+        st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
+    if "tabla4" not in st.session_state or id_edicion:
+        st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
+    if "tabla5" not in st.session_state or id_edicion:
+        st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
 
     if id_edicion and "datos_cargados_edit" not in st.session_state:
-        # Al entrar por primera vez a una corrección, partir de tablas vacías
-        # y luego cargar exclusivamente los datos de esta conciliación.
-        st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
-        st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-        st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-        st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-        st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
         c_edit = obtener_conciliacion_por_id(id_edicion)
         if c_edit:
             try:
@@ -3170,16 +3320,8 @@ elif menu_seleccionado == "📋 Historial":
                 c_act1, c_act2, c_act3, c_act4 = st.columns(4)
                 with c_act1:
                     if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                        st.session_state.conciliacion_a_editar = int(fila['id'])
+                        st.session_state.conciliacion_a_editar = fila['id']
                         st.session_state.pop("datos_cargados_edit", None)
-                        # Limpiar solo el estado temporal de edición; NO toca Turso.
-                        for _k in ["tabla1", "tabla2", "tabla3", "tabla4", "tabla5",
-                                    "caja_compras", "caja_efectivo", "caja_responsable",
-                                    "caja_saldo_inicial", "caja_fondo", "caja_obs",
-                                    "credito_entidad", "credito_numero", "credito_fecha_inicio",
-                                    "credito_fecha_vencimiento", "credito_tasa", "credito_saldo_libros",
-                                    "credito_saldo_extracto", "credito_diferencias", "credito_observaciones"]:
-                            st.session_state.pop(_k, None)
                         st.session_state.menu_override = "📝 Nueva Conciliación"
                         st.rerun()
 
@@ -3387,6 +3529,92 @@ elif menu_seleccionado == "👥 Usuarios":
 
 elif menu_seleccionado == "⚙️ Administración":
     st.title("⚙️ Administración")
+
+    st.subheader("🛡️ Copias de seguridad")
+    st.info(
+        "La copia se genera leyendo la base conectada (Turso en producción). "
+        "Crear una copia no modifica ni elimina ningún dato. Antes de restaurar, "
+        "el sistema genera una copia de seguridad del estado actual."
+    )
+
+    col_b1, col_b2 = st.columns(2)
+    with col_b1:
+        if st.button("💾 CREAR COPIA DE SEGURIDAD", use_container_width=True, type="primary"):
+            try:
+                datos_backup = crear_copia_seguridad_bytes()
+                st.session_state["backup_actual_bytes"] = datos_backup
+                st.session_state["backup_actual_nombre"] = f"backup_conciliacion_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                st.success("✅ Copia de seguridad creada correctamente.")
+            except Exception as e:
+                st.error(f"No fue posible crear la copia: {type(e).__name__}: {e}")
+
+    if st.session_state.get("backup_actual_bytes"):
+        st.download_button(
+            "📥 DESCARGAR COPIA DE SEGURIDAD",
+            data=st.session_state["backup_actual_bytes"],
+            file_name=st.session_state.get("backup_actual_nombre", "backup_conciliacion.zip"),
+            mime="application/zip",
+            use_container_width=True
+        )
+
+    st.divider()
+    st.subheader("🔄 Restaurar copia de seguridad")
+    st.warning(
+        "La restauración reemplazará los registros de las tablas incluidas en la copia. "
+        "Antes de hacerlo se creará automáticamente un respaldo del estado actual de la base. "
+        "No cierres ni recargues la aplicación durante la restauración."
+    )
+    archivo_restauracion = st.file_uploader(
+        "Selecciona el ZIP de respaldo",
+        type=["zip"],
+        key="archivo_restauracion_backup"
+    )
+    if archivo_restauracion is not None:
+        try:
+            backup_preview = leer_copia_seguridad(archivo_restauracion.getvalue())
+            total_tablas = len(backup_preview.get("tablas", []))
+            total_registros = sum(len(t.get("rows", [])) for t in backup_preview.get("tablas", []))
+            st.success(
+                f"✅ Respaldo válido. Fecha: {backup_preview.get('fecha', 'No disponible')} "
+                f"| Tablas: {total_tablas} | Registros: {total_registros}"
+            )
+            confirmar_restauracion = st.checkbox(
+                "⚠️ Entiendo que voy a restaurar esta copia sobre la base actual y confirmo que quiero continuar.",
+                key="confirmar_restauracion_backup"
+            )
+            if st.button(
+                "🔄 RESTAURAR COPIA DE SEGURIDAD",
+                type="secondary",
+                disabled=not confirmar_restauracion,
+                use_container_width=True
+            ):
+                # Respaldo preventivo: si la restauración falla, la transacción también se revierte.
+                respaldo_previo = crear_copia_seguridad_bytes()
+                ok, mensaje = restaurar_copia_seguridad(backup_preview)
+                if ok:
+                    st.session_state["backup_previo_restauracion_bytes"] = respaldo_previo
+                    st.session_state["backup_previo_restauracion_nombre"] = f"backup_antes_restauracion_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+                    try:
+                        st.cache_data.clear()
+                    except Exception:
+                        pass
+                    st.success("✅ " + mensaje)
+                    st.info("🛡️ También se creó una copia del estado que tenía la base antes de restaurar.")
+                else:
+                    st.error(mensaje)
+        except Exception as e:
+            st.error(f"❌ Copia no válida: {e}")
+
+    if st.session_state.get("backup_previo_restauracion_bytes"):
+        st.download_button(
+            "📥 DESCARGAR RESPALDO ANTERIOR A LA RESTAURACIÓN",
+            data=st.session_state["backup_previo_restauracion_bytes"],
+            file_name=st.session_state.get("backup_previo_restauracion_nombre", "backup_antes_restauracion.zip"),
+            mime="application/zip",
+            use_container_width=True
+        )
+
+    st.divider()
 
     st.subheader("🧹 Limpiar datos operativos")
     st.warning(
