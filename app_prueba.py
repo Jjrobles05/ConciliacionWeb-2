@@ -70,7 +70,6 @@ def conectar_db():
 # ==========================================
 # 3. CREACIÓN Y ESTRUCTURA DE TABLAS
 # ==========================================
-@st.cache_resource(show_spinner=False)
 def inicializar_db():
     """Crea únicamente las tablas si no existen usando el esquema Turso actual."""
     conn = conectar_db()
@@ -206,7 +205,6 @@ inicializar_db()
 # ==========================================
 # 4. CONSULTAS A LA BASE DE DATOS
 # ==========================================
-@st.cache_data(show_spinner=False)
 def obtener_empresas():
     try:
         conn = conectar_db()
@@ -220,7 +218,6 @@ def obtener_empresas():
         return pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
 
 
-@st.cache_data(show_spinner=False)
 def obtener_empresa_por_id(empresa_id):
     try:
         conn = conectar_db()
@@ -235,7 +232,6 @@ def obtener_empresa_por_id(empresa_id):
     return None
 
 
-@st.cache_data(show_spinner=False)
 def obtener_logo_empresa(nombre_empresa):
     """Obtiene el logo BLOB de la empresa para mostrarlo en la app y reportes."""
     if not nombre_empresa:
@@ -268,7 +264,6 @@ def guardar_empresa(nombre, nit, logo_bytes=None):
             return False, f"El NIT {nit} ya está registrado para la empresa {existente[1]}."
         c.execute("INSERT INTO empresas (nit, razon_social, logo) VALUES (?, ?, ?)", (nit, nombre, logo_bytes))
         conn.commit()
-        st.cache_data.clear()
         return True, "Empresa registrada con éxito."
     except Exception as e:
         try: conn.rollback()
@@ -293,7 +288,6 @@ def actualizar_empresa_db(empresa_id, nombre, nit, logo_bytes=None):
         else:
             c.execute("UPDATE empresas SET razon_social=?, nit=? WHERE id=?", (nombre, nit, int(empresa_id)))
         conn.commit()
-        st.cache_data.clear()
         return True, "Empresa actualizada con éxito."
     except Exception as e:
         try: conn.rollback()
@@ -321,7 +315,6 @@ def eliminar_empresa_db(empresa_id):
             return False, "No se puede eliminar: la empresa tiene " + ", ".join(partes) + "."
         c.execute("DELETE FROM empresas WHERE id=?", (int(empresa_id),))
         conn.commit()
-        st.cache_data.clear()
         return True, "Empresa eliminada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -359,7 +352,6 @@ def limpiar_datos_operativos():
                 pass
 
         conn.commit()
-        st.cache_data.clear()
         return True, "Se eliminaron bancos, cuentas y conciliaciones. Empresas y usuarios se conservaron."
     except Exception as e:
         try:
@@ -397,7 +389,6 @@ def reiniciar_datos_aplicativo():
                 pass
 
         conn.commit()
-        st.cache_data.clear()
         return True, "El aplicativo quedó completamente limpio. Ahora puedes crear el primer Administrador."
     except Exception as e:
         try:
@@ -409,7 +400,6 @@ def reiniciar_datos_aplicativo():
         conn.close()
 
 
-@st.cache_data(show_spinner=False)
 def obtener_cuentas(empresa_id=None):
     try:
         conn = conectar_db()
@@ -472,7 +462,6 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id, datos_credito=
             cuenta_id = int(c.lastrowid)
 
         conn.commit()
-        st.cache_data.clear()
 
         # Verificación real: la cuenta debe existir después del COMMIT.
         c.execute("""SELECT id, banco, numero_cuenta, tipo_cuenta, empresa_id
@@ -499,7 +488,6 @@ def actualizar_cuenta_db(cuenta_id, banco, numero_cuenta, tipo_cuenta, empresa_i
         if c.rowcount == 0:
             return False, "No se encontró la cuenta para actualizar."
         conn.commit()
-        st.cache_data.clear()
         return True, "Cuenta actualizada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -527,7 +515,6 @@ def eliminar_cuenta_db(cuenta_id):
             return False, "No se puede eliminar esta cuenta porque tiene " + " y ".join(partes) + "."
         c.execute("DELETE FROM cuentas_bancarias WHERE id=?", (int(cuenta_id),))
         conn.commit()
-        st.cache_data.clear()
         return True, f"Cuenta {fila[0]} - {fila[1]} eliminada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -620,7 +607,6 @@ def generar_pdf_asignaciones(asignaciones_df, empresa, anio, mes_num):
     return buffer.getvalue(), nombre
 
 
-@st.cache_data(show_spinner=False)
 def obtener_asignaciones_mes(empresa_id, anio, mes_num):
     """Devuelve las asignaciones fijas de un mes para una empresa."""
     if not empresa_id:
@@ -644,7 +630,6 @@ def obtener_asignaciones_mes(empresa_id, anio, mes_num):
         conn.close()
 
 
-@st.cache_data(show_spinner=False)
 def contar_asignaciones_mes(empresa_id, anio, mes_num):
     if not empresa_id:
         return 0
@@ -691,7 +676,6 @@ def generar_asignacion_mensual(empresa_id, anio, mes_num):
                          VALUES (?,?,?,?,?,?)""",
                       (int(empresa_id), cuenta_id, usuario_id, int(anio), int(mes_num), fecha))
         conn.commit()
-        st.cache_data.clear()
         resumen={uid:0 for uid in usuarios}
         for idx in range(len(cuentas)):
             resumen[usuarios[idx % len(usuarios)]] += 1
@@ -761,7 +745,6 @@ def asignar_cuentas_nuevas_mes(empresa_id, anio, mes_num):
             resumen_nuevas[usuario_id] += 1
 
         conn.commit()
-        st.cache_data.clear()
         detalle = ', '.join(
             f"{nombres[uid]}: +{resumen_nuevas[uid]} (total {cargas[uid]})"
             for uid in usuarios if resumen_nuevas[uid] > 0
@@ -778,7 +761,6 @@ def asignar_cuentas_nuevas_mes(empresa_id, anio, mes_num):
         conn.close()
 
 
-@st.cache_data(show_spinner=False)
 def contar_cuentas_sin_asignar_mes(empresa_id, anio, mes_num):
     if not empresa_id:
         return 0
@@ -800,7 +782,6 @@ def contar_cuentas_sin_asignar_mes(empresa_id, anio, mes_num):
         conn.close()
 
 
-@st.cache_data(show_spinner=False)
 def obtener_cuentas_rotadas_por_usuario(empresa_id, anio, mes_num, usuario_id):
     """Para Preparadores devuelve SOLO sus cuentas asignadas en el mes. Para otros roles devuelve todas."""
     if not empresa_id:
@@ -995,7 +976,6 @@ def guardar_conciliacion_historial(
                      observaciones))
             last_id = int(c.lastrowid)
         conn.commit()
-        st.cache_data.clear()
         return last_id
     finally:
         conn.close()
@@ -1011,7 +991,6 @@ def _decodificar_observaciones(texto):
         return {}
 
 
-@st.cache_data(show_spinner=False)
 def obtener_historial(empresa_nombre=None):
     """Lee TODAS las conciliaciones guardadas y las prepara para Historial/Auditoría/Reportes."""
     conn = None
@@ -1081,7 +1060,6 @@ def obtener_historial(empresa_nombre=None):
                 pass
 
 
-@st.cache_data(show_spinner=False)
 def obtener_conciliacion_por_id(id_conciliacion):
     try:
         conn = conectar_db()
@@ -1161,7 +1139,7 @@ def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, mot
         datos.setdefault('fecha_aprobacion', '')
     c.execute("UPDATE conciliaciones SET revisado_por=?, dictamen=?, observaciones=? WHERE id=?",
               (revisado_por, nuevo_estado, json.dumps(datos,ensure_ascii=False), int(id_conciliacion)))
-    conn.commit(); st.cache_data.clear(); conn.close()
+    conn.commit(); conn.close()
 
 
 # ==========================================
@@ -1242,7 +1220,7 @@ def guardar_conciliacion_especial(empresa, nit, mes, fecha_elaboracion, banco, c
                     # No hay registro previo que pueda explicar el conflicto.
                     # Conservamos el error original para que Turso lo reporte en logs.
                     raise exc
-        conn.commit(); st.cache_data.clear(); return last_id
+        conn.commit(); return last_id
     except Exception:
         try: conn.rollback()
         except Exception: pass
@@ -1368,7 +1346,6 @@ def verificar_password(password, salt, password_hash):
     _, digest = hash_password(password, salt)
     return hmac.compare_digest(digest, password_hash)
 
-@st.cache_data(show_spinner=False)
 def contar_usuarios():
     try:
         conn = conectar_db()
@@ -1442,7 +1419,6 @@ def cambiar_contrasena_usuario(usuario_id, contrasena_actual, nueva_contrasena):
         c.execute("UPDATE usuarios SET password_hash=?, salt=? WHERE id=?",
                   (nuevo_hash, nuevo_salt, int(usuario_id)))
         conn.commit()
-        st.cache_data.clear()
         return True, "Contraseña cambiada correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -1488,7 +1464,6 @@ def actualizar_usuario_db(usuario_id, usuario, nombre, rol, activo, empresa_id=N
         if c.rowcount == 0:
             return False, "No se encontró el usuario."
         conn.commit()
-        st.cache_data.clear()
         return True, "Usuario actualizado correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -1514,7 +1489,6 @@ def eliminar_usuario_db(usuario_id, usuario_actual_id=None):
                 return False, "No se puede eliminar al único Administrador activo."
         c.execute("DELETE FROM usuarios WHERE id=?", (int(usuario_id),))
         conn.commit()
-        st.cache_data.clear()
         return True, f"Usuario '{fila[0]}' eliminado correctamente."
     except Exception as e:
         try: conn.rollback()
@@ -1523,7 +1497,6 @@ def eliminar_usuario_db(usuario_id, usuario_actual_id=None):
     finally:
         conn.close()
 
-@st.cache_data(show_spinner=False)
 def obtener_usuarios():
     try:
         conn = conectar_db(); c = conn.cursor()
@@ -1675,16 +1648,10 @@ with st.sidebar:
 
     st.divider()
     opciones_menu = obtener_opciones_menu(rol_actual)
-    # Conservar el módulo activo durante los reruns de Streamlit. Esto es
-    # especialmente importante al editar una conciliación: presionar Enter
-    # en una celda provoca un rerun, pero no debe devolver al usuario al Dashboard.
     if "menu_override" in st.session_state:
-        _menu_forzado = st.session_state.pop("menu_override")
-        if _menu_forzado in opciones_menu:
-            st.session_state["menu_principal"] = _menu_forzado
-    if st.session_state.get("menu_principal") not in opciones_menu:
-        st.session_state["menu_principal"] = opciones_menu[0]
-    menu_seleccionado = st.radio("Navegación principal", opciones_menu, key="menu_principal")
+        menu_seleccionado = st.session_state.pop("menu_override")
+    else:
+        menu_seleccionado = st.radio("Navegación principal", opciones_menu)
 
     st.divider()
     if st.button("🚪 Cerrar sesión"):
@@ -2964,9 +2931,8 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.divider()
     st.subheader("Saldos")
     c1, c2 = st.columns(2)
-    _datos_edicion = obtener_conciliacion_por_id(id_edicion) if id_edicion else {}
-    val_ext = float((_datos_edicion or {}).get("saldo_extracto", 0.0))
-    val_lib = float((_datos_edicion or {}).get("saldo_libros", 0.0))
+    val_ext = float(obtener_conciliacion_por_id(id_edicion).get("saldo_extracto", 0.0)) if id_edicion else 0.0
+    val_lib = float(obtener_conciliacion_por_id(id_edicion).get("saldo_libros", 0.0)) if id_edicion else 0.0
     with c1:
         saldo_extracto = st.number_input("Saldo según Extracto", value=val_ext, format="%.2f", key="form_saldo_extracto")
     with c2:
@@ -3078,7 +3044,12 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     m4 = total_columna(entradas_extracto)
 
     if es_tc:
-        diferencia_conciliada = m1 + m2 - m3 + m4
+        # Tarjeta de crédito: abonos no registrados (+), compras no
+        # contabilizadas (+), débitos bancarios no contabilizados (-),
+        # compras no evidenciadas en extractos (-).
+        # El orden de las tablas en pantalla es t1..t4, por eso:
+        # diferencia = t4 + t2 - t3 - t1.
+        diferencia_conciliada = m4 + m2 - m3 - m1
     else:
         diferencia_conciliada = m1 - m2 + m3 - m4
 
