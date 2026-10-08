@@ -1760,10 +1760,23 @@ with st.sidebar:
 
     st.divider()
     opciones_menu = obtener_opciones_menu(rol_actual)
+
+    # Mantener la pantalla actual durante los reruns de Streamlit.
+    # Editar una celda con Enter provoca un rerun, pero NO debe devolver
+    # al usuario al Dashboard ni perder la pantalla de edición.
     if "menu_override" in st.session_state:
-        menu_seleccionado = st.session_state.pop("menu_override")
-    else:
-        menu_seleccionado = st.radio("Navegación principal", opciones_menu)
+        _menu_forzado = st.session_state.pop("menu_override")
+        if _menu_forzado in opciones_menu:
+            st.session_state["menu_principal"] = _menu_forzado
+
+    if st.session_state.get("menu_principal") not in opciones_menu:
+        st.session_state["menu_principal"] = opciones_menu[0]
+
+    menu_seleccionado = st.radio(
+        "Navegación principal",
+        opciones_menu,
+        key="menu_principal"
+    )
 
     st.divider()
     if st.button("🚪 Cerrar sesión"):
