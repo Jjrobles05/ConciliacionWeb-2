@@ -3009,6 +3009,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.subheader(f"1. {nombres_titulos['t1']}")
     salidas_extracto_df = formatear_columna_valor(st.session_state.tabla1)
     salidas_extracto = st.data_editor(salidas_extracto_df, num_rows="dynamic", use_container_width=True, key="editor_tabla1", column_config=config_monetaria(["Valor"]))
+    st.caption(f"**Subtotal del concepto:** {formatear_moneda(total_columna(salidas_extracto))}")
     cols_t1 = ["Fecha", "Beneficiario", "Documento", "Valor"]
     c_p1, c_b1, c_del1 = st.columns([3, 1, 1])
     with c_p1:
@@ -3028,6 +3029,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.subheader(f"2. {nombres_titulos['t2']}")
     salidas_libros_df = formatear_columna_valor(st.session_state.tabla2)
     salidas_libros = st.data_editor(salidas_libros_df, num_rows="dynamic", use_container_width=True, key="editor_tabla2", column_config=config_monetaria(["Valor"]))
+    st.caption(f"**Subtotal del concepto:** {formatear_moneda(total_columna(salidas_libros))}")
     cols_t2 = ["Fecha", "Concepto", "Valor"]
     c_p2, c_b2, c_del2 = st.columns([3, 1, 1])
     with c_p2:
@@ -3047,6 +3049,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.subheader(f"3. {nombres_titulos['t3']}")
     entradas_libros_df = formatear_columna_valor(st.session_state.tabla3)
     entradas_libros = st.data_editor(entradas_libros_df, num_rows="dynamic", use_container_width=True, key="editor_tabla3", column_config=config_monetaria(["Valor"]))
+    st.caption(f"**Subtotal del concepto:** {formatear_moneda(total_columna(entradas_libros))}")
     cols_t3 = ["Fecha", "Concepto", "Valor"]
     c_p3, c_b3, c_del3 = st.columns([3, 1, 1])
     with c_p3:
@@ -3066,6 +3069,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.subheader(f"4. {nombres_titulos['t4']}")
     entradas_extracto_df = formatear_columna_valor(st.session_state.tabla4)
     entradas_extracto = st.data_editor(entradas_extracto_df, num_rows="dynamic", use_container_width=True, key="editor_tabla4", column_config=config_monetaria(["Valor"]))
+    st.caption(f"**Subtotal del concepto:** {formatear_moneda(total_columna(entradas_extracto))}")
     cols_t4 = ["Fecha", "Concepto", "Valor"]
     c_p4, c_b4, c_del4 = st.columns([3, 1, 1])
     with c_p4:
@@ -3087,6 +3091,9 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     for _col_monetaria in ["Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]:
         gastos_bancarios_df = formatear_columna_valor(gastos_bancarios_df, _col_monetaria)
     gastos_bancarios = st.data_editor(gastos_bancarios_df, num_rows="dynamic", use_container_width=True, key="editor_tabla5", column_config=config_monetaria(["4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]))
+    columnas_gastos_total = ["4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
+    subtotal_gastos = sum(total_columna(gastos_bancarios, col) for col in columnas_gastos_total)
+    st.caption(f"**Subtotal de gastos bancarios:** {formatear_moneda(subtotal_gastos)}")
     cols_t5 = ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
     c_p5, c_b5, c_del5 = st.columns([3, 1, 1])
     with c_p5:
@@ -3106,6 +3113,10 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     m2 = total_columna(salidas_libros)
     m3 = total_columna(entradas_libros)
     m4 = total_columna(entradas_extracto)
+
+    total_general_partidas = m1 + m2 + m3 + m4 + subtotal_gastos
+    st.divider()
+    st.metric("TOTAL GENERAL DE LA DIFERENCIA POR JUSTIFICAR", formatear_moneda(total_general_partidas))
 
     if es_tc:
         diferencia_conciliada = m1 + m2 - m3 + m4
