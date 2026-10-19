@@ -3203,27 +3203,41 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
             st.session_state.tabla5 = pd.DataFrame(columns=cols_t5)
             st.rerun()
 
-    m1 = total_columna(salidas_extracto)
-    m2 = total_columna(salidas_libros)
-    m3 = total_columna(entradas_libros)
-    m4 = total_columna(entradas_extracto)
-
     if es_tc:
-        # TARJETA DE CRÉDITO: los importes deben llegar con el signo
-        # definido por el concepto y se suman respetando ese signo:
-        # m1 compras no evidenciadas en extractos (negativo)
-        # m2 compras no contabilizadas en libros (positivo)
-        # m3 débitos bancarios no contabilizados en libros (negativo)
-        # m4 abonos no registrados en extracto (positivo)
-        # Equivale a Excel: =SUMA(Q33:Q36).
-        diferencia_conciliada = m1 + m2 + m3 + m4
+        # En tarjeta de crédito el signo lo determina la categoría, no cómo
+        # el usuario digitó/pegó el importe. Se normaliza cada fila por separado
+        # para evitar que valores mezclados (+/-) se cancelen entre sí.
+        def aplicar_signo_categoria(df, signo):
+            resultado = df.copy()
+            if "Valor" in resultado.columns:
+                valores = pd.to_numeric(resultado["Valor"], errors="coerce").fillna(0).abs()
+                resultado["Valor"] = valores * signo
+            return resultado
+
+        # Q33: compras en libros que no aparecen en extracto -> negativo.
+        salidas_extracto = aplicar_signo_categoria(salidas_extracto, -1)
+        # Q34: compras en extracto que no están en libros -> positivo.
+        salidas_libros = aplicar_signo_categoria(salidas_libros, 1)
+        # Q35: débitos/cargos bancarios sin asiento en libros -> negativo.
+        entradas_libros = aplicar_signo_categoria(entradas_libros, -1)
+        # Q36: abonos en libros aún no reflejados en extracto -> positivo.
+        entradas_extracto = aplicar_signo_categoria(entradas_extracto, 1)
+
+        m1 = total_columna(salidas_extracto)
+        m2 = total_columna(salidas_libros)
+        m3 = total_columna(entradas_libros)
+        m4 = total_columna(entradas_extracto)
+        diferencia_conciliada = round(m1 + m2 + m3 + m4, 2)
     else:
+        m1 = total_columna(salidas_extracto)
+        m2 = total_columna(salidas_libros)
+        m3 = total_columna(entradas_libros)
+        m4 = total_columna(entradas_extracto)
         # Fórmula original para conciliación bancaria normal, sin cambios.
         diferencia_conciliada = m1 - m2 + m3 - m4
 
-    # Equivale a Excel: diferencia pendiente = diferencia a justificar -
-    # diferencia conciliada (por ejemplo, =Q30-Q37).
-    resultado_final = diferencia_inicial - diferencia_conciliada
+    # Diferencia final = diferencia inicial - diferencia conciliada.
+    resultado_final = round(diferencia_inicial - diferencia_conciliada, 2)
 
     st.divider()
     st.subheader("Resultado de la Conciliación")
@@ -3231,6 +3245,20 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     r1.metric("Diferencia Inicial", formatear_moneda(diferencia_inicial))
     r2.metric("Diferencia Conciliada", formatear_moneda(diferencia_conciliada))
     r3.metric("Resultado Final", formatear_moneda(resultado_final))
+    if es_tc:
+        st.markdown("**Partidas conciliatorias con signo aplicado automáticamente**")
+        df_resumen_tc = pd.DataFrame([
+            {"Categoría": nombres_titulos["t1"], "Total aplicado": m1},
+            {"Categoría": nombres_titulos["t2"], "Total aplicado": m2},
+            {"Categoría": nombres_titulos["t3"], "Total aplicado": m3},
+            {"Categoría": nombres_titulos["t4"], "Total aplicado": m4},
+        ])
+        df_resumen_tc["Total aplicado"] = df_resumen_tc["Total aplicado"].apply(formatear_moneda)
+        st.dataframe(df_resumen_tc, use_container_width=True, hide_index=True)
+        if resultado_final == 0:
+            st.success("CONCILIACIÓN BANCARIA CORRECTA")
+        else:
+            st.warning(f"EXISTEN DIFERENCIAS POR VALOR DE: {formatear_moneda(resultado_final)}. Requiere revisión manual.")
 
     preparado_por = usuario_actual["nombre"]
     revisado_por = ""
