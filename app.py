@@ -2005,14 +2005,20 @@ with st.sidebar:
 
     st.divider()
     opciones_menu = obtener_opciones_menu(rol_actual)
+    # El destino pedido por la app (p. ej. "Editar conciliación") se guarda en el estado del radio,
+    # así la pantalla NO vuelve al Dashboard en la siguiente interacción.
     if "menu_override" in st.session_state:
-        menu_seleccionado = st.session_state.pop("menu_override")
-    else:
-        menu_seleccionado = st.radio("Navegación principal", opciones_menu)
+        _destino = st.session_state.pop("menu_override")
+        if _destino in opciones_menu:
+            st.session_state["menu_principal"] = _destino
+    if st.session_state.get("menu_principal") not in opciones_menu:
+        st.session_state.pop("menu_principal", None)
+    menu_seleccionado = st.radio("Navegación principal", opciones_menu, key="menu_principal")
 
     st.divider()
     if st.button("🚪 Cerrar sesión"):
         st.session_state.usuario_autenticado = None
+        st.session_state.pop("menu_principal", None)
         st.rerun()
 
 # ==========================================
@@ -2069,6 +2075,33 @@ def limpiar_nombre_archivo(texto):
     if not texto:
         texto = "Empresa"
     return re.sub(r'[<>:"/\\|?*]', "-", texto)
+
+_CLAVES_EDICION = (
+    "tabla1", "tabla2", "tabla3", "tabla4", "tabla5",
+    "caja_compras", "caja_efectivo", "credito_diferencias",
+    "editor_tabla1", "editor_tabla2", "editor_tabla3", "editor_tabla4", "editor_tabla5",
+    "editor_caja_compras", "editor_caja_efectivo", "editor_credito_diferencias",
+    # campos que se precargan desde la conciliación y no deben arrastrar el valor de otra
+    "form_saldo_extracto", "form_saldo_libros", "form_fecha_elaboracion_edit",
+    "caja_responsable", "caja_saldo_inicial", "caja_fondo", "caja_obs",
+    "credito_entidad", "credito_numero", "credito_fecha_inicio", "credito_fecha_vencimiento",
+    "credito_tasa", "credito_saldo_libros", "credito_saldo_extracto", "credito_observaciones",
+)
+
+
+def limpiar_estado_edicion():
+    """Descarta tablas/editores en memoria para que una conciliación nueva o distinta empiece limpia."""
+    for k in _CLAVES_EDICION:
+        st.session_state.pop(k, None)
+    st.session_state.pop("datos_cargados_edit", None)
+
+
+def iniciar_edicion_conciliacion(id_conciliacion):
+    limpiar_estado_edicion()
+    st.session_state.conciliacion_a_editar = id_conciliacion
+    st.session_state.menu_override = "📝 Nueva Conciliación"
+    st.rerun()
+
 
 def paginar_dataframe(df, clave, opciones_tam=(5, 10, 20, 50), tam_defecto=10):
     """
@@ -2554,7 +2587,7 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                         cexp1, cexp2, cexp3 = st.columns(3)
                         with cexp1:
                             if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                                st.session_state.conciliacion_a_editar = fila['id']; st.session_state.pop("datos_cargados_edit", None); st.session_state.menu_override = "📝 Nueva Conciliación"; st.rerun()
+                                iniciar_edicion_conciliacion(fila['id'])
                         with cexp2:
                             st.download_button("📊 Descargar Excel", data=excel_h, file_name=nombre_h, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dlx_{fila['id']}")
                         with cexp3:
@@ -3053,6 +3086,9 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
 elif menu_seleccionado == "📝 Nueva Conciliación":
     st.title("📝 Captura / Edición de Conciliación Bancaria")
     id_edicion = st.session_state.get("conciliacion_a_editar", None)
+    if st.session_state.get("_edicion_previa") and not id_edicion:
+        limpiar_estado_edicion()
+    st.session_state["_edicion_previa"] = id_edicion
     if id_edicion:
         c_edit = obtener_conciliacion_por_id(id_edicion)
         consecutivo_edit_str = f"CONC-{int(id_edicion):06d}"
@@ -3063,15 +3099,15 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 del st.session_state.datos_cargados_edit
             st.rerun()
 
-    if "tabla1" not in st.session_state or id_edicion:
+    if "tabla1" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
         st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
-    if "tabla2" not in st.session_state or id_edicion:
+    if "tabla2" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
         st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla3" not in st.session_state or id_edicion:
+    if "tabla3" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
         st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla4" not in st.session_state or id_edicion:
+    if "tabla4" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
         st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla5" not in st.session_state or id_edicion:
+    if "tabla5" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
         st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
 
     if id_edicion and "datos_cargados_edit" not in st.session_state:
@@ -3193,9 +3229,9 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         st.info("💵 Modo activado: Arqueo de Caja General – Compras.")
         nombres_titulos = {}
         st.divider(); st.subheader("💵 Arqueo de Caja General – Compras")
-        if "caja_compras" not in st.session_state or id_edicion:
+        if "caja_compras" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
             st.session_state.caja_compras = _filas_caja_default()
-        if "caja_efectivo" not in st.session_state or id_edicion:
+        if "caja_efectivo" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
             denoms=[2000,5000,10000,20000,50000,100000,100,200,500,1000]
             st.session_state.caja_efectivo=pd.DataFrame([{"Denominación":d,"Cantidad":0,"Monto":0.0} for d in denoms])
         c1,c2,c3=st.columns(3)
@@ -3258,7 +3294,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         (m2.success if resultado_cb=="CONCILIADO" else m2.warning)(f"Resultado: **{resultado_cb}**")
 
         st.markdown("### 2. Partidas que explican la diferencia")
-        if "credito_diferencias" not in st.session_state or id_edicion:
+        if "credito_diferencias" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
             st.session_state.credito_diferencias=pd.DataFrame([
                 {"Concepto":"Abono a capital registrado en libros y no en banco","Valor":0.0,"Observación":""},
                 {"Concepto":"Abono a capital registrado en banco y no en libros","Valor":0.0,"Observación":""},
@@ -3594,10 +3630,7 @@ elif menu_seleccionado == "📋 Historial":
                 c_act1, c_act2, c_act3, c_act4 = st.columns(4)
                 with c_act1:
                     if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                        st.session_state.conciliacion_a_editar = fila['id']
-                        st.session_state.pop("datos_cargados_edit", None)
-                        st.session_state.menu_override = "📝 Nueva Conciliación"
-                        st.rerun()
+                        iniciar_edicion_conciliacion(fila['id'])
 
                 with c_act2:
                     if c_data.get("excel"):
