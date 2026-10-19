@@ -8,6 +8,8 @@ import secrets
 import random
 import base64
 import zipfile
+import time
+import functools
 from datetime import datetime
 import pandas as pd
 import streamlit as st
@@ -34,14 +36,17 @@ st.set_page_config(
 # ==========================================
 # 2. CONEXIÓN TURSO / SQLITE
 # ==========================================
-def conectar_db():
-    """
-    Conecta directamente a Turso cuando existen los Secrets
-    TURSO_DATABASE_URL y TURSO_AUTH_TOKEN.
+# Si la conexión reutilizable diera algún problema con tu driver de Turso,
+# cambia esta bandera a False y la app vuelve a abrir una conexión por consulta
+# (el resto de optimizaciones —caché, paginación, init único— sigue funcionando).
+REUTILIZAR_CONEXION = True
+_REVISAR_SI_INACTIVA_SEG = 8      # tras este tiempo sin uso se verifica que la conexión siga viva
+_SENTENCIAS_LECTURA = ("SELECT", "PRAGMA", "WITH", "EXPLAIN")
+_conexiones_fuera_de_sesion = {}
 
-    Si los Secrets no están configurados, utiliza SQLite local
-    como respaldo para desarrollo.
-    """
+
+def _crear_conexion_raw():
+    """Abre la conexión real. Devuelve (conexion, es_remota)."""
     if "TURSO_DATABASE_URL" in st.secrets and "TURSO_AUTH_TOKEN" in st.secrets:
         url = str(st.secrets["TURSO_DATABASE_URL"]).strip()
         token = str(st.secrets["TURSO_AUTH_TOKEN"]).strip()
@@ -53,10 +58,7 @@ def conectar_db():
         try:
             import turso_serverless
 
-            return turso_serverless.connect(
-                url,
-                auth_token=token
-            )
+            return turso_serverless.connect(url, auth_token=token), True
         except Exception as e:
             st.error(
                 "⚠️ No fue posible conectar con Turso. "
@@ -64,10 +66,207 @@ def conectar_db():
             )
             st.stop()
 
-    return sqlite3.connect(
-        "conciliaciones.db",
-        check_same_thread=False
-    )
+    return sqlite3.connect("conciliaciones.db", check_same_thread=False), False
+
+
+def _registro_sesion():
+    try:
+        return st.session_state
+    except Exception:
+        return _conexiones_fuera_de_sesion
+
+
+def _invalidar_cache_lecturas():
+    """Cualquier COMMIT que escriba datos limpia la caché de lecturas."""
+    try:
+        st.cache_data.clear()
+    except Exception:
+        pass
+
+
+class _CursorSeguimiento:
+    """Cursor transparente que anota si se ejecutó una sentencia de escritura."""
+    __slots__ = ("_cur", "_con")
+
+    def __init__(self, cur, con):
+        self._cur = cur
+        self._con = con
+
+    def execute(self, sql, *args, **kwargs):
+        self._con._registrar(sql)
+        self._cur.execute(sql, *args, **kwargs)
+        return self
+
+    def executemany(self, sql, *args, **kwargs):
+        self._con._registrar(sql)
+        self._cur.executemany(sql, *args, **kwargs)
+        return self
+
+    def __iter__(self):
+        return iter(self._cur)
+
+    def __getattr__(self, nombre):
+        return getattr(self._cur, nombre)
+
+
+class _ConexionSeguimiento:
+    """
+    Envuelve la conexión real:
+      * close() no cierra la conexión compartida (solo descarta lo no confirmado),
+        así se evita abrir una conexión HTTPS nueva a Turso en cada consulta.
+      * commit() de una escritura invalida la caché de lecturas automáticamente.
+    """
+
+    def __init__(self, raw, es_remota, compartida):
+        self._raw = raw
+        self._es_remota = es_remota
+        self._compartida = compartida
+        self._sucia = False
+        self._descartar = False
+        self._ultimo_uso = time.time()
+
+    def _registrar(self, sql):
+        self._ultimo_uso = time.time()
+        s = str(sql).lstrip().upper()
+        if s.startswith("PRAGMA"):
+            if "FOREIGN_KEYS" in s:
+                self._descartar = True   # no reutilizar una conexión con PRAGMA alterado
+            return
+        if not s.startswith(_SENTENCIAS_LECTURA):
+            self._sucia = True
+
+    def cursor(self, *args, **kwargs):
+        return _CursorSeguimiento(self._raw.cursor(*args, **kwargs), self)
+
+    def commit(self):
+        self._raw.commit()
+        self._ultimo_uso = time.time()
+        if self._sucia:
+            self._sucia = False
+            _invalidar_cache_lecturas()
+
+    def rollback(self):
+        try:
+            self._raw.rollback()
+        finally:
+            self._sucia = False
+
+    def close(self):
+        if self._compartida and not self._descartar:
+            if self._sucia:
+                try:
+                    self._raw.rollback()
+                except Exception:
+                    pass
+                self._sucia = False
+            return
+        self._cerrar_real()
+
+    def _cerrar_real(self):
+        try:
+            self._raw.close()
+        except Exception:
+            pass
+        reg = _registro_sesion()
+        try:
+            if reg.get("_conexion_db") is self:
+                del reg["_conexion_db"]
+        except Exception:
+            pass
+
+    def __getattr__(self, nombre):
+        return getattr(self._raw, nombre)
+
+
+def conectar_db():
+    """
+    Conecta a Turso (si existen los Secrets TURSO_DATABASE_URL y TURSO_AUTH_TOKEN)
+    o a SQLite local como respaldo. Reutiliza una conexión por sesión de usuario.
+    """
+    if not REUTILIZAR_CONEXION:
+        raw, remota = _crear_conexion_raw()
+        return _ConexionSeguimiento(raw, remota, compartida=False)
+
+    reg = _registro_sesion()
+    con = reg.get("_conexion_db")
+    if con is not None and con._es_remota and (time.time() - con._ultimo_uso) > _REVISAR_SI_INACTIVA_SEG:
+        try:
+            cur = con._raw.cursor()
+            cur.execute("SELECT 1")
+            cur.fetchone()
+            con._ultimo_uso = time.time()
+        except Exception:
+            con._cerrar_real()
+            con = None
+    if con is None:
+        raw, remota = _crear_conexion_raw()
+        con = _ConexionSeguimiento(raw, remota, compartida=True)
+        reg["_conexion_db"] = con
+    return con
+
+
+# ---------- Caché de lecturas ----------
+def _lectura_cacheada(al_fallar, ttl=300, max_entries=None):
+    """
+    Cachea una función de lectura. Los errores NO se guardan en caché:
+    si la lectura falla se devuelve al_fallar(excepcion) y se reintenta en la próxima recarga.
+    La caché se limpia sola con cada COMMIT de escritura (ver _ConexionSeguimiento.commit).
+    """
+    def decorador(fn):
+        kw = dict(ttl=ttl, show_spinner=False)
+        if max_entries:
+            kw["max_entries"] = max_entries
+        interna = st.cache_data(**kw)(fn)
+
+        @functools.wraps(fn)
+        def envoltura(*args, **kwargs):
+            try:
+                return interna(*args, **kwargs)
+            except Exception as e:
+                return al_fallar(e)
+        return envoltura
+    return decorador
+
+
+def _cache_generador(fn):
+    """Cachea la generación de Excel/PDF. Si los argumentos no se pueden hashear, ejecuta normal."""
+    interna = st.cache_data(show_spinner=False, max_entries=60, ttl=900)(fn)
+
+    @functools.wraps(fn)
+    def envoltura(*args, **kwargs):
+        try:
+            return interna(*args, **kwargs)
+        except Exception:
+            return fn(*args, **kwargs)
+    return envoltura
+
+
+# Compatibilidad con bases Turso antiguas (conciliaciones.cuenta_id -> cuentas(id)):
+# la tabla legacy `cuentas` debe tener el mismo ID que cuentas_bancarias.
+_SQL_SINCRONIZAR_CUENTAS = """
+    INSERT INTO cuentas (id, empresa_id, banco, numero_cuenta, tipo_cuenta)
+    SELECT id, empresa_id, banco, numero_cuenta, tipo_cuenta
+    FROM cuentas_bancarias
+    WHERE empresa_id IS NOT NULL
+    ON CONFLICT(id) DO UPDATE SET
+        empresa_id=excluded.empresa_id,
+        banco=excluded.banco,
+        numero_cuenta=excluded.numero_cuenta,
+        tipo_cuenta=excluded.tipo_cuenta
+"""
+
+
+def _sincronizar_cuentas_legacy(c):
+    """Una sola sentencia (antes eran 2 consultas por cuenta en CADA recarga de la app)."""
+    try:
+        c.execute(_SQL_SINCRONIZAR_CUENTAS)
+    except Exception:
+        pass   # en instalaciones nuevas la tabla legacy puede no existir; no es un error
+
+
+_COLS_EMPRESAS = ['id', 'nombre', 'nit', 'logo']
+_COLS_CUENTAS = ['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre']
+_COLS_USUARIOS = ['id', 'usuario', 'nombre', 'rol', 'activo', 'fecha_creacion', 'empresa_nombre']
 
 # ==========================================
 # 3. CREACIÓN Y ESTRUCTURA DE TABLAS
@@ -115,37 +314,8 @@ def inicializar_db():
                 FOREIGN KEY (empresa_id) REFERENCES empresas(id)
             )
         """)
-        c.execute("""
-            SELECT id, empresa_id, banco, numero_cuenta, tipo_cuenta
-            FROM cuentas_bancarias
-            ORDER BY id
-        """)
-        cuentas_actuales = c.fetchall()
-
-        for cuenta in cuentas_actuales:
-            cuenta_id, empresa_id_cta, banco_cta, numero_cta, tipo_cta = cuenta
-            # Si el ID ya existe en la tabla legacy, lo alineamos con
-            # cuentas_bancarias. Esto hace que conciliaciones.cuenta_id
-            # apunte al mismo registro lógico.
-            c.execute("SELECT id FROM cuentas WHERE id=?", (int(cuenta_id),))
-            if c.fetchone():
-                c.execute("""
-                    UPDATE cuentas
-                       SET empresa_id=?, banco=?, numero_cuenta=?, tipo_cuenta=?
-                     WHERE id=?
-                """, (
-                    int(empresa_id_cta), str(banco_cta), str(numero_cta),
-                    str(tipo_cta), int(cuenta_id)
-                ))
-            else:
-                c.execute("""
-                    INSERT INTO cuentas
-                        (id, empresa_id, banco, numero_cuenta, tipo_cuenta)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    int(cuenta_id), int(empresa_id_cta), str(banco_cta),
-                    str(numero_cta), str(tipo_cta)
-                ))
+        # Sincroniza cuentas_bancarias -> cuentas en una sola sentencia.
+        c.execute(_SQL_SINCRONIZAR_CUENTAS)
         conn.commit()
     except Exception:
         # No detener una instalación nueva por compatibilidad de una tabla
@@ -202,7 +372,15 @@ def inicializar_db():
     conn.commit()
     conn.close()
 
-inicializar_db()
+
+@st.cache_resource(show_spinner=False)
+def _inicializar_una_vez():
+    """El esquema se verifica UNA vez por arranque del servidor, no en cada interacción."""
+    inicializar_db()
+    return True
+
+
+_inicializar_una_vez()
 
 # ==========================================
 # 3B. COPIAS DE SEGURIDAD Y RESTAURACIÓN
@@ -370,47 +548,46 @@ def _agregar_if_not_exists(sql):
 # ==========================================
 # 4. CONSULTAS A LA BASE DE DATOS
 # ==========================================
+@_lectura_cacheada(lambda e: pd.DataFrame(columns=_COLS_EMPRESAS))
 def obtener_empresas():
+    conn = conectar_db()
     try:
-        conn = conectar_db()
         c = conn.cursor()
         c.execute("SELECT id, razon_social, nit, logo FROM empresas ORDER BY razon_social")
         rows = c.fetchall()
+    finally:
         conn.close()
-        df = pd.DataFrame(rows, columns=['id', 'nombre', 'nit', 'logo']) if rows else pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
-        return df
-    except Exception:
-        return pd.DataFrame(columns=['id', 'nombre', 'nit', 'logo'])
+    return pd.DataFrame(rows, columns=_COLS_EMPRESAS) if rows else pd.DataFrame(columns=_COLS_EMPRESAS)
 
 
+@_lectura_cacheada(lambda e: None)
 def obtener_empresa_por_id(empresa_id):
+    conn = conectar_db()
     try:
-        conn = conectar_db()
         c = conn.cursor()
         c.execute("SELECT id, razon_social, nit, logo FROM empresas WHERE id=?", (int(empresa_id),))
         res = c.fetchone()
+    finally:
         conn.close()
-        if res:
-            return {"id": res[0], "nombre": res[1], "nit": res[2], "logo": res[3]}
-    except Exception:
-        pass
+    if res:
+        return {"id": res[0], "nombre": res[1], "nit": res[2], "logo": res[3]}
     return None
 
 
+@_lectura_cacheada(lambda e: None, max_entries=50)
 def obtener_logo_empresa(nombre_empresa):
     """Obtiene el logo BLOB de la empresa para mostrarlo en la app y reportes."""
     if not nombre_empresa:
         return None
+    conn = conectar_db()
     try:
-        conn = conectar_db()
         c = conn.cursor()
         c.execute("SELECT logo FROM empresas WHERE razon_social=? LIMIT 1", (str(nombre_empresa).strip(),))
         row = c.fetchone()
+    finally:
         conn.close()
-        if row and row[0]:
-            return bytes(row[0])
-    except Exception:
-        pass
+    if row and row[0]:
+        return bytes(row[0])
     return None
 
 
@@ -565,9 +742,10 @@ def reiniciar_datos_aplicativo():
         conn.close()
 
 
+@_lectura_cacheada(lambda e: pd.DataFrame(columns=_COLS_CUENTAS), max_entries=50)
 def obtener_cuentas(empresa_id=None):
+    conn = conectar_db()
     try:
-        conn = conectar_db()
         c = conn.cursor()
         query = """
             SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta,
@@ -582,12 +760,9 @@ def obtener_cuentas(empresa_id=None):
             query += " ORDER BY c.banco, c.numero_cuenta"
             c.execute(query)
         rows = c.fetchall()
+    finally:
         conn.close()
-        if rows:
-            return pd.DataFrame(rows, columns=['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre'])
-    except Exception:
-        pass
-    return pd.DataFrame(columns=['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre'])
+    return pd.DataFrame(rows, columns=_COLS_CUENTAS) if rows else pd.DataFrame(columns=_COLS_CUENTAS)
 
 
 def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id, datos_credito=None, usuario_id=None):
@@ -1049,10 +1224,14 @@ def _buscar_cuenta_id(c, empresa_id, banco, cuenta, tipo):
               (int(empresa_id), str(banco).strip(), str(cuenta).strip()))
     row = c.fetchone()
     if row:
-        return int(row[0])
-    c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id) VALUES (?, ?, ?, ?)",
-              (str(banco).strip(), str(cuenta).strip(), str(tipo).strip(), int(empresa_id)))
-    return int(c.lastrowid)
+        cuenta_id = int(row[0])
+    else:
+        c.execute("INSERT INTO cuentas_bancarias (banco, numero_cuenta, tipo_cuenta, empresa_id) VALUES (?, ?, ?, ?)",
+                  (str(banco).strip(), str(cuenta).strip(), str(tipo).strip(), int(empresa_id)))
+        cuenta_id = int(c.lastrowid)
+    # Antes esto ocurría en cada recarga; ahora solo al guardar una conciliación.
+    _sincronizar_cuentas_legacy(c)
+    return cuenta_id
 
 
 def construir_firmas_conciliacion(preparado_por="", revisado_por="", aprobado_por="",
@@ -1156,11 +1335,21 @@ def _decodificar_observaciones(texto):
         return {}
 
 
-def obtener_historial(empresa_nombre=None):
-    """Lee TODAS las conciliaciones guardadas y las prepara para Historial/Auditoría/Reportes."""
-    conn = None
+def _historial_con_error(e):
+    # No ocultar el fallo: el Historial debe indicar si existe un problema de conexión/consulta.
+    st.error(f"❌ No fue posible cargar el Historial: {type(e).__name__}: {e}")
+    return pd.DataFrame()
+
+
+@_lectura_cacheada(_historial_con_error, max_entries=40)
+def obtener_historial(empresa_nombre=None, incluir_json=False):
+    """
+    Lee las conciliaciones guardadas para Historial/Auditoría/Dashboard/Reportes.
+    incluir_json=True agrega la columna 'datos_json' (solo la necesita el CSV de Reportes);
+    el resto de pantallas no la usan y así se evita serializar cada registro en cada recarga.
+    """
+    conn = conectar_db()
     try:
-        conn = conectar_db()
         c = conn.cursor()
         query = """
             SELECT co.id, co.fecha_creacion, e.razon_social, e.nit, co.periodo,
@@ -1178,53 +1367,48 @@ def obtener_historial(empresa_nombre=None):
         query += " ORDER BY co.id DESC"
         c.execute(query, tuple(params))
         rows = c.fetchall()
-
-        salida = []
-        for row in rows:
-            d = _decodificar_observaciones(row[14])
-            workflow = row[13] or d.get('workflow_status') or 'Pendiente de revisión'
-            salida.append({
-                'id': int(row[0]),
-                'fecha_guardado': row[1] or '',
-                'empresa': row[2] or d.get('empresa', ''),
-                'nit': row[3] or d.get('nit', ''),
-                'mes': row[4] or d.get('mes', ''),
-                'banco': row[5] or d.get('banco', ''),
-                'cuenta': row[6] or d.get('cuenta', ''),
-                'tipo': row[7] or d.get('tipo', ''),
-                'saldo_extracto': float(row[8] or d.get('saldo_extracto', 0) or 0),
-                'saldo_libros': float(row[9] or d.get('saldo_libros', 0) or 0),
-                'diferencia_inicial': float(d.get('diferencia_inicial', float(row[8] or 0) - float(row[9] or 0)) or 0),
-                'diferencia_conciliada': float(d.get('diferencia_conciliada', 0) or 0),
-                'resultado_final': float(d.get('resultado_final', 0) or 0),
-                'estado': row[10] or d.get('estado', ''),
-                'workflow_status': workflow,
-                'preparado_por': row[11] or d.get('preparado_por', ''),
-                'revisado_por': row[12] or d.get('revisado_por', ''),
-                'revisado_por_usuario': row[12] or d.get('revisado_por_usuario', ''),
-                'aprobado_por_usuario': d.get('aprobado_por_usuario', ''),
-                'fecha_preparacion': d.get('fecha_preparacion', ''),
-                'fecha_revision': d.get('fecha_revision', ''),
-                'fecha_aprobacion': d.get('fecha_aprobacion', ''),
-                'motivo_correccion': d.get('motivo_correccion'),
-                'tipo_hallazgo': d.get('tipo_hallazgo'),
-                'checklist_json': d.get('checklist_json'),
-                'datos_json': json.dumps(d, ensure_ascii=False),
-                'fecha_elaboracion': d.get('fecha_elaboracion', row[1])
-            })
-        return pd.DataFrame(salida)
-    except Exception as e:
-        # No ocultar el fallo: el Historial debe indicar si existe un problema de conexión/consulta.
-        st.error(f"❌ No fue posible cargar el Historial: {type(e).__name__}: {e}")
-        return pd.DataFrame()
     finally:
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:
-                pass
+        conn.close()
+
+    salida = []
+    for row in rows:
+        d = _decodificar_observaciones(row[14])
+        workflow = row[13] or d.get('workflow_status') or 'Pendiente de revisión'
+        fila = {
+            'id': int(row[0]),
+            'fecha_guardado': row[1] or '',
+            'empresa': row[2] or d.get('empresa', ''),
+            'nit': row[3] or d.get('nit', ''),
+            'mes': row[4] or d.get('mes', ''),
+            'banco': row[5] or d.get('banco', ''),
+            'cuenta': row[6] or d.get('cuenta', ''),
+            'tipo': row[7] or d.get('tipo', ''),
+            'saldo_extracto': float(row[8] or d.get('saldo_extracto', 0) or 0),
+            'saldo_libros': float(row[9] or d.get('saldo_libros', 0) or 0),
+            'diferencia_inicial': float(d.get('diferencia_inicial', float(row[8] or 0) - float(row[9] or 0)) or 0),
+            'diferencia_conciliada': float(d.get('diferencia_conciliada', 0) or 0),
+            'resultado_final': float(d.get('resultado_final', 0) or 0),
+            'estado': row[10] or d.get('estado', ''),
+            'workflow_status': workflow,
+            'preparado_por': row[11] or d.get('preparado_por', ''),
+            'revisado_por': row[12] or d.get('revisado_por', ''),
+            'revisado_por_usuario': row[12] or d.get('revisado_por_usuario', ''),
+            'aprobado_por_usuario': d.get('aprobado_por_usuario', ''),
+            'fecha_preparacion': d.get('fecha_preparacion', ''),
+            'fecha_revision': d.get('fecha_revision', ''),
+            'fecha_aprobacion': d.get('fecha_aprobacion', ''),
+            'motivo_correccion': d.get('motivo_correccion'),
+            'tipo_hallazgo': d.get('tipo_hallazgo'),
+            'checklist_json': d.get('checklist_json'),
+        }
+        if incluir_json:
+            fila['datos_json'] = json.dumps(d, ensure_ascii=False)
+        fila['fecha_elaboracion'] = d.get('fecha_elaboracion', row[1])
+        salida.append(fila)
+    return pd.DataFrame(salida)
 
 
+@_lectura_cacheada(lambda e: None, max_entries=100)
 def obtener_conciliacion_por_id(id_conciliacion):
     try:
         conn = conectar_db()
@@ -1286,7 +1470,7 @@ def obtener_conciliacion_por_id(id_conciliacion):
             'tipo_hallazgo': datos.get('tipo_hallazgo'), 'checklist_json': datos.get('checklist_json')
         }
     except Exception:
-        return None
+        raise   # el decorador devuelve None y NO cachea el error
 
 
 def actualizar_estado_auditoria(id_conciliacion, nuevo_estado, revisado_por, motivo_correccion=None, tipo_hallazgo=None, checklist=None):
@@ -1399,6 +1583,7 @@ def _filas_caja_default():
                           "Forma de pago":"","Valor compra":0.0,"IVA / otros":0.0,"Total pagado":0.0,"Observaciones":""} for i in range(1,21)])
 
 
+@_cache_generador
 def preparar_excel_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, compras_df, efectivo_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
     wb=Workbook(); ws=wb.active; ws.title="Arqueo de Caja"
     ws.merge_cells("A1:J1"); ws["A1"]="ARQUEO DE CAJA GENERAL – COMPRAS"; ws["A1"].font=Font(bold=True,size=14); ws["A1"].alignment=Alignment(horizontal="center")
@@ -1443,6 +1628,7 @@ def preparar_excel_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, 
     out=io.BytesIO(); wb.save(out); return out.getvalue(), f"ARQUEO_CAJA_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
 
 
+@_cache_generador
 def generar_pdf_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, compras_df, efectivo_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
     out=io.BytesIO(); doc=SimpleDocTemplate(out,pagesize=portrait(letter),rightMargin=25,leftMargin=25,topMargin=25,bottomMargin=25); styles=getSampleStyleSheet(); story=[]
     if logo_bytes:
@@ -1461,6 +1647,7 @@ def generar_pdf_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, com
     doc.build(story); return out.getvalue(), f"ARQUEO_CAJA_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.pdf"
 
 
+@_cache_generador
 def preparar_excel_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_inicio, fecha_vencimiento, tasa, saldo_libros, saldo_extracto, diferencias_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
     wb=Workbook(); ws=wb.active; ws.title="Crédito Bancario"; ws.merge_cells("A1:F1"); ws["A1"]="CONCILIACIÓN DE CRÉDITO BANCARIO"; ws["A1"].font=Font(bold=True,size=14); ws["A1"].alignment=Alignment(horizontal="center")
     ws["A3"]="Empresa:"; ws["B3"]=empresa; ws["D3"]="Período:"; ws["E3"]=mes; ws["A4"]="Entidad financiera:"; ws["B4"]=entidad; ws["D4"]="Número de crédito:"; ws["E4"]=numero; ws["A5"]="Fecha inicio:"; ws["B5"]=str(fecha_inicio); ws["D5"]="Vencimiento:"; ws["E5"]=str(fecha_vencimiento); ws["A6"]="Tasa:"; ws["B6"]=tasa
@@ -1481,6 +1668,7 @@ def preparar_excel_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_
     out=io.BytesIO(); wb.save(out); return out.getvalue(), f"CREDITO_BANCARIO_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
 
 
+@_cache_generador
 def generar_pdf_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_inicio, fecha_vencimiento, tasa, saldo_libros, saldo_extracto, diferencias_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
     out=io.BytesIO(); doc=SimpleDocTemplate(out,pagesize=portrait(letter),rightMargin=35,leftMargin=35,topMargin=30,bottomMargin=30); styles=getSampleStyleSheet(); story=[]
     if logo_bytes:
@@ -1511,16 +1699,17 @@ def verificar_password(password, salt, password_hash):
     _, digest = hash_password(password, salt)
     return hmac.compare_digest(digest, password_hash)
 
+@_lectura_cacheada(lambda e: 0)
 def contar_usuarios():
+    conn = conectar_db()
     try:
-        conn = conectar_db()
         c = conn.cursor()
         c.execute("SELECT COUNT(*) FROM usuarios")
         res = c.fetchone()
+    finally:
         conn.close()
-        return res[0] if res else 0
-    except Exception:
-        return 0
+    return res[0] if res else 0
+
 
 def crear_usuario(usuario, nombre, password, rol, empresa_id=None):
     salt, password_hash = hash_password(str(password).strip())
@@ -1662,15 +1851,18 @@ def eliminar_usuario_db(usuario_id, usuario_actual_id=None):
     finally:
         conn.close()
 
+@_lectura_cacheada(lambda e: pd.DataFrame(columns=_COLS_USUARIOS))
 def obtener_usuarios():
+    conn = conectar_db()
     try:
-        conn = conectar_db(); c = conn.cursor()
+        c = conn.cursor()
         c.execute("""SELECT u.id, u.usuario, u.nombre, u.rol, u.activo, u.fecha_creacion, e.razon_social AS empresa_nombre
                      FROM usuarios u LEFT JOIN empresas e ON u.empresa_id=e.id ORDER BY u.id""")
-        rows = c.fetchall(); conn.close()
-        if rows: return pd.DataFrame(rows, columns=['id','usuario','nombre','rol','activo','fecha_creacion','empresa_nombre'])
-    except Exception: pass
-    return pd.DataFrame(columns=['id','usuario','nombre','rol','activo','fecha_creacion','empresa_nombre'])
+        rows = c.fetchall()
+    finally:
+        conn.close()
+    return pd.DataFrame(rows, columns=_COLS_USUARIOS) if rows else pd.DataFrame(columns=_COLS_USUARIOS)
+
 
 def obtener_opciones_menu(rol):
     if rol == "Preparador":
@@ -1724,7 +1916,7 @@ def iniciar_autenticacion():
                         st.error("El nombre de usuario ya existe. Por favor elige otro.")
         st.stop()
 
-    if contar_usuarios() == 0:
+    if st.session_state.usuario_autenticado is None and contar_usuarios() == 0:
         st.title("🔐 Configuración inicial")
         st.info("Crea el primer usuario con rol Administrador para comenzar.")
         with st.form("form_primer_admin"):
@@ -1877,6 +2069,40 @@ def limpiar_nombre_archivo(texto):
     if not texto:
         texto = "Empresa"
     return re.sub(r'[<>:"/\\|?*]', "-", texto)
+
+def paginar_dataframe(df, clave, opciones_tam=(5, 10, 20, 50), tam_defecto=10):
+    """
+    Muestra solo una página de resultados. Cada expander de Historial/Auditoría ejecuta su
+    contenido en cada recarga aunque esté cerrado, así que limitar cuántos se dibujan es
+    la mayor ganancia de velocidad cuando hay muchas conciliaciones.
+    """
+    total = len(df)
+    opciones = list(opciones_tam)
+    if total <= min(opciones):
+        return df
+    c1, c2, c3 = st.columns([1, 1, 3])
+    tam = c1.selectbox("Por página", opciones, index=opciones.index(tam_defecto), key=f"{clave}_tam")
+    paginas = max(1, -(-total // tam))
+    clave_pag = f"{clave}_pag"
+
+    # Si hay una conciliación recién guardada, saltar a la página donde está.
+    destacado = st.session_state.get("historial_id_destacado")
+    if destacado is not None and "id" in df.columns:
+        try:
+            ids = df["id"].astype(int).tolist()
+            if int(destacado) in ids:
+                st.session_state[clave_pag] = ids.index(int(destacado)) // tam + 1
+        except Exception:
+            pass
+    if clave_pag in st.session_state:
+        st.session_state[clave_pag] = max(1, min(int(st.session_state[clave_pag]), paginas))
+
+    pagina = c2.number_input("Página", min_value=1, max_value=paginas, step=1, key=clave_pag)
+    ini = (int(pagina) - 1) * tam
+    fin = min(ini + tam, total)
+    c3.caption(f"Mostrando {ini + 1}–{fin} de {total} conciliaciones")
+    return df.iloc[ini:fin]
+
 
 def estilo_titulo(celda, tamano=12):
     celda.fill = PatternFill(fill_type="solid", fgColor="1F4E78")
@@ -2068,6 +2294,7 @@ def preparar_excel(
     nombre_archivo = f"CONCILIACION_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
     return output.getvalue(), nombre_archivo
 
+@_cache_generador
 def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=portrait(letter), rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
@@ -2193,7 +2420,7 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
         st.success("🎉 ¡Excelente! No hay conciliaciones pendientes por auditar en este momento.")
     else:
         st.subheader("📋 Conciliaciones Asignadas para Auditoría")
-        for idx, fila in pendientes.iterrows():
+        for idx, fila in paginar_dataframe(pendientes, "pag_auditoria").iterrows():
             cuenta_txt = fila.get("cuenta") or "N/A"
             banco_txt = fila.get("banco") or "N/A"
             consecutivo_str = f"CONC-{int(fila['id']):06d}"
@@ -3328,7 +3555,7 @@ elif menu_seleccionado == "📋 Historial":
     if historial.empty:
         st.info("No hay conciliaciones guardadas para el filtro seleccionado.")
     else:
-        for idx, fila in historial.iterrows():
+        for idx, fila in paginar_dataframe(historial, "pag_historial").iterrows():
             cuenta_txt = fila.get("cuenta") or "N/A"
             banco_txt = fila.get("banco") or "N/A"
             wf_status = fila.get("workflow_status", "Pendiente de revisión")
@@ -3729,7 +3956,7 @@ elif menu_seleccionado == "⚙️ Administración":
 
 elif menu_seleccionado == "📄 Reportes":
     st.title("📄 Reportes y Descargas")
-    historial = obtener_historial(empresa_activa_nombre)
+    historial = obtener_historial(empresa_activa_nombre, incluir_json=True)
     if not historial.empty:
         csv = historial.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Descargar Historial Completo (CSV)", data=csv, file_name=f"historial_{limpiar_nombre_archivo(empresa_activa_nombre)}.csv", mime="text/csv")
