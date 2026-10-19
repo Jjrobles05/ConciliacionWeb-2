@@ -3264,19 +3264,20 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     revisado_por = ""
     renderizar_bloque_firmas_ui(preparado_por, "Se registra al guardar", "", "Pendiente", "", "Pendiente", "Borrador / Pendiente de revisión")
 
-    excel_data, nombre_archivo = preparar_excel(
-        empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
-        saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
-        resultado_final, salidas_extracto, salidas_libros, entradas_libros,
-        entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
-        nombres_titulos, aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="",
-        estado="Borrador / Pendiente de revisión"
-    )
-
+    # Optimización: no generar el archivo Excel en cada rerun de Streamlit.
+    # El libro se crea únicamente cuando el usuario guarda o envía la conciliación.
     st.divider()
     btn_col_borr, btn_col_env = st.columns(2)
     with btn_col_borr:
         if st.button("💾 Guardar como Borrador", key="btn_guardar_borrador"):
+            excel_data, nombre_archivo = preparar_excel(
+                empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
+                saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
+                resultado_final, salidas_extracto, salidas_libros, entradas_libros,
+                entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
+                nombres_titulos, aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="",
+                estado="Borrador / Pendiente de revisión"
+            )
             id_g = guardar_conciliacion_historial(
                 empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
                 saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
@@ -3292,6 +3293,14 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
 
     with btn_col_env:
         if st.button("🚀 Enviar a Revisión", key="btn_enviar_revision", type="primary"):
+            excel_data, nombre_archivo = preparar_excel(
+                empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
+                saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
+                resultado_final, salidas_extracto, salidas_libros, entradas_libros,
+                entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
+                nombres_titulos, aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="",
+                estado="Borrador / Pendiente de revisión"
+            )
             id_g = guardar_conciliacion_historial(
                 empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
                 saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
