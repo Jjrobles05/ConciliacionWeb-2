@@ -3119,11 +3119,13 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     st.metric("TOTAL GENERAL DE LA DIFERENCIA POR JUSTIFICAR", formatear_moneda(total_general_partidas))
 
     if es_tc:
-        diferencia_conciliada = m1 + m2 - m3 + m4
-    else:
-        diferencia_conciliada = m1 - m2 + m3 - m4
+    # Tarjeta de crédito: respetar los signos de cada concepto.
+    diferencia_conciliada = m1 + m2 + m3 + m4
+else:
+    # Mantener la fórmula bancaria existente.
+    diferencia_conciliada = m1 - m2 + m3 - m4
 
-    resultado_final = diferencia_inicial - diferencia_conciliada
+resultado_final = diferencia_inicial - diferencia_conciliada
 
     st.divider()
     st.subheader("Resultado de la Conciliación")
