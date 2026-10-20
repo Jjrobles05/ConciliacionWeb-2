@@ -2005,14 +2005,20 @@ with st.sidebar:
 
     st.divider()
     opciones_menu = obtener_opciones_menu(rol_actual)
+    # El destino pedido por la app (p. ej. "Editar conciliación") se guarda en el estado del radio,
+    # así la pantalla NO vuelve al Dashboard en la siguiente interacción.
     if "menu_override" in st.session_state:
-        menu_seleccionado = st.session_state.pop("menu_override")
-    else:
-        menu_seleccionado = st.radio("Navegación principal", opciones_menu)
+        _destino = st.session_state.pop("menu_override")
+        if _destino in opciones_menu:
+            st.session_state["menu_principal"] = _destino
+    if st.session_state.get("menu_principal") not in opciones_menu:
+        st.session_state.pop("menu_principal", None)
+    menu_seleccionado = st.radio("Navegación principal", opciones_menu, key="menu_principal")
 
     st.divider()
     if st.button("🚪 Cerrar sesión"):
         st.session_state.usuario_autenticado = None
+        st.session_state.pop("menu_principal", None)
         st.rerun()
 
 # ==========================================
@@ -2069,6 +2075,162 @@ def limpiar_nombre_archivo(texto):
     if not texto:
         texto = "Empresa"
     return re.sub(r'[<>:"/\\|?*]', "-", texto)
+
+def _tabla_hoja(titulo, registros, columna_total="Valor"):
+    """Dibuja una tabla de la hoja de conciliación con su TOTAL. Devuelve el total."""
+    st.markdown(f"**{titulo}**")
+    df = limpiar_dataframe(pd.DataFrame(registros or []))
+    if df is None or df.empty:
+        st.caption("Sin partidas registradas.")
+        return 0.0
+    vista = df.copy()
+    total = 0.0
+    if columna_total in vista.columns:
+        total = total_columna(vista, columna_total)
+        vista[columna_total] = pd.to_numeric(vista[columna_total], errors="coerce").fillna(0.0).map(formatear_moneda)
+    st.dataframe(vista.fillna(""), use_container_width=True, hide_index=True)
+    if columna_total in df.columns:
+        st.markdown(f"**TOTAL: {formatear_moneda(total)}**")
+    return total
+
+
+def _firmas_hoja(c_data, datos):
+    f1, f2, f3 = st.columns(3)
+    firmas = [
+        (f1, "PREPARÓ", c_data.get("preparado_por") or datos.get("preparado_por_usuario") or datos.get("preparado_por"),
+         datos.get("fecha_preparacion"), "Pendiente"),
+        (f2, "REVISÓ", datos.get("revisado_por_usuario") or c_data.get("revisado_por_usuario"),
+         datos.get("fecha_revision"), "Pendiente de revisión"),
+        (f3, "APROBÓ", datos.get("aprobado_por_usuario"), datos.get("fecha_aprobacion"), "Pendiente de aprobación"),
+    ]
+    for col, titulo, nombre, fecha, vacio in firmas:
+        with col:
+            st.markdown(f"**{titulo}**")
+            st.write(f"👤 {nombre or vacio}")
+            st.caption(f"Fecha: {fecha or 'Pendiente'}")
+
+
+def renderizar_hoja_conciliacion(c_data, datos, nombres_titulos, consecutivo):
+    """Vista en pantalla (solo lectura) de la conciliación, con el mismo orden que el Excel/PDF."""
+    datos = datos or {}
+    st.markdown(f"#### 📄 HOJA DE CONCILIACIÓN — {consecutivo}")
+    i1, i2 = st.columns(2)
+    with i1:
+        st.write(f"🏢 **Empresa:** {c_data.get('empresa') or 'N/A'}")
+        st.write(f"🔢 **NIT:** {c_data.get('nit') or 'N/A'}")
+        st.write(f"📅 **Mes y año:** {c_data.get('mes') or 'N/A'}")
+        st.write(f"🗓️ **Fecha de elaboración:** {str(c_data.get('fecha_elaboracion') or 'N/A')[:10]}")
+    with i2:
+        st.write(f"🏦 **Banco / Entidad:** {c_data.get('banco') or 'N/A'}")
+        st.write(f"💳 **Cuenta No.:** {c_data.get('cuenta') or 'N/A'}")
+        st.write(f"📂 **Tipo:** {c_data.get('tipo') or 'N/A'}")
+        st.write(f"🔎 **Estado de revisión:** {c_data.get('workflow_status') or 'N/A'}")
+    st.divider()
+
+    especial = datos.get("especial")
+    saldo_ext = float(c_data.get("saldo_extracto") or 0)
+    saldo_lib = float(c_data.get("saldo_libros") or 0)
+
+    if especial == "caja":
+        compras = limpiar_dataframe(pd.DataFrame(datos.get("compras") or []))
+        efectivo = limpiar_dataframe(pd.DataFrame(datos.get("efectivo") or []))
+        saldo_ini = float(datos.get("saldo_inicial") or 0)
+        total_compras = total_columna(compras, "Total pagado")
+        teorico = float(datos.get("saldo_teorico", saldo_ini - total_compras) or 0)
+        fisico = float(datos.get("efectivo_fisico", total_columna(efectivo, "Monto")) or 0)
+        a, b, c, d = st.columns(4)
+        a.metric("Saldo inicial", formatear_moneda(saldo_ini))
+        b.metric("Total compras", formatear_moneda(total_compras))
+        c.metric("Saldo teórico", formatear_moneda(teorico))
+        d.metric("Efectivo físico", formatear_moneda(fisico))
+        _tabla_hoja("COMPRAS DEL PERÍODO", datos.get("compras"), "Total pagado")
+        _tabla_hoja("CONTEO DE EFECTIVO", datos.get("efectivo"), "Monto")
+        dif = float(datos.get("diferencia_caja", fisico - teorico) or 0)
+        if abs(dif) < 0.005:
+            st.success("Resultado del arqueo: **CUADRA**")
+        else:
+            st.warning(f"Resultado del arqueo: **{datos.get('resultado_arqueo') or ('SOBRANTE' if dif > 0 else 'FALTANTE')}** — diferencia de {formatear_moneda(abs(dif))}")
+        if datos.get("observaciones_caja"):
+            st.caption(f"Observaciones: {datos.get('observaciones_caja')}")
+    elif especial == "credito_bancario":
+        st.write(f"🏦 **Entidad:** {datos.get('entidad_financiera') or c_data.get('banco') or 'N/A'}  |  **Crédito No.:** {datos.get('numero_credito') or c_data.get('cuenta') or 'N/A'}")
+        st.write(f"📆 **Inicio:** {datos.get('fecha_inicio') or 'N/A'}  |  **Vencimiento:** {datos.get('fecha_vencimiento') or 'N/A'}  |  **Tasa:** {datos.get('tasa') or 'N/A'}  |  **Cuota:** {formatear_moneda(datos.get('cuota') or 0)}")
+        a, b, c = st.columns(3)
+        a.metric("Saldo según extracto", formatear_moneda(saldo_ext))
+        b.metric("Saldo según libros", formatear_moneda(saldo_lib))
+        c.metric("Diferencia (libros − extracto)", formatear_moneda(saldo_lib - saldo_ext))
+        _tabla_hoja("DIFERENCIAS IDENTIFICADAS", datos.get("diferencias"), "Valor")
+        if datos.get("observaciones_credito"):
+            st.caption(f"Observaciones: {datos.get('observaciones_credito')}")
+    else:
+        a, b, c = st.columns(3)
+        a.metric("Saldo según extracto bancario", formatear_moneda(saldo_ext))
+        b.metric("Saldo según libros", formatear_moneda(saldo_lib))
+        c.metric("Diferencia a justificar", formatear_moneda(c_data.get("diferencia_inicial", saldo_ext - saldo_lib)))
+        st.divider()
+        _tabla_hoja(f"1. {nombres_titulos.get('t1', '')}", datos.get("salidas_extracto"))
+        _tabla_hoja(f"2. {nombres_titulos.get('t2', '')}", datos.get("salidas_libros"))
+        _tabla_hoja(f"3. {nombres_titulos.get('t3', '')}", datos.get("entradas_libros"))
+        _tabla_hoja(f"4. {nombres_titulos.get('t4', '')}", datos.get("entradas_extracto"))
+
+        st.markdown("**5. GASTOS BANCARIOS**")
+        cols_gb = ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
+        dfg = limpiar_dataframe(pd.DataFrame(datos.get("gastos_bancarios") or []))
+        if dfg is None or dfg.empty:
+            st.caption("Sin gastos bancarios registrados.")
+        else:
+            dfg = dfg.reindex(columns=cols_gb)
+            fila_total = {"Fecha": "TOTAL"}
+            vista = pd.DataFrame({"Fecha": dfg["Fecha"].fillna("").astype(str)})
+            for col in cols_gb[1:]:
+                num = pd.to_numeric(dfg[col], errors="coerce").fillna(0.0)
+                vista[col] = num.map(formatear_moneda)
+                fila_total[col] = formatear_moneda(float(num.sum()))
+            vista = pd.concat([vista, pd.DataFrame([fila_total])], ignore_index=True)
+            st.dataframe(vista, use_container_width=True, hide_index=True)
+
+        st.divider()
+        dif_conc = float(c_data.get("diferencia_conciliada") or 0)
+        res_final = float(c_data.get("resultado_final") or 0)
+        r1, r2 = st.columns(2)
+        r1.metric("Diferencia conciliada (partidas)", formatear_moneda(dif_conc))
+        r2.metric("Resultado final", formatear_moneda(res_final))
+        if abs(res_final) < 0.005:
+            st.success("✅ CONCILIACIÓN CORRECTA — la diferencia quedó justificada en su totalidad.")
+        else:
+            st.warning(f"⚠️ CONCILIACIÓN CON DIFERENCIA — resta por justificar {formatear_moneda(abs(res_final))}.")
+
+    st.divider()
+    st.markdown("**FIRMAS Y TRAZABILIDAD**")
+    _firmas_hoja(c_data, datos)
+
+
+_CLAVES_EDICION = (
+    "tabla1", "tabla2", "tabla3", "tabla4", "tabla5",
+    "caja_compras", "caja_efectivo", "credito_diferencias",
+    "editor_tabla1", "editor_tabla2", "editor_tabla3", "editor_tabla4", "editor_tabla5",
+    "editor_caja_compras", "editor_caja_efectivo", "editor_credito_diferencias",
+    # campos que se precargan desde la conciliación y no deben arrastrar el valor de otra
+    "form_saldo_extracto", "form_saldo_libros", "form_fecha_elaboracion_edit",
+    "caja_responsable", "caja_saldo_inicial", "caja_fondo", "caja_obs",
+    "credito_entidad", "credito_numero", "credito_fecha_inicio", "credito_fecha_vencimiento",
+    "credito_tasa", "credito_saldo_libros", "credito_saldo_extracto", "credito_observaciones",
+)
+
+
+def limpiar_estado_edicion():
+    """Descarta tablas/editores en memoria para que una conciliación nueva o distinta empiece limpia."""
+    for k in _CLAVES_EDICION:
+        st.session_state.pop(k, None)
+    st.session_state.pop("datos_cargados_edit", None)
+
+
+def iniciar_edicion_conciliacion(id_conciliacion):
+    limpiar_estado_edicion()
+    st.session_state.conciliacion_a_editar = id_conciliacion
+    st.session_state.menu_override = "📝 Nueva Conciliación"
+    st.rerun()
+
 
 def paginar_dataframe(df, clave, opciones_tam=(5, 10, 20, 50), tam_defecto=10):
     """
@@ -2554,7 +2716,7 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                         cexp1, cexp2, cexp3 = st.columns(3)
                         with cexp1:
                             if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                                st.session_state.conciliacion_a_editar = fila['id']; st.session_state.pop("datos_cargados_edit", None); st.session_state.menu_override = "📝 Nueva Conciliación"; st.rerun()
+                                iniciar_edicion_conciliacion(fila['id'])
                         with cexp2:
                             st.download_button("📊 Descargar Excel", data=excel_h, file_name=nombre_h, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"dlx_{fila['id']}")
                         with cexp3:
@@ -3053,6 +3215,9 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
 elif menu_seleccionado == "📝 Nueva Conciliación":
     st.title("📝 Captura / Edición de Conciliación Bancaria")
     id_edicion = st.session_state.get("conciliacion_a_editar", None)
+    if st.session_state.get("_edicion_previa") and not id_edicion:
+        limpiar_estado_edicion()
+    st.session_state["_edicion_previa"] = id_edicion
     if id_edicion:
         c_edit = obtener_conciliacion_por_id(id_edicion)
         consecutivo_edit_str = f"CONC-{int(id_edicion):06d}"
@@ -3063,15 +3228,15 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
                 del st.session_state.datos_cargados_edit
             st.rerun()
 
-    if "tabla1" not in st.session_state or id_edicion:
+    if "tabla1" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
         st.session_state.tabla1 = pd.DataFrame(columns=["Fecha", "Beneficiario", "Documento", "Valor"])
-    if "tabla2" not in st.session_state or id_edicion:
+    if "tabla2" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
         st.session_state.tabla2 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla3" not in st.session_state or id_edicion:
+    if "tabla3" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
         st.session_state.tabla3 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla4" not in st.session_state or id_edicion:
+    if "tabla4" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
         st.session_state.tabla4 = pd.DataFrame(columns=["Fecha", "Concepto", "Valor"])
-    if "tabla5" not in st.session_state or id_edicion:
+    if "tabla5" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
         st.session_state.tabla5 = pd.DataFrame(columns=["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"])
 
     if id_edicion and "datos_cargados_edit" not in st.session_state:
@@ -3193,9 +3358,9 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         st.info("💵 Modo activado: Arqueo de Caja General – Compras.")
         nombres_titulos = {}
         st.divider(); st.subheader("💵 Arqueo de Caja General – Compras")
-        if "caja_compras" not in st.session_state or id_edicion:
+        if "caja_compras" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
             st.session_state.caja_compras = _filas_caja_default()
-        if "caja_efectivo" not in st.session_state or id_edicion:
+        if "caja_efectivo" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
             denoms=[2000,5000,10000,20000,50000,100000,100,200,500,1000]
             st.session_state.caja_efectivo=pd.DataFrame([{"Denominación":d,"Cantidad":0,"Monto":0.0} for d in denoms])
         c1,c2,c3=st.columns(3)
@@ -3258,7 +3423,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         (m2.success if resultado_cb=="CONCILIADO" else m2.warning)(f"Resultado: **{resultado_cb}**")
 
         st.markdown("### 2. Partidas que explican la diferencia")
-        if "credito_diferencias" not in st.session_state or id_edicion:
+        if "credito_diferencias" not in st.session_state or (id_edicion and "datos_cargados_edit" not in st.session_state):
             st.session_state.credito_diferencias=pd.DataFrame([
                 {"Concepto":"Abono a capital registrado en libros y no en banco","Valor":0.0,"Observación":""},
                 {"Concepto":"Abono a capital registrado en banco y no en libros","Valor":0.0,"Observación":""},
@@ -3594,10 +3759,7 @@ elif menu_seleccionado == "📋 Historial":
                 c_act1, c_act2, c_act3, c_act4 = st.columns(4)
                 with c_act1:
                     if st.button("✏️ Editar Conciliación", key=f"btn_edit_{fila['id']}"):
-                        st.session_state.conciliacion_a_editar = fila['id']
-                        st.session_state.pop("datos_cargados_edit", None)
-                        st.session_state.menu_override = "📝 Nueva Conciliación"
-                        st.rerun()
+                        iniciar_edicion_conciliacion(fila['id'])
 
                 with c_act2:
                     if c_data.get("excel"):
@@ -3615,6 +3777,11 @@ elif menu_seleccionado == "📋 Historial":
                         if st.button("🗑️ Eliminar", key=f"btn_delete_conc_{fila['id']}", use_container_width=True):
                             st.session_state.conciliacion_a_eliminar = int(fila['id'])
                             st.rerun()
+
+                # Vista tipo hoja: solo se dibuja al marcar la casilla (no afecta la velocidad).
+                if st.checkbox("📄 Ver hoja de la conciliación", key=f"ver_hoja_{fila['id']}"):
+                    with st.container():
+                        renderizar_hoja_conciliacion(c_data, datos, nombres_titulos, consecutivo_str)
 
                 if rol_actual == "Administrador" and int(st.session_state.get("conciliacion_a_eliminar", -1)) == int(fila['id']):
                     st.warning(f"⚠️ ¿Está seguro de eliminar la conciliación **{consecutivo_str}**? Esta acción no se puede deshacer.")
@@ -3803,6 +3970,10 @@ elif menu_seleccionado == "👥 Usuarios":
 
 elif menu_seleccionado == "⚙️ Administración":
     st.title("⚙️ Administración")
+    # Copias de seguridad, restauración y borrado de datos: exclusivo del Administrador.
+    if rol_actual != "Administrador":
+        st.error("⛔ Esta sección es exclusiva del rol Administrador.")
+        st.stop()
 
     st.subheader("🛡️ Copias de seguridad")
     st.info(
