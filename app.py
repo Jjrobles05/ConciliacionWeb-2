@@ -1439,6 +1439,13 @@ def obtener_conciliacion_por_id(id_conciliacion):
         datos.setdefault('preparado_por', row[7]); datos.setdefault('revisado_por', row[8])
         datos.setdefault('workflow_status', row[10] or 'Pendiente de revisión')
         excel_bytes = None
+        _titulos_excel = (
+            {'t1': 'COMPRAS NO EVIDENCIADAS EN EXTRACTOS', 't2': 'COMPRAS NO CONTABILIZADAS EN LIBROS',
+             't3': 'DÉBITOS BANCARIOS NO CONTABILIZADOS EN LIBROS', 't4': 'ABONOS NO REGISTRADOS EN EXTRACTO'}
+            if 'tarjeta' in str(tipo).lower() else
+            {'t1': 'SALIDAS NO REGISTRADAS EN EXTRACTO', 't2': 'SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS',
+             't3': 'ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS', 't4': 'ENTRADAS NO EVIDENCIADAS EN EXTRACTOS'}
+        )
         try:
             from datetime import date
             fecha_elab = datos.get('fecha_elaboracion', datetime.now().date().isoformat())
@@ -1450,10 +1457,17 @@ def obtener_conciliacion_por_id(id_conciliacion):
                 datos.get('diferencia_conciliada',0), datos.get('resultado_final',0),
                 pd.DataFrame(datos.get('salidas_extracto',[])), pd.DataFrame(datos.get('salidas_libros',[])),
                 pd.DataFrame(datos.get('entradas_libros',[])), pd.DataFrame(datos.get('entradas_extracto',[])),
-                pd.DataFrame(datos.get('gastos_bancarios',[])), datos.get('preparado_por',row[7] or ''),
-                datos.get('revisado_por',row[8] or ''),
-                {'t1':'SALIDAS NO REGISTRADAS EN EXTRACTO','t2':'SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS',
-                 't3':'ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS','t4':'ENTRADAS NO EVIDENCIADAS EN EXTRACTOS'}
+                pd.DataFrame(datos.get('gastos_bancarios',[])),
+                datos.get('preparado_por_usuario') or datos.get('preparado_por') or row[7] or '',
+                datos.get('revisado_por_usuario') or row[8] or '',
+                _titulos_excel,
+                aprobado_por=datos.get('aprobado_por_usuario') or '',
+                fecha_preparacion=datos.get('fecha_preparacion') or '',
+                fecha_revision=datos.get('fecha_revision') or '',
+                fecha_aprobacion=datos.get('fecha_aprobacion') or '',
+                estado=row[10] or datos.get('workflow_status') or 'Pendiente de revisión',
+                estado_conciliacion=row[6],
+                consecutivo=f"CONC-{int(row[0]):06d}"
             )
         except Exception:
             pass
@@ -2158,8 +2172,12 @@ def renderizar_hoja_conciliacion(c_data, datos, nombres_titulos, consecutivo):
         a, b, c = st.columns(3)
         a.metric("Saldo según extracto", formatear_moneda(saldo_ext))
         b.metric("Saldo según libros", formatear_moneda(saldo_lib))
-        c.metric("Diferencia (libros − extracto)", formatear_moneda(saldo_lib - saldo_ext))
+        c.metric("Diferencia (extracto − libros)", formatear_moneda(saldo_ext - saldo_lib))
         _tabla_hoja("DIFERENCIAS IDENTIFICADAS", datos.get("diferencias"), "Valor")
+        if abs(saldo_ext - saldo_lib) < 0.005:
+            st.success("Resultado: **CONCILIADO**")
+        else:
+            st.warning(f"Resultado: **NO CONCILIADO** — diferencia de {formatear_moneda(abs(saldo_ext - saldo_lib))}")
         if datos.get("observaciones_credito"):
             st.caption(f"Observaciones: {datos.get('observaciones_credito')}")
     else:
@@ -2203,6 +2221,156 @@ def renderizar_hoja_conciliacion(c_data, datos, nombres_titulos, consecutivo):
     st.divider()
     st.markdown("**FIRMAS Y TRAZABILIDAD**")
     _firmas_hoja(c_data, datos)
+
+
+AUDITORIA_DIAS_ALERTA = 3   # a partir de cuántos días en espera se marca en rojo una conciliación
+
+
+def titulos_partidas(tipo):
+    """Títulos de las 4 tablas de partidas según sea cuenta bancaria o tarjeta de crédito."""
+    if "tarjeta" in str(tipo or "").lower():
+        return {"t1": "COMPRAS NO EVIDENCIADAS EN EXTRACTOS", "t2": "COMPRAS NO CONTABILIZADAS EN LIBROS",
+                "t3": "DÉBITOS BANCARIOS NO CONTABILIZADOS EN LIBROS", "t4": "ABONOS NO REGISTRADOS EN EXTRACTO"}
+    return {"t1": "SALIDAS NO REGISTRADAS EN EXTRACTO", "t2": "SALIDAS BANCARIAS NO CONTABILIZADAS EN LIBROS",
+            "t3": "ENTRADAS BANCARIAS NO CONTABILIZADAS EN LIBROS", "t4": "ENTRADAS NO EVIDENCIADAS EN EXTRACTOS"}
+
+
+def calcular_dias_espera(df, columna="fecha_guardado"):
+    """Días transcurridos desde que el preparador envió la conciliación a revisión."""
+    if df is None or df.empty or columna not in df.columns:
+        return pd.Series([0] * (0 if df is None else len(df)), index=None if df is None else df.index, dtype=int)
+    f = pd.to_datetime(df[columna], errors="coerce")
+    return (pd.Timestamp.now() - f).dt.days.fillna(0).clip(lower=0).astype(int)
+
+
+def filtrar_bandeja_auditoria(df, texto="", tipo="Todos", orden="Más antiguas primero"):
+    """Búsqueda, filtro por tipo y orden de la bandeja del auditor (no modifica datos)."""
+    if df is None or df.empty:
+        return df
+    vista = df
+    q = (texto or "").strip().lower()
+    if q:
+        cols = [c for c in ("empresa", "banco", "cuenta", "mes", "preparado_por", "tipo") if c in vista.columns]
+        base = vista["id"].map(lambda i: f"conc-{int(i):06d}") + " " + vista[cols].fillna("").astype(str).agg(" ".join, axis=1)
+        vista = vista[base.str.lower().str.contains(q, regex=False)]
+    if tipo and tipo != "Todos":
+        vista = vista[vista["tipo"].astype(str) == tipo]
+    antiguas = str(orden).startswith("Más antiguas")
+    return vista.sort_values(["dias_espera", "id"], ascending=[not antiguas, antiguas])
+
+
+def _col_texto(df, nombre):
+    if nombre in df.columns:
+        return df[nombre].fillna("").astype(str)
+    return pd.Series([""] * len(df), index=df.index)
+
+
+def resumen_devueltas(df):
+    """Tabla de solo lectura con lo devuelto al preparador y por qué."""
+    return pd.DataFrame({
+        "Consecutivo": df["id"].map(lambda i: f"CONC-{int(i):06d}"),
+        "Empresa": _col_texto(df, "empresa"), "Banco": _col_texto(df, "banco"),
+        "Cuenta": _col_texto(df, "cuenta"), "Mes": _col_texto(df, "mes"),
+        "Hallazgo": _col_texto(df, "tipo_hallazgo"), "Motivo": _col_texto(df, "motivo_correccion"),
+        "Devuelta el": _col_texto(df, "fecha_revision"), "Preparó": _col_texto(df, "preparado_por"),
+    }).reset_index(drop=True)
+
+
+def resumen_aprobadas(df, limite=15):
+    """Últimas conciliaciones aprobadas (más recientes primero)."""
+    if "fecha_aprobacion" in df.columns:
+        df = df.assign(_f=pd.to_datetime(df["fecha_aprobacion"], errors="coerce")).sort_values(["_f", "id"], ascending=False, na_position="last")
+    else:
+        df = df.sort_values("id", ascending=False)
+    df = df.head(limite)
+    return pd.DataFrame({
+        "Consecutivo": df["id"].map(lambda i: f"CONC-{int(i):06d}"),
+        "Empresa": _col_texto(df, "empresa"), "Banco": _col_texto(df, "banco"),
+        "Cuenta": _col_texto(df, "cuenta"), "Mes": _col_texto(df, "mes"),
+        "Aprobó": _col_texto(df, "aprobado_por_usuario"), "Fecha aprobación": _col_texto(df, "fecha_aprobacion"),
+        "Resultado final": df["resultado_final"].map(formatear_moneda) if "resultado_final" in df.columns else "",
+    }).reset_index(drop=True)
+
+
+def archivos_conciliacion(c_data, datos, consecutivo):
+    """Devuelve (excel_bytes, nombre_excel, pdf_bytes, nombre_pdf) según el tipo de conciliación.
+    Si no se pueden generar devuelve (None, "", None, "") sin romper la pantalla."""
+    d = datos or {}
+    tipo = str(c_data.get("tipo") or "").lower()
+    wf = c_data.get("workflow_status", "Pendiente de revisión")
+    logo = obtener_logo_empresa(c_data.get("empresa"))
+    prep = d.get("preparado_por_usuario", c_data.get("preparado_por", ""))
+    rev = d.get("revisado_por_usuario", c_data.get("revisado_por", ""))
+    apr = d.get("aprobado_por_usuario", "")
+    fechas = (d.get("fecha_preparacion", ""), d.get("fecha_revision", ""), d.get("fecha_aprobacion", ""))
+    try:
+        if "caja" in tipo:
+            args = (c_data.get("empresa"), c_data.get("mes"), d.get("fecha_elaboracion", ""),
+                    d.get("responsable", c_data.get("preparado_por", "")), d.get("saldo_inicial", 0),
+                    d.get("fondo_autorizado", 0), pd.DataFrame(d.get("compras", [])), pd.DataFrame(d.get("efectivo", [])),
+                    d.get("observaciones_caja", ""), logo, prep, rev, apr, *fechas, wf)
+            excel, nombre = preparar_excel_caja(*args)
+            pdf, _ = generar_pdf_caja(*args)
+        elif "crédito bancario" in tipo or "credito bancario" in tipo:
+            args = (c_data.get("empresa"), c_data.get("mes"), d.get("fecha_elaboracion", ""),
+                    d.get("entidad_financiera", c_data.get("banco", "")), d.get("numero_credito", c_data.get("cuenta", "")),
+                    d.get("fecha_inicio", ""), d.get("fecha_vencimiento", ""), d.get("tasa", ""),
+                    c_data.get("saldo_libros", 0), c_data.get("saldo_extracto", 0), pd.DataFrame(d.get("diferencias", [])),
+                    d.get("observaciones_credito", ""), logo, prep, rev, apr, *fechas, wf)
+            excel, nombre = preparar_excel_credito_bancario(*args)
+            pdf, _ = generar_pdf_credito_bancario(*args)
+        else:
+            nombre = f"CONCILIACION_{consecutivo}_{limpiar_nombre_archivo(c_data.get('empresa'))}.xlsx"
+            excel = bytes(c_data["excel"]) if c_data.get("excel") else None
+            pdf = generar_pdf_conciliacion(c_data, d, titulos_partidas(c_data.get("tipo")))
+        return excel, nombre, pdf, nombre.replace(".xlsx", ".pdf")
+    except Exception:
+        return None, "", None, ""
+
+
+def mostrar_conciliacion_consulta(fila, vista):
+    """Tarjeta de SOLO LECTURA para conciliaciones aprobadas ("apr") o devueltas ("dev")."""
+    consecutivo = f"CONC-{int(fila['id']):06d}"
+    icono = "✅" if vista == "apr" else "❌"
+    banco = fila.get("banco") or "N/A"
+    cuenta = fila.get("cuenta") or "N/A"
+    with st.expander(f"{icono} {consecutivo} | {fila.get('empresa', '')} - {banco} ({cuenta}) | Mes: {fila.get('mes', '')}"):
+        c_data = obtener_conciliacion_por_id(fila["id"])
+        if not c_data:
+            st.error("No fue posible cargar esta conciliación (posible falla momentánea de conexión). Recarga la página e inténtalo de nuevo.")
+            return
+        try:
+            datos = json.loads(c_data.get("datos_json", "{}"))
+        except Exception:
+            datos = {}
+        if vista == "dev":
+            quien = datos.get("revisado_por_usuario") or c_data.get("revisado_por") or "N/A"
+            st.warning(
+                f"❌ **Devuelta al preparador** por **{quien}** el {datos.get('fecha_revision') or 'N/A'}\n\n"
+                f"**Hallazgo:** {datos.get('tipo_hallazgo') or 'N/A'}\n\n"
+                f"**Motivo:** {datos.get('motivo_correccion') or 'Sin detalle'}"
+            )
+            st.caption("El preparador debe corregirla desde Historial → ✏️ Editar y volver a enviarla a revisión.")
+        else:
+            st.success(f"✅ **Aprobada** por **{datos.get('aprobado_por_usuario') or 'N/A'}** el {datos.get('fecha_aprobacion') or 'N/A'}")
+        st.caption(f"Preparó: {c_data.get('preparado_por') or datos.get('preparado_por_usuario') or 'N/A'} | "
+                   f"Tipo: {c_data.get('tipo') or 'N/A'} | Resultado: {c_data.get('estado') or 'N/A'}")
+
+        if st.checkbox("📄 Ver hoja de la conciliación", key=f"aud_{vista}_hoja_{fila['id']}"):
+            renderizar_hoja_conciliacion(c_data, datos, titulos_partidas(c_data.get("tipo")), consecutivo)
+            st.divider()
+
+        excel, nombre, pdf, nombre_pdf = archivos_conciliacion(c_data, datos, consecutivo)
+        d1, d2 = st.columns(2)
+        with d1:
+            if excel:
+                st.download_button("📊 Descargar Excel", data=excel, file_name=nombre,
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                   key=f"aud_{vista}_xl_{fila['id']}", use_container_width=True)
+        with d2:
+            if pdf:
+                st.download_button("📄 Descargar PDF", data=pdf, file_name=nombre_pdf, mime="application/pdf",
+                                   key=f"aud_{vista}_pdf_{fila['id']}", use_container_width=True)
 
 
 _CLAVES_EDICION = (
@@ -2355,7 +2523,8 @@ def preparar_excel(
     saldo_extracto, saldo_libros, diferencia_inicial, diferencia_conciliada,
     resultado_final, salidas_extracto, salidas_libros, entradas_libros,
     entradas_extracto, gastos_bancarios, preparado_por, revisado_por,
-    nombres_titulos, aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"
+    nombres_titulos, aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión",
+    estado_conciliacion=None, consecutivo=None
 ):
     workbook = Workbook()
     ws = workbook.active
@@ -2394,6 +2563,8 @@ def preparar_excel(
         ("Fecha de elaboración", fecha_elaboracion), ("Banco", banco),
         ("Cuenta No.", cuenta), ("Tipo", tipo),
     ]
+    if consecutivo:
+        datos_generales.insert(0, ("Consecutivo No.", consecutivo))
     for nombre, valor in datos_generales:
         ws.cell(row=fila, column=1).value = nombre
         ws.cell(row=fila, column=1).font = Font(bold=True)
@@ -2407,13 +2578,30 @@ def preparar_excel(
         ("SALDO SEGÚN EXTRACTO BANCARIO", saldo_extracto),
         ("SALDO SEGÚN LIBROS", saldo_libros),
         ("DIFERENCIA A JUSTIFICAR", diferencia_inicial),
+        ("DIFERENCIA CONCILIADA", diferencia_conciliada),
+        ("RESULTADO FINAL", resultado_final),
     ]
     for nombre, valor in saldos:
         ws.cell(row=fila, column=1).value = nombre
         ws.cell(row=fila, column=1).font = Font(bold=True)
-        ws.cell(row=fila, column=2).value = valor
+        try:
+            ws.cell(row=fila, column=2).value = float(valor or 0)
+        except (TypeError, ValueError):
+            ws.cell(row=fila, column=2).value = valor
         ws.cell(row=fila, column=2).number_format = '$ #,##0.00'
         fila += 1
+    if not estado_conciliacion:
+        try:
+            _correcta = abs(float(resultado_final or 0)) < 0.005
+        except (TypeError, ValueError):
+            _correcta = False
+        estado_conciliacion = "CONCILIACIÓN BANCARIA CORRECTA" if _correcta else "CONCILIACIÓN CON DIFERENCIA"
+    ws.cell(row=fila, column=1).value = "ESTADO"
+    ws.cell(row=fila, column=1).font = Font(bold=True)
+    ws.merge_cells(start_row=fila, start_column=2, end_row=fila, end_column=4)
+    ws.cell(row=fila, column=2).value = str(estado_conciliacion)
+    ws.cell(row=fila, column=2).font = Font(bold=True)
+    fila += 1
 
     fila = escribir_tabla(ws, fila, nombres_titulos["t1"], salidas_extracto)
     fila = escribir_tabla(ws, fila, nombres_titulos["t2"], salidas_libros)
@@ -2570,19 +2758,62 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
     st.caption("Panel de control exclusivo para la revisión analítica, verificación y dictamen de Conciliaciones Bancarias.")
 
     historial = obtener_historial(empresa_activa_nombre)
-    pendientes = historial[historial["workflow_status"] == "Pendiente de revisión"] if not historial.empty else pd.DataFrame()
+    pendientes = historial[historial["workflow_status"] == "Pendiente de revisión"].copy() if not historial.empty else pd.DataFrame()
+    if not pendientes.empty:
+        pendientes["dias_espera"] = calcular_dias_espera(pendientes)
+    devueltas_df = historial[historial["workflow_status"] == "Requiere corrección"] if not historial.empty else pd.DataFrame()
+    aprobadas_df = historial[historial["workflow_status"] == "Aprobada"] if not historial.empty else pd.DataFrame()
 
-    k1, k2, k3 = st.columns(3)
+    k1, k2, k3, k4 = st.columns(4)
     k1.metric("Pendientes de Revisar", len(pendientes))
-    k2.metric("Aprobadas", len(historial[historial["workflow_status"] == "Aprobada"]) if not historial.empty else 0)
-    k3.metric("Devueltas ❌", len(historial[historial["workflow_status"] == "Requiere corrección"]) if not historial.empty else 0)
+    k2.metric("Aprobadas", len(aprobadas_df))
+    k3.metric("Devueltas ❌", len(devueltas_df))
+    if pendientes.empty:
+        k4.metric("Más antigua en espera", "—")
+    else:
+        _max_dias = int(pendientes["dias_espera"].max())
+        k4.metric("Más antigua en espera", f"{_max_dias} día(s)", delta="⚠️ atender" if _max_dias >= AUDITORIA_DIAS_ALERTA else None, delta_color="inverse")
     st.divider()
 
-    if pendientes.empty:
+    # --- Selector: cada indicador se puede abrir para ver sus conciliaciones ---
+    _OPC_PEND, _OPC_APR, _OPC_DEV = "pend", "apr", "dev"
+    _conteos = {_OPC_PEND: len(pendientes), _OPC_APR: len(aprobadas_df), _OPC_DEV: len(devueltas_df)}
+    _etiquetas = {_OPC_PEND: "⏳ Pendientes de Revisar", _OPC_APR: "✅ Aprobadas", _OPC_DEV: "❌ Devueltas"}
+    vista_aud = st.radio("📂 ¿Qué conciliaciones quieres ver?", [_OPC_PEND, _OPC_APR, _OPC_DEV], horizontal=True,
+                         key="aud_vista", format_func=lambda k: f"{_etiquetas[k]} ({_conteos[k]})")
+    _fuente = {_OPC_PEND: pendientes, _OPC_APR: aprobadas_df, _OPC_DEV: devueltas_df}[vista_aud].copy()
+    vista_df = _fuente
+    if not _fuente.empty:
+        _col_fecha = {_OPC_PEND: "fecha_guardado", _OPC_APR: "fecha_aprobacion", _OPC_DEV: "fecha_revision"}[vista_aud]
+        _fuente["dias_espera"] = calcular_dias_espera(_fuente, _col_fecha)
+        fb1, fb2, fb3 = st.columns([2, 1, 1])
+        _texto_aud = fb1.text_input("🔎 Buscar", placeholder="Consecutivo, empresa, banco, cuenta, mes o preparador", key="aud_buscar")
+        _tipos_aud = ["Todos"] + sorted(_fuente["tipo"].dropna().astype(str).unique().tolist())
+        _tipo_aud = fb2.selectbox("Tipo", _tipos_aud, key=f"aud_tipo_{vista_aud}")
+        _orden_aud = fb3.selectbox("Orden", ["Más antiguas primero", "Más recientes primero"],
+                                   index=0 if vista_aud == _OPC_PEND else 1, key=f"aud_orden_{vista_aud}")
+        vista_df = filtrar_bandeja_auditoria(_fuente, _texto_aud, _tipo_aud, _orden_aud)
+        if vista_df.empty:
+            st.info("Ninguna conciliación coincide con la búsqueda o los filtros.")
+        elif len(vista_df) != len(_fuente):
+            st.caption(f"Mostrando {len(vista_df)} de {len(_fuente)} conciliaciones.")
+
+    if vista_aud != _OPC_PEND:
+        st.subheader("✅ Conciliaciones Aprobadas" if vista_aud == _OPC_APR else "❌ Conciliaciones Devueltas al Preparador")
+        if _fuente.empty:
+            st.info("Aún no hay conciliaciones aprobadas." if vista_aud == _OPC_APR else "No hay conciliaciones devueltas.")
+        elif not vista_df.empty:
+            _listado = resumen_aprobadas(vista_df, limite=len(vista_df)) if vista_aud == _OPC_APR else resumen_devueltas(vista_df)
+            st.download_button("⬇️ Descargar listado (CSV)", _listado.to_csv(index=False).encode("utf-8-sig"),
+                               file_name=f"auditoria_{'aprobadas' if vista_aud == _OPC_APR else 'devueltas'}.csv",
+                               mime="text/csv", key=f"aud_csv_{vista_aud}")
+            for _, fila_c in paginar_dataframe(vista_df, f"pag_aud_{vista_aud}").iterrows():
+                mostrar_conciliacion_consulta(fila_c, vista_aud)
+    elif pendientes.empty:
         st.success("🎉 ¡Excelente! No hay conciliaciones pendientes por auditar en este momento.")
     else:
         st.subheader("📋 Conciliaciones Asignadas para Auditoría")
-        for idx, fila in paginar_dataframe(pendientes, "pag_auditoria").iterrows():
+        for idx, fila in paginar_dataframe(vista_df, "pag_auditoria").iterrows():
             cuenta_txt = fila.get("cuenta") or "N/A"
             banco_txt = fila.get("banco") or "N/A"
             consecutivo_str = f"CONC-{int(fila['id']):06d}"
@@ -2592,8 +2823,14 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                 st.success(f"✅ Esta es la conciliación que acabas de guardar: **{consecutivo_str}** — Estado: **{wf_status}**")
                 st.session_state.pop("historial_id_destacado", None)
 
-            with st.expander(f"📌 {consecutivo_str} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']}"):
+            _dias = int(fila.get("dias_espera", 0) or 0)
+            _icono = "🔴" if _dias >= AUDITORIA_DIAS_ALERTA else ("🟡" if _dias >= 1 else "📌")
+            _espera = f" | ⏳ {_dias} día(s) en espera" if _dias >= 1 else ""
+            with st.expander(f"{_icono} {consecutivo_str} | {fila['empresa']} - {banco_txt} ({cuenta_txt}) | Mes: {fila['mes']}{_espera}"):
                 c_data = obtener_conciliacion_por_id(fila["id"])
+                if not c_data:
+                    st.error("No fue posible cargar esta conciliación (posible falla momentánea de conexión). Recarga la página e inténtalo de nuevo.")
+                    continue
                 try:
                     datos = json.loads(c_data.get("datos_json", "{}"))
                 except Exception:
@@ -2604,6 +2841,10 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                 es_caja_hist = "caja" in tipo_cta_lower
                 es_credito_hist = "crédito bancario" in tipo_cta_lower or "credito bancario" in tipo_cta_lower
                 es_tc = "tarjeta" in tipo_cta_lower
+
+                if st.checkbox("📄 Ver hoja de la conciliación", key=f"aud_hoja_{fila['id']}"):
+                    renderizar_hoja_conciliacion(c_data, datos, titulos_partidas(tipo_cta), consecutivo_str)
+                    st.divider()
 
                 if es_caja_hist or es_credito_hist:
                     st.info(f"📌 Tipo de conciliación: **{tipo_cta}**")
