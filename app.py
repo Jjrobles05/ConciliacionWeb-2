@@ -2373,6 +2373,171 @@ def mostrar_conciliacion_consulta(fila, vista):
                                    key=f"aud_{vista}_pdf_{fila['id']}", use_container_width=True)
 
 
+_MESES_ES = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto",
+             "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+ESTADO_COB_APR = "✅ Conciliada y aprobada"
+ESTADO_COB_REV = "🟡 En revisión del auditor"
+ESTADO_COB_DEV = "❌ Devuelta al preparador"
+ESTADO_COB_SIN = "⛔ Sin conciliar (pendiente)"
+_ORDEN_COB = {ESTADO_COB_SIN: 0, ESTADO_COB_DEV: 1, ESTADO_COB_REV: 2, ESTADO_COB_APR: 3}
+_COLUMNAS_COB = ["Estado", "Empresa", "Banco", "Cuenta", "Tipo", "Preparador asignado", "Consecutivo", "Última actualización"]
+
+
+def parsear_periodo(texto):
+    """'SEPTIEMBRE 2026' -> (2026, 9). Si no se entiende devuelve (None, None)."""
+    partes = str(texto or "").strip().split()
+    if len(partes) < 2 or not partes[-1].isdigit():
+        return (None, None)
+    nombre = " ".join(partes[:-1]).strip().lower()
+    for i, mes in enumerate(_MESES_ES, 1):
+        if mes.lower() == nombre:
+            return (int(partes[-1]), i)
+    return (None, None)
+
+
+def _clave_cuenta(empresa, banco, cuenta):
+    return tuple(str(x or "").strip().lower() for x in (empresa, banco, cuenta))
+
+
+def cuentas_para_cobertura(empresa_nombre):
+    """Cuentas registradas (Bancos y Cuentas) de la empresa activa, o de todas."""
+    df = obtener_cuentas()
+    if df is None or df.empty:
+        return df
+    if empresa_nombre and str(empresa_nombre).strip() not in ("Todas las empresas", "Sin asignar"):
+        df = df[df["empresa_nombre"].fillna("").astype(str).str.strip() == str(empresa_nombre).strip()]
+    return df
+
+
+def calcular_cobertura(cuentas_df, historial_df, anio, mes_num, asignaciones=None):
+    """
+    Para cada cuenta registrada indica si tiene conciliación en el mes: aprobada, en revisión,
+    devuelta o SIN conciliar. Solo lee datos; no modifica nada.
+    """
+    asignaciones = asignaciones or {}
+    if cuentas_df is None or cuentas_df.empty:
+        return pd.DataFrame(columns=_COLUMNAS_COB)
+
+    mejor = {}
+    if historial_df is not None and not historial_df.empty and "mes" in historial_df.columns:
+        periodos = historial_df["mes"].map(parsear_periodo)
+        delmes = historial_df[periodos.map(lambda p: p == (int(anio), int(mes_num)))]
+        rangos = {"Aprobada": 3, "Pendiente de revisión": 2, "Requiere corrección": 1}
+        for _, r in delmes.iterrows():
+            clave = _clave_cuenta(r.get("empresa"), r.get("banco"), r.get("cuenta"))
+            rango = (rangos.get(r.get("workflow_status"), 2), int(r["id"]))   # si hay varias, gana la más avanzada
+            if clave not in mejor or rango > mejor[clave][0]:
+                mejor[clave] = (rango, r)
+
+    filas = []
+    for _, c in cuentas_df.iterrows():
+        clave = _clave_cuenta(c.get("empresa_nombre"), c.get("banco"), c.get("numero_cuenta"))
+        hallada = mejor.get(clave)
+        if hallada is None:
+            estado, consecutivo, ultima = ESTADO_COB_SIN, "", ""
+        else:
+            r = hallada[1]
+            estado = {"Aprobada": ESTADO_COB_APR, "Requiere corrección": ESTADO_COB_DEV}.get(r.get("workflow_status"), ESTADO_COB_REV)
+            consecutivo = f"CONC-{int(r['id']):06d}"
+            ultima = str(r.get("fecha_guardado") or "")[:16]
+        filas.append({
+            "Estado": estado,
+            "Empresa": c.get("empresa_nombre") or "Sin empresa",
+            "Banco": c.get("banco") or "",
+            "Cuenta": c.get("numero_cuenta") or "",
+            "Tipo": c.get("tipo_cuenta") or "",
+            "Preparador asignado": asignaciones.get(int(c["id"]), "— sin asignar —"),
+            "Consecutivo": consecutivo,
+            "Última actualización": ultima,
+        })
+    tabla = pd.DataFrame(filas, columns=_COLUMNAS_COB)
+    tabla["_orden"] = tabla["Estado"].map(_ORDEN_COB)
+    return tabla.sort_values(["_orden", "Empresa", "Banco", "Cuenta"]).drop(columns="_orden").reset_index(drop=True)
+
+
+def resumen_cobertura(tabla):
+    total = 0 if tabla is None else len(tabla)
+    contar = lambda e: int((tabla["Estado"] == e).sum()) if total else 0
+    return {"total": total, "apr": contar(ESTADO_COB_APR), "rev": contar(ESTADO_COB_REV),
+            "dev": contar(ESTADO_COB_DEV), "sin": contar(ESTADO_COB_SIN)}
+
+
+def mostrar_cobertura_auditoria(historial, empresa_nombre):
+    """Panel del auditor: qué cuentas ya están conciliadas en el mes y cuáles siguen pendientes."""
+    st.subheader("📊 Control de cobertura: cuentas conciliadas y pendientes")
+    st.caption("Compara las cuentas registradas en Bancos y Cuentas con las conciliaciones del mes elegido, "
+               "para saber qué falta por realizar.")
+    cuentas = cuentas_para_cobertura(empresa_nombre)
+    if cuentas is None or cuentas.empty:
+        st.info("No hay cuentas registradas para esta empresa. Regístralas en el módulo de Bancos y Cuentas.")
+        return
+
+    hoy = datetime.now()
+    anios = {hoy.year, hoy.year - 1}
+    if historial is not None and not historial.empty and "mes" in historial.columns:
+        anios |= {a for a, _ in historial["mes"].map(parsear_periodo) if a}
+    anios = sorted(anios)
+    s1, s2 = st.columns(2)
+    anio = s1.selectbox("Año", anios, index=anios.index(hoy.year), key="cob_anio")
+    mes_num = s2.selectbox("Mes", list(range(1, 13)), index=hoy.month - 1, key="cob_mes",
+                           format_func=lambda m: _MESES_ES[m - 1])
+    periodo = f"{_MESES_ES[mes_num - 1]} {anio}"
+
+    asignaciones = {}
+    for emp_id in cuentas["empresa_id"].dropna().unique():
+        df_asig = obtener_asignaciones_mes(int(emp_id), anio, mes_num)
+        if df_asig is not None and not df_asig.empty:
+            asignaciones.update({int(k): v for k, v in zip(df_asig["cuenta_id"], df_asig["preparador"])})
+
+    tabla = calcular_cobertura(cuentas, historial, anio, mes_num, asignaciones)
+    r = resumen_cobertura(tabla)
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Cuentas registradas", r["total"])
+    m2.metric("Conciliadas y aprobadas", r["apr"])
+    m3.metric("En revisión", r["rev"])
+    m4.metric("Devueltas", r["dev"])
+    m5.metric("Sin conciliar", r["sin"])
+    st.progress(r["apr"] / r["total"] if r["total"] else 0.0)
+    st.caption(f"{r['apr']} de {r['total']} cuentas con conciliación aprobada en {periodo} "
+               f"({(r['apr'] / r['total'] * 100) if r['total'] else 0:.0f}%).")
+
+    mes_cerrado = (anio, mes_num) < (hoy.year, hoy.month)
+    if r["sin"] > 0 and mes_cerrado:
+        st.error(f"⛔ {periodo} ya terminó y hay {r['sin']} cuenta(s) SIN conciliar. Aparecen primero en la lista.")
+    elif r["sin"] > 0:
+        st.warning(f"⚠️ Hay {r['sin']} cuenta(s) SIN conciliar en {periodo}. Aparecen primero en la lista.")
+    elif r["rev"] + r["dev"] > 0:
+        st.info(f"Todas las cuentas de {periodo} tienen conciliación; faltan {r['rev']} por revisar y {r['dev']} por corregir.")
+    else:
+        st.success(f"🎉 Las {r['total']} cuentas de {periodo} están conciliadas y aprobadas.")
+
+    f1, f2 = st.columns([1, 2])
+    estado_sel = f1.selectbox("Mostrar", ["Todas", ESTADO_COB_SIN, ESTADO_COB_DEV, ESTADO_COB_REV, ESTADO_COB_APR], key="cob_filtro")
+    texto = f2.text_input("🔎 Buscar", placeholder="Banco, cuenta, empresa o preparador", key="cob_buscar")
+    vista = tabla
+    if estado_sel != "Todas":
+        vista = vista[vista["Estado"] == estado_sel]
+    if texto.strip() and not vista.empty:
+        q = texto.strip().lower()
+        base = vista[["Empresa", "Banco", "Cuenta", "Tipo", "Preparador asignado", "Consecutivo"]].astype(str).agg(" ".join, axis=1)
+        vista = vista[base.str.lower().str.contains(q, regex=False)]
+    if vista.empty:
+        st.info("Ninguna cuenta coincide con el filtro.")
+    else:
+        st.dataframe(vista, use_container_width=True, hide_index=True)
+        st.download_button("⬇️ Descargar control (CSV)", vista.to_csv(index=False).encode("utf-8-sig"),
+                           file_name=f"control_cobertura_{_MESES_ES[mes_num - 1].lower()}_{anio}.csv",
+                           mime="text/csv", key="cob_csv")
+
+    pend = tabla[tabla["Estado"] == ESTADO_COB_SIN]
+    if not pend.empty:
+        with st.expander("👤 Pendientes por preparador"):
+            por_prep = pend.groupby("Preparador asignado").size().reset_index(name="Cuentas sin conciliar")
+            st.dataframe(por_prep.sort_values("Cuentas sin conciliar", ascending=False),
+                         use_container_width=True, hide_index=True)
+
+
 _CLAVES_EDICION = (
     "tabla1", "tabla2", "tabla3", "tabla4", "tabla5",
     "caja_compras", "caja_efectivo", "credito_diferencias",
@@ -2526,123 +2691,226 @@ def preparar_excel(
     nombres_titulos, aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión",
     estado_conciliacion=None, consecutivo=None
 ):
+    """
+    Excel con el MISMO diseño del PDF de conciliación (colores, orden de secciones, nombres de columnas
+    y bloque de firmas) para que ambos documentos sean homogéneos. Los montos se guardan como números.
+    """
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.worksheet.properties import PageSetupProperties
+    from openpyxl.worksheet.page import PageMargins
+
+    AZUL, CELESTE, GRIS, BORDE_HEX, FUENTE = "1F4E78", "D9EAF7", "F2F2F2", "D9D9D9", "Arial"
+    lado = Side(style="thin", color=BORDE_HEX)
+    caja = Border(left=lado, right=lado, top=lado, bottom=lado)
+    FMT_MONEDA = '"$" #,##0.00;"$" -#,##0.00'
+    NCOLS = 12   # cuadrícula de 12 columnas; cada tabla combina columnas para copiar los anchos del PDF
+
     workbook = Workbook()
     ws = workbook.active
-    ws.title = "Conciliación Bancaria"
-    
-    anchos = {"A": 15, "B": 28, "C": 16, "D": 16, "E": 16, "F": 16, "G": 16}
-    for letra, ancho in anchos.items():
-        ws.column_dimensions[letra].width = ancho
+    ws.title = "Conciliación"
+    ws.sheet_view.showGridLines = False
+    for i in range(1, NCOLS + 1):
+        ws.column_dimensions[chr(64 + i)].width = 10
 
-    ws.merge_cells("A1:G1")
-    ws["A1"] = f"CONCILIACIÓN BANCARIA - {tipo.upper()}"
-    estilo_titulo(ws["A1"], 16)
+    def celda(fila, c1, c2, valor="", negrita=False, tam=9, color="000000", relleno=None, h="left",
+              v="center", fmt=None, cursiva=False, con_borde=False):
+        if c2 > c1:
+            ws.merge_cells(start_row=fila, start_column=c1, end_row=fila, end_column=c2)
+        for c in range(c1, c2 + 1):
+            x = ws.cell(row=fila, column=c)
+            if relleno:
+                x.fill = PatternFill("solid", fgColor=relleno)
+            if con_borde:
+                x.border = caja
+        x = ws.cell(row=fila, column=c1)
+        x.value = valor
+        x.font = Font(name=FUENTE, size=tam, bold=negrita, italic=cursiva, color=color)
+        reducir = fmt is not None   # un monto grande se achica en vez de mostrarse como #####
+        x.alignment = Alignment(horizontal=h, vertical=v, wrap_text=not reducir, shrink_to_fit=reducir)
+        if fmt:
+            x.number_format = fmt
+        return x
 
-    fila = escribir_seccion(ws, 3, "INFORMACIÓN GENERAL", 7)
+    def alto(fila, puntos):
+        ws.row_dimensions[fila].height = puntos
 
-    # Logo de la empresa en el encabezado del Excel.
-    # El logo se recupera desde Turso/SQLite usando la empresa seleccionada.
+    def numero(v):
+        try:
+            return float(v or 0)
+        except (TypeError, ValueError):
+            return v
+
+    # ---------- Encabezado (banda azul + consecutivo; logo a la derecha si existe) ----------
     logo_bytes = obtener_logo_empresa(empresa)
+    ultima_banda = NCOLS - 2 if logo_bytes else NCOLS
+    celda(1, 1, ultima_banda, f"CONCILIACIÓN BANCARIA - {str(tipo or 'Cuenta').upper()}", negrita=True, tam=12,
+          color="FFFFFF", relleno=AZUL, h="center")
+    celda(2, 1, ultima_banda, f"Consecutivo No: {consecutivo or '(se asigna al guardar)'}", negrita=True, tam=8,
+          color="FFFFFF", relleno=AZUL, h="center")
+    alto(1, 26)
+    alto(2, 18)
     if logo_bytes:
         try:
-            logo_stream = io.BytesIO(logo_bytes)
-            logo_excel = XLImage(logo_stream)
-            # Tamaño visual del logo; Excel conservará la imagen dentro del libro.
-            logo_excel.width = 120
-            logo_excel.height = 65
-            logo_excel.anchor = "E4"
+            logo_excel = XLImage(io.BytesIO(logo_bytes))
+            logo_excel.width, logo_excel.height = 80, 45
+            logo_excel.anchor = "K1"
             ws.add_image(logo_excel)
-            ws.row_dimensions[4].height = max(ws.row_dimensions[4].height or 15, 50)
         except Exception:
-            # Si el archivo almacenado no es una imagen válida, el Excel se genera
-            # normalmente sin logo y el PDF seguirá usando su propio manejo.
-            pass
+            pass   # si el archivo no es una imagen válida se genera sin logo
+    alto(3, 6)
 
-    datos_generales = [
-        ("Empresa", empresa), ("NIT", nit), ("Mes y Año", mes),
-        ("Fecha de elaboración", fecha_elaboracion), ("Banco", banco),
-        ("Cuenta No.", cuenta), ("Tipo", tipo),
-    ]
-    if consecutivo:
-        datos_generales.insert(0, ("Consecutivo No.", consecutivo))
-    for nombre, valor in datos_generales:
-        ws.cell(row=fila, column=1).value = nombre
-        ws.cell(row=fila, column=1).font = Font(bold=True)
-        ws.merge_cells(start_row=fila, start_column=2, end_row=fila, end_column=4)
-        ws.cell(row=fila, column=2).value = str(valor)
+    # ---------- Datos generales (cuadrícula gris) ----------
+    fila = 4
+    for et1, v1, et2, v2 in (
+        ("Empresa:", empresa, "NIT:", nit),
+        ("Mes/Año:", mes, "Elaboración:", fecha_elaboracion),
+        ("Banco:", banco, "Cuenta No:", cuenta),
+    ):
+        celda(fila, 1, 2, et1, negrita=True, relleno=GRIS, con_borde=True)
+        celda(fila, 3, 6, str(v1 if v1 is not None else ""), relleno=GRIS, con_borde=True)
+        celda(fila, 7, 8, et2, negrita=True, relleno=GRIS, con_borde=True)
+        celda(fila, 9, 12, str(v2 if v2 is not None else ""), relleno=GRIS, con_borde=True)
+        alto(fila, 18)
         fila += 1
-
+    alto(fila, 8)
     fila += 1
-    fila = escribir_seccion(ws, fila, "SALDOS", 4)
-    saldos = [
+
+    # ---------- Saldos y cálculo ----------
+    celda(fila, 1, NCOLS, "SALDOS Y CÁLCULO DE LA CONCILIACIÓN", negrita=True, tam=10, color=AZUL)
+    alto(fila, 20)
+    fila += 1
+    for etiqueta, valor in (
         ("SALDO SEGÚN EXTRACTO BANCARIO", saldo_extracto),
         ("SALDO SEGÚN LIBROS", saldo_libros),
         ("DIFERENCIA A JUSTIFICAR", diferencia_inicial),
         ("DIFERENCIA CONCILIADA", diferencia_conciliada),
-        ("RESULTADO FINAL", resultado_final),
-    ]
-    for nombre, valor in saldos:
-        ws.cell(row=fila, column=1).value = nombre
-        ws.cell(row=fila, column=1).font = Font(bold=True)
-        try:
-            ws.cell(row=fila, column=2).value = float(valor or 0)
-        except (TypeError, ValueError):
-            ws.cell(row=fila, column=2).value = valor
-        ws.cell(row=fila, column=2).number_format = '$ #,##0.00'
+    ):
+        celda(fila, 1, 7, etiqueta, relleno=CELESTE, con_borde=True)
+        celda(fila, 8, 12, numero(valor), tam=10, h="right", fmt=FMT_MONEDA, con_borde=True)
+        alto(fila, 19)
         fila += 1
+    celda(fila, 1, 7, "RESULTADO FINAL", negrita=True, relleno=CELESTE, con_borde=True)
+    celda(fila, 8, 12, numero(resultado_final), negrita=True, fmt=FMT_MONEDA, con_borde=True)
+    alto(fila, 19)
+    fila += 1
     if not estado_conciliacion:
         try:
             _correcta = abs(float(resultado_final or 0)) < 0.005
         except (TypeError, ValueError):
             _correcta = False
         estado_conciliacion = "CONCILIACIÓN BANCARIA CORRECTA" if _correcta else "CONCILIACIÓN CON DIFERENCIA"
-    ws.cell(row=fila, column=1).value = "ESTADO"
-    ws.cell(row=fila, column=1).font = Font(bold=True)
-    ws.merge_cells(start_row=fila, start_column=2, end_row=fila, end_column=4)
-    ws.cell(row=fila, column=2).value = str(estado_conciliacion)
-    ws.cell(row=fila, column=2).font = Font(bold=True)
+    celda(fila, 1, 7, "ESTADO", negrita=True, relleno=CELESTE, con_borde=True)
+    celda(fila, 8, 12, str(estado_conciliacion), negrita=True, con_borde=True)
+    alto(fila, 19)
+    fila += 1
+    alto(fila, 8)
     fila += 1
 
-    fila = escribir_tabla(ws, fila, nombres_titulos["t1"], salidas_extracto)
-    fila = escribir_tabla(ws, fila, nombres_titulos["t2"], salidas_libros)
-    fila = escribir_tabla(ws, fila, nombres_titulos["t3"], entradas_libros)
-    fila = escribir_tabla(ws, fila, nombres_titulos["t4"], entradas_extracto)
-    fila = escribir_gastos_bancarios(ws, fila, gastos_bancarios)
+    # ---------- Tablas numeradas (mismos títulos, columnas y anchos relativos del PDF) ----------
+    textos = ("Fecha", "Beneficiario", "Documento", "Concepto")
 
-    # Firmas y trazabilidad. Aplica también a Tarjeta de Crédito.
+    def registros(df):
+        if not isinstance(df, pd.DataFrame):
+            df = pd.DataFrame(df or [])
+        df = limpiar_dataframe(df)
+        return [] if df is None or df.empty else df.to_dict("records")
+
+    def valor_celda(clave, v):
+        if v is None or (not isinstance(v, str) and pd.isna(v)):
+            v = ""
+        if hasattr(v, "strftime"):
+            v = v.strftime("%Y-%m-%d")
+        if clave in textos:
+            return str(v)
+        return numero(v) if v != "" else ""
+
+    def tabla(titulo, df, claves, nombres, tramos):
+        nonlocal fila
+        celda(fila, 1, NCOLS, titulo, negrita=True, tam=10, color=AZUL)
+        alto(fila, 20)
+        fila += 1
+        regs = registros(df)
+        if not regs:
+            celda(fila, 1, NCOLS, "Sin movimientos registrados", cursiva=True)
+            alto(fila, 16)
+            fila += 2
+            return
+        for (c1, c2), nombre in zip(tramos, nombres):
+            celda(fila, c1, c2, nombre, negrita=True, relleno=CELESTE, con_borde=True)
+        alto(fila, 17)
+        fila += 1
+        for reg in regs:
+            for (c1, c2), clave in zip(tramos, claves):
+                v = valor_celda(clave, reg.get(clave, ""))
+                es_num = clave not in textos
+                celda(fila, c1, c2, v, con_borde=True, fmt=FMT_MONEDA if (es_num and isinstance(v, float)) else None, h="left")
+            alto(fila, 17)
+            fila += 1
+        alto(fila, 6)
+        fila += 1
+
+    tabla(f"1. {nombres_titulos['t1']}", salidas_extracto, ["Fecha", "Beneficiario", "Documento", "Valor"],
+          ["Fecha", "Beneficiario", "Doc", "Valor"], [(1, 2), (3, 7), (8, 9), (10, 12)])
+    tabla(f"2. {nombres_titulos['t2']}", salidas_libros, ["Fecha", "Concepto", "Valor"],
+          ["Fecha", "Concepto", "Valor"], [(1, 2), (3, 9), (10, 12)])
+    tabla(f"3. {nombres_titulos['t3']}", entradas_libros, ["Fecha", "Concepto", "Valor"],
+          ["Fecha", "Concepto", "Valor"], [(1, 2), (3, 9), (10, 12)])
+    tabla(f"4. {nombres_titulos['t4']}", entradas_extracto, ["Fecha", "Concepto", "Valor"],
+          ["Fecha", "Concepto", "Valor"], [(1, 2), (3, 9), (10, 12)])
+    tabla("GASTOS BANCARIOS", gastos_bancarios,
+          ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"],
+          ["Fecha", "4x1000", "Cuota", "IVA", "Rte", "Comisión", "Intereses"],
+          [(1, 2), (3, 4), (5, 6), (7, 7), (8, 8), (9, 10), (11, 12)])
+
+    # ---------- Firmas y trazabilidad ----------
+    alto(fila, 8)
     fila += 1
-    fila = escribir_seccion(ws, fila, "FIRMAS Y TRAZABILIDAD", 6)
-    for idx, titulo in enumerate(["PREPARÓ", "REVISÓ", "APROBÓ"], start=0):
-        col = idx * 2 + 1
-        ws.merge_cells(start_row=fila, start_column=col, end_row=fila, end_column=col + 1)
-        celda = ws.cell(row=fila, column=col)
-        celda.value = titulo
-        celda.font = Font(bold=True)
-        celda.alignment = Alignment(horizontal="center")
+    celda(fila, 1, NCOLS, "FIRMAS Y TRAZABILIDAD", negrita=True, tam=10, color=AZUL)
+    alto(fila, 20)
     fila += 1
-    firmas_excel = [
-        (preparado_por or "Pendiente", fecha_preparacion or "Se registra al guardar"),
+    tramos_firma = [(1, 4), (5, 8), (9, 12)]
+    for (c1, c2), titulo in zip(tramos_firma, ("PREPARÓ", "REVISÓ", "APROBÓ")):
+        celda(fila, c1, c2, titulo, negrita=True, relleno=CELESTE, con_borde=True)
+    alto(fila, 17)
+    fila += 1
+    firmas = [
+        (preparado_por or "Pendiente", fecha_preparacion or "Pendiente"),
         (revisado_por or "Pendiente de revisión", fecha_revision or "Pendiente"),
         (aprobado_por or "Pendiente de aprobación", fecha_aprobacion or "Pendiente"),
     ]
-    for idx, (nombre_firma, fecha_firma) in enumerate(firmas_excel, start=0):
-        col = idx * 2 + 1
-        ws.merge_cells(start_row=fila, start_column=col, end_row=fila, end_column=col + 1)
-        celda = ws.cell(row=fila, column=col)
-        celda.value = f"Usuario: {nombre_firma}\nFecha: {fecha_firma}\nFirma: ____________________"
-        celda.alignment = Alignment(wrap_text=True, vertical="top")
-        ws.row_dimensions[fila].height = 58
+    for (c1, c2), (nombre_firma, fecha_firma) in zip(tramos_firma, firmas):
+        celda(fila, c1, c2, f"{nombre_firma}\nFecha: {fecha_firma}\n\nFirma: ____________________", v="top", con_borde=True)
+    alto(fila, 66)
     fila += 1
-    ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=6)
-    ws.cell(row=fila, column=1).value = f"Estado de aprobación: {estado or 'Pendiente de revisión'}"
-    ws.cell(row=fila, column=1).font = Font(bold=True)
-    fila += 2
+
+    texto_estado = estado or "Pendiente de revisión"
+    try:
+        from openpyxl.cell.rich_text import CellRichText, TextBlock
+        from openpyxl.cell.text import InlineFont
+        valor_estado = CellRichText(
+            TextBlock(InlineFont(rFont=FUENTE, sz=9), "Estado de aprobación: "),
+            TextBlock(InlineFont(rFont=FUENTE, sz=9, b=True), str(texto_estado)),
+        )
+    except Exception:
+        valor_estado = f"Estado de aprobación: {texto_estado}"
+    x = celda(fila, 1, NCOLS, valor_estado)
+    alto(fila, 18)
+
+    # ---------- Impresión: una hoja carta vertical de ancho, como el PDF ----------
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+    ws.page_margins = PageMargins(left=0.5, right=0.5, top=0.5, bottom=0.5)
+    ws.print_options.horizontalCentered = True
 
     output = io.BytesIO()
     workbook.save(output)
     output.seek(0)
     nombre_archivo = f"CONCILIACION_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
     return output.getvalue(), nombre_archivo
+
 
 @_cache_generador
 def generar_pdf_conciliacion(c_data, datos, nombres_titulos):
@@ -2776,12 +3044,20 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
     st.divider()
 
     # --- Selector: cada indicador se puede abrir para ver sus conciliaciones ---
-    _OPC_PEND, _OPC_APR, _OPC_DEV = "pend", "apr", "dev"
-    _conteos = {_OPC_PEND: len(pendientes), _OPC_APR: len(aprobadas_df), _OPC_DEV: len(devueltas_df)}
-    _etiquetas = {_OPC_PEND: "⏳ Pendientes de Revisar", _OPC_APR: "✅ Aprobadas", _OPC_DEV: "❌ Devueltas"}
-    vista_aud = st.radio("📂 ¿Qué conciliaciones quieres ver?", [_OPC_PEND, _OPC_APR, _OPC_DEV], horizontal=True,
+    _OPC_PEND, _OPC_APR, _OPC_DEV, _OPC_COB = "pend", "apr", "dev", "cob"
+    try:   # cuentas sin conciliar en el mes actual, visible sin necesidad de abrir el panel
+        _hoy_aud = datetime.now()
+        _cob_mes = calcular_cobertura(cuentas_para_cobertura(empresa_activa_nombre), historial, _hoy_aud.year, _hoy_aud.month)
+        _sin_conciliar_mes = resumen_cobertura(_cob_mes)["sin"]
+    except Exception:
+        _sin_conciliar_mes = 0
+    _conteos = {_OPC_PEND: len(pendientes), _OPC_APR: len(aprobadas_df), _OPC_DEV: len(devueltas_df),
+                _OPC_COB: f"⚠️ {_sin_conciliar_mes} sin conciliar este mes" if _sin_conciliar_mes else "todo al día este mes"}
+    _etiquetas = {_OPC_PEND: "⏳ Pendientes de Revisar", _OPC_APR: "✅ Aprobadas", _OPC_DEV: "❌ Devueltas",
+                  _OPC_COB: "📊 Cuentas conciliadas vs pendientes"}
+    vista_aud = st.radio("📂 ¿Qué conciliaciones quieres ver?", [_OPC_PEND, _OPC_APR, _OPC_DEV, _OPC_COB], horizontal=True,
                          key="aud_vista", format_func=lambda k: f"{_etiquetas[k]} ({_conteos[k]})")
-    _fuente = {_OPC_PEND: pendientes, _OPC_APR: aprobadas_df, _OPC_DEV: devueltas_df}[vista_aud].copy()
+    _fuente = {_OPC_PEND: pendientes, _OPC_APR: aprobadas_df, _OPC_DEV: devueltas_df, _OPC_COB: pd.DataFrame()}[vista_aud].copy()
     vista_df = _fuente
     if not _fuente.empty:
         _col_fecha = {_OPC_PEND: "fecha_guardado", _OPC_APR: "fecha_aprobacion", _OPC_DEV: "fecha_revision"}[vista_aud]
@@ -2798,7 +3074,9 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
         elif len(vista_df) != len(_fuente):
             st.caption(f"Mostrando {len(vista_df)} de {len(_fuente)} conciliaciones.")
 
-    if vista_aud != _OPC_PEND:
+    if vista_aud == _OPC_COB:
+        mostrar_cobertura_auditoria(historial, empresa_activa_nombre)
+    elif vista_aud != _OPC_PEND:
         st.subheader("✅ Conciliaciones Aprobadas" if vista_aud == _OPC_APR else "❌ Conciliaciones Devueltas al Preparador")
         if _fuente.empty:
             st.info("Aún no hay conciliaciones aprobadas." if vista_aud == _OPC_APR else "No hay conciliaciones devueltas.")
