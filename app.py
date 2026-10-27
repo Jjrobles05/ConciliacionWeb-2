@@ -1597,49 +1597,249 @@ def _filas_caja_default():
                           "Forma de pago":"","Valor compra":0.0,"IVA / otros":0.0,"Total pagado":0.0,"Observaciones":""} for i in range(1,21)])
 
 
+_GRIS_PDF, _BORDE_PDF, _FUENTE_XL = "D3D3D3", "808080", "Arial"
+_FMT_MONEDA_XL = '"$" #,##0.00;"$" -#,##0.00'
+
+
+def _texto_rico(partes, tam=10):
+    """[(texto, negrita), ...] -> celda con partes en negrita (texto plano si openpyxl no lo soporta)."""
+    try:
+        from openpyxl.cell.rich_text import CellRichText, TextBlock
+        from openpyxl.cell.text import InlineFont
+        return CellRichText(*[TextBlock(InlineFont(rFont=_FUENTE_XL, sz=tam, b=bool(n)), str(t)) for t, n in partes])
+    except Exception:
+        return "".join(str(t) for t, _ in partes)
+
+
+def _txt_xl(v):
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return ""
+    if hasattr(v, "strftime"):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    return str(v)
+
+
+def _monto_xl(v):
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+class _HojaPdf:
+    """Arma una hoja de Excel que copia el diseño de un PDF de reportlab (rejilla de 30 columnas, tablas grises)."""
+
+    def __init__(self, ws, micro=30, ancho_col=3.0):
+        from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+        from openpyxl.utils import get_column_letter
+        self._est = (Font, PatternFill, Alignment)
+        self._letra = get_column_letter
+        self.ws, self.micro, self.fila, self.ancho = ws, micro, 1, ancho_col
+        ws.sheet_view.showGridLines = False
+        for i in range(1, micro + 1):
+            ws.column_dimensions[get_column_letter(i)].width = ancho_col
+        lado = Side(style="thin", color=_BORDE_PDF)
+        self.caja = Border(left=lado, right=lado, top=lado, bottom=lado)
+
+    def celda(self, c1, c2, valor="", negrita=False, cursiva=False, tam=10, h="left", v="center", relleno=None,
+              borde=False, fmt=None, fila=None):
+        Font, PatternFill, Alignment = self._est
+        fila = fila or self.fila
+        if c2 > c1:
+            self.ws.merge_cells(start_row=fila, start_column=c1, end_row=fila, end_column=c2)
+        for c in range(c1, c2 + 1):
+            x = self.ws.cell(row=fila, column=c)
+            if relleno:
+                x.fill = PatternFill("solid", fgColor=relleno)
+            if borde:
+                x.border = self.caja
+        x = self.ws.cell(row=fila, column=c1)
+        x.value = valor
+        x.font = Font(name=_FUENTE_XL, size=tam, bold=negrita, italic=cursiva)
+        reducir = fmt is not None      # un monto grande se achica en vez de mostrarse como #####
+        x.alignment = Alignment(horizontal=h, vertical=v, wrap_text=not reducir, shrink_to_fit=reducir)
+        if fmt:
+            x.number_format = fmt
+        return x
+
+    def alto(self, puntos, fila=None):
+        self.ws.row_dimensions[fila or self.fila].height = puntos
+
+    def espacio(self, puntos):
+        self.alto(puntos)
+        self.fila += 1
+
+    def logo(self, logo_bytes):
+        if not logo_bytes:
+            return
+        try:
+            img = XLImage(io.BytesIO(logo_bytes))
+            img.width, img.height = 140, 84
+            img.anchor = f"{self._letra(max(self.micro // 2 - 1, 1))}{self.fila}"
+            self.ws.add_image(img)
+            for k in range(3):
+                self.alto(28, fila=self.fila + k)
+            self.fila += 3
+            self.espacio(5)
+        except Exception:
+            pass   # si el archivo no es una imagen válida se genera sin logo
+
+    def titulo(self, texto):
+        self.celda(1, self.micro, texto, negrita=True, tam=18, h="center")
+        self.alto(30)
+        self.fila += 1
+
+    def subtitulo(self, texto):
+        self.celda(1, self.micro, texto, negrita=True, cursiva=True, tam=12)
+        self.alto(20)
+        self.fila += 1
+
+    def linea(self, partes, tam=10):
+        largo = sum(len(str(t)) for t, _ in partes)
+        lineas = max(1, -(-largo // 105))
+        self.celda(1, self.micro, _texto_rico(partes, tam))
+        self.alto(15 * lineas)
+        self.fila += 1
+
+    def tabla(self, tramos, encabezados, filas, tam=8, enc_negrita=False, nums=(), alto_min=15):
+        """tramos: columnas (c1, c2) de cada campo; filas: listas de valores; nums: posiciones con montos."""
+        for (c1, c2), t in zip(tramos, encabezados):
+            self.celda(c1, c2, t, negrita=enc_negrita, tam=tam, relleno=_GRIS_PDF, borde=True)
+        self.alto(alto_min)
+        self.fila += 1
+        for valores in filas:
+            lineas = 1
+            for k, ((c1, c2), v) in enumerate(zip(tramos, valores)):
+                es_num = k in nums and isinstance(v, (int, float))
+                self.celda(c1, c2, v, tam=tam, borde=True, v="top", fmt=_FMT_MONEDA_XL if es_num else None)
+                if isinstance(v, str):
+                    por_linea = max(1, int((c2 - c1 + 1) * self.ancho * 10 / tam))
+                    lineas = max(lineas, -(-len(v) // por_linea))
+            self.alto(max(alto_min, lineas * (tam + 3) + 2))
+            self.fila += 1
+
+    def firmas(self, preparado_por, revisado_por, aprobado_por, f_prep, f_rev, f_apr, estado):
+        self.subtitulo("FIRMAS Y TRAZABILIDAD")
+        tercio = self.micro // 3
+        tramos = [(1, tercio), (tercio + 1, 2 * tercio), (2 * tercio + 1, self.micro)]
+        for (c1, c2), titulo in zip(tramos, ("PREPARÓ", "REVISÓ", "APROBÓ")):
+            self.celda(c1, c2, titulo, negrita=True, borde=True)
+        self.alto(16)
+        self.fila += 1
+        firmas = [(preparado_por or "Pendiente", f_prep or "Pendiente"),
+                  (revisado_por or "Pendiente de revisión", f_rev or "Pendiente"),
+                  (aprobado_por or "Pendiente de aprobación", f_apr or "Pendiente")]
+        for (c1, c2), (nombre, fecha_firma) in zip(tramos, firmas):
+            self.celda(c1, c2, f"{nombre}\nFecha: {fecha_firma}\n\nFirma: ____________________", v="top", borde=True)
+        self.alto(62)
+        self.fila += 1
+        self.linea([("Estado: ", False), (str(estado or "Pendiente de revisión"), True)])
+
+    def imprimir(self):
+        from openpyxl.worksheet.properties import PageSetupProperties
+        from openpyxl.worksheet.page import PageMargins
+        ws = self.ws
+        ws.page_setup.orientation = "portrait"
+        ws.page_setup.paperSize = ws.PAPERSIZE_LETTER
+        ws.page_setup.fitToWidth = 1
+        ws.page_setup.fitToHeight = 0
+        ws.sheet_properties.pageSetUpPr = PageSetupProperties(fitToPage=True)
+        ws.page_margins = PageMargins(left=0.35, right=0.35, top=0.35, bottom=0.35)
+        ws.print_options.horizontalCentered = True
+
+
 @_cache_generador
 def preparar_excel_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, compras_df, efectivo_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
-    wb=Workbook(); ws=wb.active; ws.title="Arqueo de Caja"
-    ws.merge_cells("A1:J1"); ws["A1"]="ARQUEO DE CAJA GENERAL – COMPRAS"; ws["A1"].font=Font(bold=True,size=14); ws["A1"].alignment=Alignment(horizontal="center")
-    ws["A3"]="Empresa:"; ws["B3"]=empresa; ws["D3"]="Responsable:"; ws["E3"]=responsable; ws["G3"]="Período:"; ws["H3"]=mes
-    ws["A4"]="Fecha:"; ws["B4"]=str(fecha); ws["D4"]="Fondo autorizado:"; ws["E4"]=float(fondo); ws["G4"]="Saldo inicial para compras:"; ws["H4"]=float(saldo_inicial)
-    if logo_bytes:
-        try:
-            img=XLImage(io.BytesIO(logo_bytes)); img.width=110; img.height=60; img.anchor="J2"; ws.add_image(img)
-        except Exception: pass
-    headers=["N°","Fecha","Proveedor","Concepto / Compra","Factura / Soporte","Forma de pago","Valor compra","IVA / otros","Total pagado","Observaciones"]
-    for col,h in enumerate(headers,1):
-        cell=ws.cell(6,col,h); cell.font=Font(bold=True); cell.alignment=Alignment(horizontal="center",vertical="center",wrap_text=True)
-    for r_idx,row in enumerate(compras_df.to_dict("records"),7):
-        for col,h in enumerate(headers,1): ws.cell(r_idx,col,row.get(h,""))
-    fin=6+len(compras_df)
-    ws.cell(fin+1,6,"TOTAL COMPRAS:"); ws.cell(fin+1,9,float(total_columna(compras_df,"Total pagado")))
-    ws.cell(fin+3,2,"DETALLE DEL SALDO EN CAJA");
-    ws.cell(fin+4,2,"Denominación"); ws.cell(fin+4,3,"Cantidad"); ws.cell(fin+4,4,"Monto")
-    rr=fin+5
-    for row in efectivo_df.to_dict("records"):
-        ws.cell(rr,2,row.get("Denominación","")); ws.cell(rr,3,row.get("Cantidad",0)); ws.cell(rr,4,row.get("Monto",0)); rr+=1
-    total_ef=total_columna(efectivo_df,"Monto")
-    total_compras=total_columna(compras_df,"Total pagado")
-    teorico=float(saldo_inicial)-total_compras
-    ws.cell(rr+1,8,"Saldo teórico final:"); ws.cell(rr+1,10,teorico)
-    ws.cell(rr+2,8,"Efectivo físico final:"); ws.cell(rr+2,10,total_ef)
-    ws.cell(rr+3,8,"Diferencia (sobrante/faltante):"); ws.cell(rr+3,10,total_ef-teorico)
-    ws.cell(rr+4,8,"Resultado del arqueo:"); ws.cell(rr+4,10,"CUADRA" if abs(total_ef-teorico)<0.005 else ("SOBRANTE" if total_ef-teorico>0 else "FALTANTE"))
-    ws.cell(rr+6,2,"Observaciones:"); ws.cell(rr+7,2,observaciones or "")
-    for col,w in enumerate([7,13,22,28,24,16,16,14,16,34],1): ws.column_dimensions[chr(64+col)].width=w
-    sig_row = rr + 9
-    ws.merge_cells(start_row=sig_row, start_column=1, end_row=sig_row, end_column=10)
-    ws.cell(sig_row,1).value = "FIRMAS Y TRAZABILIDAD"; ws.cell(sig_row,1).font = Font(bold=True, size=12)
-    sig_headers=["PREPARÓ","REVISÓ","APROBÓ"]
-    sig_values=[f"{preparado_por or 'Pendiente'}\nFecha: {fecha_preparacion or 'Pendiente'}\nFirma: ____________________", f"{revisado_por or 'Pendiente de revisión'}\nFecha: {fecha_revision or 'Pendiente'}\nFirma: ____________________", f"{aprobado_por or 'Pendiente de aprobación'}\nFecha: {fecha_aprobacion or 'Pendiente'}\nFirma: ____________________"]
-    for i in range(3):
-        c1=1+i*3; ws.merge_cells(start_row=sig_row+1,start_column=c1,end_row=sig_row+1,end_column=c1+2); ws.cell(sig_row+1,c1).value=sig_headers[i]; ws.cell(sig_row+1,c1).font=Font(bold=True)
-        ws.merge_cells(start_row=sig_row+2,start_column=c1,end_row=sig_row+4,end_column=c1+2); ws.cell(sig_row+2,c1).value=sig_values[i]; ws.cell(sig_row+2,c1).alignment=Alignment(wrap_text=True,vertical="top")
-    ws.merge_cells(start_row=sig_row+6,start_column=1,end_row=sig_row+6,end_column=10); ws.cell(sig_row+6,1).value=f"Estado: {estado}"
-    for row in ws.iter_rows():
-        for cell in row: cell.alignment=Alignment(vertical="top",wrap_text=True)
-    out=io.BytesIO(); wb.save(out); return out.getvalue(), f"ARQUEO_CAJA_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
+    """Excel que copia el diseño del PDF del arqueo de caja (mismo orden, columnas, textos y firmas)."""
+    compras_df = compras_df if isinstance(compras_df, pd.DataFrame) else pd.DataFrame(compras_df or [])
+    efectivo_df = efectivo_df if isinstance(efectivo_df, pd.DataFrame) else pd.DataFrame(efectivo_df or [])
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Arqueo de Caja"
+    h = _HojaPdf(ws)
+    h.logo(logo_bytes)
+    h.titulo("ARQUEO DE CAJA GENERAL – COMPRAS")
+    h.linea([(f"Empresa: {empresa}    Responsable: {responsable}", False)])
+    h.linea([(f"Fecha: {fecha}    Período: {mes}", False)])
+    h.linea([(f"Saldo inicial: {formatear_moneda(saldo_inicial)}    Fondo autorizado: {formatear_moneda(fondo)}", False)])
+    h.espacio(8)
+
+    filas = [[_txt_xl(r.get("N°", "")), _txt_xl(r.get("Fecha", "")), _txt_xl(r.get("Proveedor", "")),
+              _txt_xl(r.get("Concepto / Compra", "")), _txt_xl(r.get("Factura / Soporte", "")), _txt_xl(r.get("Forma de pago", "")),
+              _monto_xl(r.get("Valor compra", 0)), _monto_xl(r.get("IVA / otros", 0)), _monto_xl(r.get("Total pagado", 0)),
+              _txt_xl(r.get("Observaciones", ""))] for _, r in compras_df.iterrows()]
+    h.tabla([(1, 1), (2, 4), (5, 7), (8, 11), (12, 14), (15, 16), (17, 19), (20, 22), (23, 25), (26, 30)],
+            ["N°", "Fecha", "Proveedor", "Concepto", "Soporte", "Pago", "Compra", "IVA", "Total", "Observaciones"],
+            filas, tam=7, nums=(6, 7, 8))
+    h.espacio(8)
+
+    total_compras = total_columna(compras_df, "Total pagado")
+    teorico = _monto_xl(saldo_inicial) - total_compras
+    fisico = total_columna(efectivo_df, "Monto")
+    diff = fisico - teorico
+    h.linea([("Total compras: ", True), (formatear_moneda(total_compras), False)])
+    h.linea([("Saldo teórico final: ", True), (formatear_moneda(teorico), False)])
+    h.linea([("Efectivo físico final: ", True), (formatear_moneda(fisico), False)])
+    h.linea([("Diferencia: ", True), (f"{formatear_moneda(diff)}    ", False),
+             ("CUADRA" if abs(diff) < 0.005 else ("SOBRANTE" if diff > 0 else "FALTANTE"), True)])
+    h.espacio(8)
+    h.linea([("Observaciones: ", True), (str(observaciones or ""), False)])
+    h.espacio(12)
+    h.firmas(preparado_por, revisado_por, aprobado_por, fecha_preparacion, fecha_revision, fecha_aprobacion, estado)
+    h.imprimir()
+
+    if not efectivo_df.empty:   # el detalle por denominación se conserva en una segunda hoja
+        ws2 = wb.create_sheet("Conteo de efectivo")
+        h2 = _HojaPdf(ws2, micro=9, ancho_col=9)
+        h2.subtitulo("DETALLE DEL SALDO EN CAJA")
+        regs = [[_monto_xl(r.get("Denominación", 0)), _monto_xl(r.get("Cantidad", 0)), _monto_xl(r.get("Monto", 0))]
+                for _, r in efectivo_df.iterrows()]
+        h2.tabla([(1, 3), (4, 6), (7, 9)], ["Denominación", "Cantidad", "Monto"], regs, tam=9, nums=(0, 2))
+        h2.celda(1, 6, "TOTAL EFECTIVO", negrita=True, borde=True)
+        h2.celda(7, 9, fisico, negrita=True, borde=True, fmt=_FMT_MONEDA_XL, h="left")
+        h2.imprimir()
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue(), f"ARQUEO_CAJA_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
+
+
+@_cache_generador
+def preparar_excel_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_inicio, fecha_vencimiento, tasa, saldo_libros, saldo_extracto, diferencias_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
+    """Excel que copia el diseño del PDF de la conciliación de crédito bancario."""
+    diferencias_df = diferencias_df if isinstance(diferencias_df, pd.DataFrame) else pd.DataFrame(diferencias_df or [])
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Crédito Bancario"
+    h = _HojaPdf(ws)
+    h.logo(logo_bytes)
+    h.titulo("CONCILIACIÓN DE CRÉDITO BANCARIO")
+    h.linea([(f"Empresa: {empresa}    Período: {mes}", False)])
+    h.linea([(f"Entidad: {entidad}    Crédito: {numero}", False)])
+    h.linea([(f"Inicio: {fecha_inicio}    Vencimiento: {fecha_vencimiento}    Tasa: {tasa}", False)])
+    h.espacio(8)
+
+    diff = _monto_xl(saldo_extracto) - _monto_xl(saldo_libros)
+    h.tabla([(5, 16), (17, 26)], ["Concepto", "Valor"],
+            [["Saldo según libros", _monto_xl(saldo_libros)], ["Saldo según extracto", _monto_xl(saldo_extracto)],
+             ["Diferencia", diff], ["Resultado", "CONCILIADO" if abs(diff) < 0.005 else "NO CONCILIADO"]],
+            tam=10, enc_negrita=True, nums=(1,), alto_min=18)
+    h.espacio(10)
+    h.subtitulo("Diferencias / partidas identificadas")
+    h.tabla([(4, 12), (13, 17), (18, 27)], ["Concepto", "Valor", "Observación"],
+            [[_txt_xl(r.get("Concepto", "")), _monto_xl(r.get("Valor", 0)), _txt_xl(r.get("Observación", ""))]
+             for _, r in diferencias_df.iterrows()], tam=8, nums=(1,))
+    h.espacio(10)
+    h.linea([("Observaciones: ", True), (str(observaciones or ""), False)])
+    h.espacio(12)
+    h.firmas(preparado_por, revisado_por, aprobado_por, fecha_preparacion, fecha_revision, fecha_aprobacion, estado)
+    h.imprimir()
+
+    out = io.BytesIO()
+    wb.save(out)
+    return out.getvalue(), f"CREDITO_BANCARIO_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
 
 
 @_cache_generador
@@ -1659,27 +1859,6 @@ def generar_pdf_caja(empresa, mes, fecha, responsable, saldo_inicial, fondo, com
     sig_data=[[Paragraph("<b>PREPARÓ</b>",styles["Normal"]),Paragraph("<b>REVISÓ</b>",styles["Normal"]),Paragraph("<b>APROBÓ</b>",styles["Normal"])], [Paragraph(f"{preparado_por or 'Pendiente'}<br/>Fecha: {fecha_preparacion or 'Pendiente'}<br/><br/>Firma: ____________________",styles["Normal"]), Paragraph(f"{revisado_por or 'Pendiente de revisión'}<br/>Fecha: {fecha_revision or 'Pendiente'}<br/><br/>Firma: ____________________",styles["Normal"]), Paragraph(f"{aprobado_por or 'Pendiente de aprobación'}<br/>Fecha: {fecha_aprobacion or 'Pendiente'}<br/><br/>Firma: ____________________",styles["Normal"] )]]
     tf=Table(sig_data,colWidths=[170,170,170]); tf.setStyle(TableStyle([("GRID",(0,0),(-1,-1),0.5,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP")])); story += [tf, Paragraph(f"Estado: <b>{estado}</b>",styles["Normal"])]
     doc.build(story); return out.getvalue(), f"ARQUEO_CAJA_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.pdf"
-
-
-@_cache_generador
-def preparar_excel_credito_bancario(empresa, mes, fecha, entidad, numero, fecha_inicio, fecha_vencimiento, tasa, saldo_libros, saldo_extracto, diferencias_df, observaciones, logo_bytes=None, preparado_por="", revisado_por="", aprobado_por="", fecha_preparacion="", fecha_revision="", fecha_aprobacion="", estado="Pendiente de revisión"):
-    wb=Workbook(); ws=wb.active; ws.title="Crédito Bancario"; ws.merge_cells("A1:F1"); ws["A1"]="CONCILIACIÓN DE CRÉDITO BANCARIO"; ws["A1"].font=Font(bold=True,size=14); ws["A1"].alignment=Alignment(horizontal="center")
-    ws["A3"]="Empresa:"; ws["B3"]=empresa; ws["D3"]="Período:"; ws["E3"]=mes; ws["A4"]="Entidad financiera:"; ws["B4"]=entidad; ws["D4"]="Número de crédito:"; ws["E4"]=numero; ws["A5"]="Fecha inicio:"; ws["B5"]=str(fecha_inicio); ws["D5"]="Vencimiento:"; ws["E5"]=str(fecha_vencimiento); ws["A6"]="Tasa:"; ws["B6"]=tasa
-    ws["A8"]="Saldo según libros:"; ws["B8"]=float(saldo_libros); ws["D8"]="Saldo según extracto:"; ws["E8"]=float(saldo_extracto); ws["A9"]="Diferencia:"; ws["B9"]=float(saldo_extracto)-float(saldo_libros)
-    headers=["Concepto","Valor","Observación"]
-    for c,h in enumerate(headers,1): ws.cell(11,c,h).font=Font(bold=True)
-    for r_idx,row in enumerate(diferencias_df.to_dict("records"),12): ws.cell(r_idx,1,row.get("Concepto","")); ws.cell(r_idx,2,row.get("Valor",0)); ws.cell(r_idx,3,row.get("Observación",""))
-    total_dif=total_columna(diferencias_df,"Valor"); rr=12+len(diferencias_df); ws.cell(rr+1,1,"Total diferencias detalladas:"); ws.cell(rr+1,2,total_dif); ws.cell(rr+3,1,"Resultado:"); ws.cell(rr+3,2,"CONCILIADO" if abs(float(saldo_extracto)-float(saldo_libros))<0.005 else "NO CONCILIADO"); ws.cell(rr+5,1,"Observaciones:"); ws.cell(rr+6,1,observaciones or "")
-    for col,w in zip("ABCDEF",[28,18,40,24,22,18]): ws.column_dimensions[col].width=w
-    if logo_bytes:
-        try: img=XLImage(io.BytesIO(logo_bytes)); img.width=110; img.height=60; img.anchor="F2"; ws.add_image(img)
-        except Exception: pass
-    sig_row=rr+8; ws.merge_cells(start_row=sig_row,start_column=1,end_row=sig_row,end_column=6); ws.cell(sig_row,1).value="FIRMAS Y TRAZABILIDAD"; ws.cell(sig_row,1).font=Font(bold=True,size=12)
-    vals=[f"PREPARÓ\n{preparado_por or 'Pendiente'}\nFecha: {fecha_preparacion or 'Pendiente'}\nFirma: ____________________",f"REVISÓ\n{revisado_por or 'Pendiente de revisión'}\nFecha: {fecha_revision or 'Pendiente'}\nFirma: ____________________",f"APROBÓ\n{aprobado_por or 'Pendiente de aprobación'}\nFecha: {fecha_aprobacion or 'Pendiente'}\nFirma: ____________________"]
-    for i,v in enumerate(vals):
-        col=1+i*2; ws.merge_cells(start_row=sig_row+1,start_column=col,end_row=sig_row+3,end_column=col+1); ws.cell(sig_row+1,col).value=v; ws.cell(sig_row+1,col).alignment=Alignment(wrap_text=True,vertical="top")
-    ws.merge_cells(start_row=sig_row+5,start_column=1,end_row=sig_row+5,end_column=6); ws.cell(sig_row+5,1).value=f"Estado: {estado}"
-    out=io.BytesIO(); wb.save(out); return out.getvalue(), f"CREDITO_BANCARIO_{limpiar_nombre_archivo(empresa)}_{limpiar_nombre_archivo(mes)}.xlsx"
 
 
 @_cache_generador
@@ -2538,6 +2717,113 @@ def mostrar_cobertura_auditoria(historial, empresa_nombre):
                          use_container_width=True, hide_index=True)
 
 
+def unir_pdfs(lista_pdfs, marcadores=None):
+    """Une varios PDF en uno solo (con marcadores). Devuelve None si el servidor no tiene pypdf/PyPDF2."""
+    try:
+        from pypdf import PdfWriter, PdfReader
+    except Exception:
+        try:
+            from PyPDF2 import PdfWriter, PdfReader
+        except Exception:
+            return None
+    escritor = PdfWriter()
+    for i, contenido in enumerate(lista_pdfs):
+        inicio = len(escritor.pages)
+        for pagina in PdfReader(io.BytesIO(contenido)).pages:
+            escritor.add_page(pagina)
+        if marcadores:
+            try:
+                escritor.add_outline_item(marcadores[i], inicio)
+            except Exception:
+                pass
+    salida = io.BytesIO()
+    escritor.write(salida)
+    return salida.getvalue()
+
+
+def pdf_indice_impresion(filas, titulo):
+    """Página inicial con el listado de conciliaciones incluidas en la impresión (mismo estilo de los PDF)."""
+    from reportlab.lib.pagesizes import letter
+    from reportlab.lib import colors
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+
+    estilos = getSampleStyleSheet()
+    pequeno = ParagraphStyle("pequeno", parent=estilos["Normal"], fontName="Helvetica", fontSize=7.5, leading=9)
+    negrita = ParagraphStyle("negrita", parent=pequeno, fontName="Helvetica-Bold")
+    banda = ParagraphStyle("banda", parent=estilos["Normal"], fontName="Helvetica-Bold", fontSize=12, textColor=colors.white,
+                           alignment=1, backColor=colors.HexColor("#1F4E78"), borderPadding=(10, 6, 10, 6), leading=16)
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=letter, leftMargin=36, rightMargin=36, topMargin=36, bottomMargin=36)
+    datos_tabla = [[Paragraph(t, negrita) for t in
+                    ("N°", "Consecutivo", "Empresa", "Banco / Entidad", "Cuenta", "Mes", "Aprobó", "Fecha aprobación")]]
+    for n, f in enumerate(filas, 1):
+        datos_tabla.append([Paragraph(str(x if x not in (None, "") else "—"), pequeno) for x in
+                            (n, f.get("consecutivo"), f.get("empresa"), f.get("banco"), f.get("cuenta"), f.get("mes"),
+                             f.get("aprobo"), str(f.get("fecha_aprobacion") or "")[:16])])
+    tabla = Table(datos_tabla, colWidths=[22, 62, 108, 78, 62, 62, 70, 66], repeatRows=1)
+    tabla.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9EAF7")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D9D9D9")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    doc.build([Paragraph(titulo, banda), Spacer(1, 10),
+               Paragraph(f"Documentos incluidos: <b>{len(filas)}</b> &nbsp;|&nbsp; Generado el {datetime.now().strftime('%Y-%m-%d %H:%M')}", pequeno),
+               Spacer(1, 8), tabla])
+    return buffer.getvalue()
+
+
+def preparar_impresion_aprobadas(df, progreso=None):
+    """
+    Genera UN solo PDF con todas las conciliaciones del listado (índice + cada conciliación con su propio PDF).
+    Si el servidor no puede unir PDF, entrega un ZIP con un PDF por conciliación.
+    Solo lee datos; no modifica nada. Devuelve dict con bytes, nombre, mime, formato, ok y fallidas.
+    """
+    documentos, fallidas = [], []
+    total = len(df)
+    for i, (_, fila) in enumerate(df.iterrows(), 1):
+        consecutivo = f"CONC-{int(fila['id']):06d}"
+        try:
+            c_data = obtener_conciliacion_por_id(fila["id"])
+            if not c_data:
+                raise ValueError("sin datos")
+            try:
+                datos = json.loads(c_data.get("datos_json", "{}"))
+            except Exception:
+                datos = {}
+            _, _, pdf, _ = archivos_conciliacion(c_data, datos, consecutivo)
+            if not pdf:
+                raise ValueError("sin PDF")
+            documentos.append({
+                "consecutivo": consecutivo, "pdf": bytes(pdf), "empresa": c_data.get("empresa"),
+                "banco": c_data.get("banco"), "cuenta": c_data.get("cuenta"), "mes": c_data.get("mes"),
+                "aprobo": datos.get("aprobado_por_usuario") or fila.get("aprobado_por_usuario"),
+                "fecha_aprobacion": datos.get("fecha_aprobacion") or fila.get("fecha_aprobacion"),
+            })
+        except Exception:
+            fallidas.append(consecutivo)
+        if progreso:
+            progreso(i, total)
+
+    resultado = {"ok": len(documentos), "fallidas": fallidas, "bytes": None, "nombre": "", "mime": "", "formato": ""}
+    if not documentos:
+        return resultado
+    sello = datetime.now().strftime("%Y%m%d_%H%M")
+    indice = pdf_indice_impresion(documentos, "CONCILIACIONES APROBADAS")
+    unido = unir_pdfs([indice] + [d["pdf"] for d in documentos], ["Índice"] + [d["consecutivo"] for d in documentos])
+    if unido is not None:
+        resultado.update(bytes=unido, nombre=f"CONCILIACIONES_APROBADAS_{sello}.pdf", mime="application/pdf", formato="pdf")
+    else:
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("00_INDICE.pdf", indice)
+            for d in documentos:
+                z.writestr(f"{d['consecutivo']}.pdf", d["pdf"])
+        resultado.update(bytes=zip_buffer.getvalue(), nombre=f"CONCILIACIONES_APROBADAS_{sello}.zip",
+                         mime="application/zip", formato="zip")
+    return resultado
+
+
 _CLAVES_EDICION = (
     "tabla1", "tabla2", "tabla3", "tabla4", "tabla5",
     "caja_compras", "caja_efectivo", "credito_diferencias",
@@ -3085,6 +3371,30 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
             st.download_button("⬇️ Descargar listado (CSV)", _listado.to_csv(index=False).encode("utf-8-sig"),
                                file_name=f"auditoria_{'aprobadas' if vista_aud == _OPC_APR else 'devueltas'}.csv",
                                mime="text/csv", key=f"aud_csv_{vista_aud}")
+            if vista_aud == _OPC_APR:
+                st.markdown("**🖨️ Impresión masiva**")
+                st.caption("Reúne en un solo PDF las conciliaciones aprobadas que estás viendo (se respetan la búsqueda y el filtro por tipo), "
+                           "con una hoja de índice al inicio.")
+                _firma_imp = tuple((int(r_id), str(r_fa)) for r_id, r_fa in zip(vista_df["id"], vista_df.get("fecha_aprobacion", [""] * len(vista_df))))
+                if st.button(f"🖨️ Imprimir todas las aprobadas ({len(vista_df)})", key="aud_imprimir_todas", type="primary"):
+                    _barra = st.progress(0.0)
+                    _res_imp = preparar_impresion_aprobadas(vista_df, lambda i, t: _barra.progress(i / t))
+                    _barra.empty()
+                    st.session_state["aud_impresion"] = dict(_res_imp, firma=_firma_imp)
+                _listo = st.session_state.get("aud_impresion")
+                if _listo and _listo.get("firma") == _firma_imp:
+                    if _listo.get("bytes"):
+                        st.success(f"✅ Listo: {_listo['ok']} conciliación(es) preparadas para imprimir.")
+                        st.download_button("⬇️ Descargar para imprimir" + (" (PDF)" if _listo["formato"] == "pdf" else " (ZIP de PDFs)"),
+                                           data=_listo["bytes"], file_name=_listo["nombre"], mime=_listo["mime"], key="aud_imprimir_desc")
+                        if _listo["formato"] == "zip":
+                            st.info("Este servidor no tiene la librería para unir PDF, por eso se entrega un ZIP con un PDF por conciliación. "
+                                    "Para recibir un solo PDF agrega `pypdf` al archivo requirements.txt y reinicia la app.")
+                    else:
+                        st.error("No fue posible generar ninguna conciliación para imprimir. Inténtalo de nuevo.")
+                    if _listo.get("fallidas"):
+                        st.warning("No se pudieron incluir: " + ", ".join(_listo["fallidas"]))
+                st.divider()
             for _, fila_c in paginar_dataframe(vista_df, f"pag_aud_{vista_aud}").iterrows():
                 mostrar_conciliacion_consulta(fila_c, vista_aud)
     elif pendientes.empty:
