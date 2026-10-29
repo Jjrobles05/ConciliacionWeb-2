@@ -265,7 +265,8 @@ def _sincronizar_cuentas_legacy(c):
 
 
 _COLS_EMPRESAS = ['id', 'nombre', 'nit', 'logo']
-_COLS_CUENTAS = ['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre']
+_COLS_CUENTAS = ['id', 'banco', 'numero_cuenta', 'tipo_cuenta', 'empresa_id', 'empresa_nombre',
+                 'activa', 'fecha_baja', 'motivo_baja', 'baja_por']
 _COLS_USUARIOS = ['id', 'usuario', 'nombre', 'rol', 'activo', 'fecha_creacion', 'empresa_nombre']
 
 # ==========================================
@@ -298,6 +299,15 @@ def inicializar_db():
             FOREIGN KEY(empresa_id) REFERENCES empresas(id)
         )
     """)
+    # Estado de la cuenta: permite "desactivar" una cuenta que ya no existe sin perder su historial.
+    for _sql_col in ("ALTER TABLE cuentas_bancarias ADD COLUMN activa INTEGER DEFAULT 1",
+                     "ALTER TABLE cuentas_bancarias ADD COLUMN fecha_baja TEXT",
+                     "ALTER TABLE cuentas_bancarias ADD COLUMN motivo_baja TEXT",
+                     "ALTER TABLE cuentas_bancarias ADD COLUMN baja_por TEXT"):
+        try:
+            c.execute(_sql_col)
+        except Exception:
+            pass   # la columna ya existe
     # Compatibilidad con bases Turso antiguas:
     # algunas instalaciones tienen conciliaciones.cuenta_id -> cuentas(id),
     # mientras que la aplicación actual usa cuentas_bancarias(id).
@@ -743,22 +753,28 @@ def reiniciar_datos_aplicativo():
 
 
 @_lectura_cacheada(lambda e: pd.DataFrame(columns=_COLS_CUENTAS), max_entries=50)
-def obtener_cuentas(empresa_id=None):
+def obtener_cuentas(empresa_id=None, incluir_inactivas=True):
+    """Cuentas bancarias. Las inactivas (que ya no existen) se incluyen por defecto; 'activa' indica su estado."""
     conn = conectar_db()
     try:
         c = conn.cursor()
         query = """
             SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta,
-                   c.empresa_id, e.razon_social AS empresa_nombre
+                   c.empresa_id, e.razon_social AS empresa_nombre,
+                   COALESCE(c.activa, 1) AS activa, c.fecha_baja, c.motivo_baja, c.baja_por
             FROM cuentas_bancarias c
             LEFT JOIN empresas e ON c.empresa_id = e.id
         """
+        condiciones, params = [], []
         if empresa_id:
-            query += " WHERE c.empresa_id = ? ORDER BY c.banco, c.numero_cuenta"
-            c.execute(query, (int(empresa_id),))
-        else:
-            query += " ORDER BY c.banco, c.numero_cuenta"
-            c.execute(query)
+            condiciones.append("c.empresa_id = ?")
+            params.append(int(empresa_id))
+        if not incluir_inactivas:
+            condiciones.append("COALESCE(c.activa, 1) = 1")
+        if condiciones:
+            query += " WHERE " + " AND ".join(condiciones)
+        query += " ORDER BY c.banco, c.numero_cuenta"
+        c.execute(query, tuple(params))
         rows = c.fetchall()
     finally:
         conn.close()
@@ -792,7 +808,10 @@ def guardar_cuenta(banco, numero_cuenta, tipo_cuenta, empresa_id, datos_credito=
 
         if existente:
             cuenta_id = int(existente[0])
-            c.execute("UPDATE cuentas_bancarias SET tipo_cuenta=? WHERE id=?",
+            # Si estaba inactiva y se vuelve a registrar, se reactiva.
+            c.execute("""UPDATE cuentas_bancarias
+                         SET tipo_cuenta=?, activa=1, fecha_baja=NULL, motivo_baja=NULL, baja_por=NULL
+                         WHERE id=?""",
                       (tipo_cuenta, cuenta_id))
         else:
             c.execute("""INSERT INTO cuentas_bancarias
@@ -852,7 +871,8 @@ def eliminar_cuenta_db(cuenta_id):
             partes=[]
             if conciliaciones: partes.append(f"{conciliaciones} conciliación(es)")
             if asignaciones: partes.append(f"{asignaciones} asignación(es) mensuales")
-            return False, "No se puede eliminar esta cuenta porque tiene " + " y ".join(partes) + "."
+            return False, ("No se puede eliminar esta cuenta porque tiene " + " y ".join(partes) +
+                           ". Si ya no existe, usa «🚫 Desactivar»: queda fuera de uso y conserva su historial.")
         c.execute("DELETE FROM cuentas_bancarias WHERE id=?", (int(cuenta_id),))
         conn.commit()
         return True, f"Cuenta {fila[0]} - {fila[1]} eliminada correctamente."
@@ -863,6 +883,66 @@ def eliminar_cuenta_db(cuenta_id):
     finally:
         conn.close()
 
+
+
+def resumen_cuenta_db(cuenta_id):
+    """Cuántas conciliaciones y asignaciones tiene la cuenta (para avisar antes de desactivarla)."""
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("SELECT COUNT(*) FROM conciliaciones WHERE cuenta_id=?", (int(cuenta_id),))
+        total = int(c.fetchone()[0] or 0)
+        c.execute("SELECT COUNT(*) FROM conciliaciones WHERE cuenta_id=? AND COALESCE(dictamen, 'Pendiente de revisión') <> 'Aprobada'",
+                  (int(cuenta_id),))
+        sin_aprobar = int(c.fetchone()[0] or 0)
+        c.execute("SELECT COUNT(*) FROM asignaciones_cuentas WHERE cuenta_id=?", (int(cuenta_id),))
+        asignaciones = int(c.fetchone()[0] or 0)
+        return {"conciliaciones": total, "sin_aprobar": sin_aprobar, "asignaciones": asignaciones}
+    except Exception:
+        return {"conciliaciones": 0, "sin_aprobar": 0, "asignaciones": 0}
+    finally:
+        conn.close()
+
+
+def desactivar_cuenta_db(cuenta_id, motivo="", usuario=""):
+    """Deja la cuenta fuera de uso (no se borra nada: conciliaciones e historial quedan intactos)."""
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("SELECT banco, numero_cuenta, COALESCE(activa, 1) FROM cuentas_bancarias WHERE id=?", (int(cuenta_id),))
+        fila = c.fetchone()
+        if not fila:
+            return False, "La cuenta no existe."
+        if int(fila[2]) == 0:
+            return False, "La cuenta ya estaba inactiva."
+        c.execute("UPDATE cuentas_bancarias SET activa=0, fecha_baja=?, motivo_baja=?, baja_por=? WHERE id=?",
+                  (datetime.now().strftime("%Y-%m-%d"), str(motivo or "").strip() or None, str(usuario or "").strip() or None, int(cuenta_id)))
+        conn.commit()
+        return True, f"Cuenta {fila[0]} - {fila[1]} desactivada. Su historial se conserva y puedes reactivarla cuando quieras."
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible desactivar la cuenta: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
+
+
+def reactivar_cuenta_db(cuenta_id):
+    conn = conectar_db(); c = conn.cursor()
+    try:
+        c.execute("SELECT banco, numero_cuenta, COALESCE(activa, 1) FROM cuentas_bancarias WHERE id=?", (int(cuenta_id),))
+        fila = c.fetchone()
+        if not fila:
+            return False, "La cuenta no existe."
+        if int(fila[2]) == 1:
+            return False, "La cuenta ya estaba activa."
+        c.execute("UPDATE cuentas_bancarias SET activa=1, fecha_baja=NULL, motivo_baja=NULL, baja_por=NULL WHERE id=?", (int(cuenta_id),))
+        conn.commit()
+        return True, f"Cuenta {fila[0]} - {fila[1]} reactivada."
+    except Exception as e:
+        try: conn.rollback()
+        except Exception: pass
+        return False, f"No fue posible reactivar la cuenta: {type(e).__name__}: {e}"
+    finally:
+        conn.close()
 
 
 def preparar_excel_asignaciones(asignaciones_df, empresa, anio, mes_num):
@@ -996,7 +1076,7 @@ def generar_asignacion_mensual(empresa_id, anio, mes_num):
 
         c.execute("SELECT id, nombre FROM usuarios WHERE empresa_id=? AND activo=1 AND rol='Preparador' ORDER BY id", (int(empresa_id),))
         preparadores=c.fetchall()
-        c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? ORDER BY id", (int(empresa_id),))
+        c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? AND COALESCE(activa,1)=1 ORDER BY id", (int(empresa_id),))
         cuentas=[int(r[0]) for r in c.fetchall()]
         if not preparadores:
             return False, "No hay Preparadores activos asignados a esta empresa."
@@ -1045,7 +1125,7 @@ def asignar_cuentas_nuevas_mes(empresa_id, anio, mes_num):
         if not preparadores:
             return False, "No hay Preparadores activos asignados a esta empresa."
 
-        c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? ORDER BY id", (int(empresa_id),))
+        c.execute("SELECT id FROM cuentas_bancarias WHERE empresa_id=? AND COALESCE(activa,1)=1 ORDER BY id", (int(empresa_id),))
         cuentas = [int(r[0]) for r in c.fetchall()]
         if not cuentas:
             return False, "No hay cuentas bancarias registradas para esta empresa."
@@ -1109,7 +1189,7 @@ def contar_cuentas_sin_asignar_mes(empresa_id, anio, mes_num):
         c.execute("""
             SELECT COUNT(*)
             FROM cuentas_bancarias c
-            WHERE c.empresa_id=?
+            WHERE c.empresa_id=? AND COALESCE(c.activa,1)=1
               AND NOT EXISTS (
                   SELECT 1 FROM asignaciones_cuentas a
                   WHERE a.cuenta_id=c.id AND a.empresa_id=? AND a.anio=? AND a.mes=?
@@ -1132,12 +1212,12 @@ def obtener_cuentas_rotadas_por_usuario(empresa_id, anio, mes_num, usuario_id):
         fila=c.fetchone()
         rol_usuario=fila[0] if fila else None
         if rol_usuario != 'Preparador':
-            c.execute("SELECT id, banco, numero_cuenta, tipo_cuenta FROM cuentas_bancarias WHERE empresa_id=? ORDER BY id", (int(empresa_id),))
+            c.execute("SELECT id, banco, numero_cuenta, tipo_cuenta FROM cuentas_bancarias WHERE empresa_id=? AND COALESCE(activa,1)=1 ORDER BY id", (int(empresa_id),))
         else:
             c.execute("""SELECT c.id, c.banco, c.numero_cuenta, c.tipo_cuenta
                          FROM asignaciones_cuentas a
                          JOIN cuentas_bancarias c ON c.id=a.cuenta_id
-                         WHERE a.empresa_id=? AND a.anio=? AND a.mes=? AND a.usuario_id=?
+                         WHERE a.empresa_id=? AND a.anio=? AND a.mes=? AND a.usuario_id=? AND COALESCE(c.activa,1)=1
                          ORDER BY c.banco, c.numero_cuenta""",
                       (int(empresa_id), int(anio), int(mes_num), int(usuario_id)))
         rows=c.fetchall()
@@ -2578,13 +2658,29 @@ def _clave_cuenta(empresa, banco, cuenta):
     return tuple(str(x or "").strip().lower() for x in (empresa, banco, cuenta))
 
 
-def cuentas_para_cobertura(empresa_nombre):
-    """Cuentas registradas (Bancos y Cuentas) de la empresa activa, o de todas."""
+def cuentas_vigentes_en_periodo(df, anio, mes_num):
+    """
+    Cuentas que se deben conciliar en el mes: las activas y las dadas de baja DESPUÉS de ese mes
+    (así, una cuenta cerrada en octubre sigue figurando en septiembre pero ya no en octubre ni después).
+    """
+    if df is None or df.empty or "activa" not in df.columns:
+        return df
+    a, m = int(anio), int(mes_num)
+    siguiente = f"{a + (1 if m == 12 else 0):04d}-{(m % 12) + 1:02d}-01"
+    activa = pd.to_numeric(df["activa"], errors="coerce").fillna(1).astype(int) == 1
+    baja = df["fecha_baja"].fillna("").astype(str).str[:10]
+    return df[activa | (baja >= siguiente)]
+
+
+def cuentas_para_cobertura(empresa_nombre, anio=None, mes_num=None):
+    """Cuentas registradas de la empresa activa (o de todas). Con año y mes, solo las vigentes en ese período."""
     df = obtener_cuentas()
     if df is None or df.empty:
         return df
     if empresa_nombre and str(empresa_nombre).strip() not in ("Todas las empresas", "Sin asignar"):
         df = df[df["empresa_nombre"].fillna("").astype(str).str.strip() == str(empresa_nombre).strip()]
+    if anio is not None and mes_num is not None:
+        df = cuentas_vigentes_en_periodo(df, anio, mes_num)
     return df
 
 
@@ -2661,6 +2757,15 @@ def mostrar_cobertura_auditoria(historial, empresa_nombre):
     mes_num = s2.selectbox("Mes", list(range(1, 13)), index=hoy.month - 1, key="cob_mes",
                            format_func=lambda m: _MESES_ES[m - 1])
     periodo = f"{_MESES_ES[mes_num - 1]} {anio}"
+
+    cuentas_todas = cuentas
+    cuentas = cuentas_vigentes_en_periodo(cuentas_todas, anio, mes_num)
+    if cuentas is None or cuentas.empty:
+        st.info(f"No hay cuentas activas para conciliar en {periodo}.")
+        return
+    n_inactivas = len(cuentas_todas) - len(cuentas)
+    if n_inactivas:
+        st.caption(f"{n_inactivas} cuenta(s) inactiva(s) no se exigen en {periodo}.")
 
     asignaciones = {}
     for emp_id in cuentas["empresa_id"].dropna().unique():
@@ -3333,7 +3438,7 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
     _OPC_PEND, _OPC_APR, _OPC_DEV, _OPC_COB = "pend", "apr", "dev", "cob"
     try:   # cuentas sin conciliar en el mes actual, visible sin necesidad de abrir el panel
         _hoy_aud = datetime.now()
-        _cob_mes = calcular_cobertura(cuentas_para_cobertura(empresa_activa_nombre), historial, _hoy_aud.year, _hoy_aud.month)
+        _cob_mes = calcular_cobertura(cuentas_para_cobertura(empresa_activa_nombre, _hoy_aud.year, _hoy_aud.month), historial, _hoy_aud.year, _hoy_aud.month)
         _sin_conciliar_mes = resumen_cobertura(_cob_mes)["sin"]
     except Exception:
         _sin_conciliar_mes = 0
@@ -4006,29 +4111,83 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
             st.divider()
 
     cuentas_reg = obtener_cuentas(empresa_activa_id)
+    _aviso_cuentas = st.session_state.pop("_aviso_cuentas", None)
+    if _aviso_cuentas:
+        (st.success if _aviso_cuentas[0] == "ok" else st.error)(_aviso_cuentas[1])
     if cuentas_reg.empty:
         st.info("No hay cuentas registradas para esta empresa.")
     else:
+        _inactivas_mask = pd.to_numeric(cuentas_reg["activa"], errors="coerce").fillna(1).astype(int) == 0
+        n_inactivas_cta = int(_inactivas_mask.sum())
+        st.caption(f"{len(cuentas_reg) - n_inactivas_cta} activa(s) · {n_inactivas_cta} inactiva(s)")
+        ver_inactivas = False
+        if n_inactivas_cta:
+            ver_inactivas = st.checkbox("Mostrar también las cuentas inactivas (que ya no existen o se cerraron)", key="ver_cuentas_inactivas")
         for _, cuenta_fila in cuentas_reg.iterrows():
-            c1, c2, c3, c4, c5 = st.columns([1.6, 2.2, 2.0, 1.2, 1.2])
-            with c1: st.write(f"**{cuenta_fila['banco']}**")
+            cuenta_id_fila = int(cuenta_fila['id'])
+            inactiva = int(pd.to_numeric(cuenta_fila.get("activa"), errors="coerce") if pd.notna(cuenta_fila.get("activa")) else 1) == 0
+            if inactiva and not ver_inactivas:
+                continue
+            c1, c2, c3, c4, c5, c6, c7 = st.columns([1.5, 1.8, 1.6, 1.5, 0.9, 1.3, 1.0])
+            with c1: st.write(f"{'🚫 ' if inactiva else ''}**{cuenta_fila['banco']}**")
             with c2: st.write(str(cuenta_fila['numero_cuenta']))
             with c3: st.write(str(cuenta_fila['tipo_cuenta']))
             with c4:
-                if st.button("✏️ Editar", key=f"editar_cuenta_{cuenta_fila['id']}"):
-                    st.session_state.cuenta_a_editar = int(cuenta_fila['id'])
-                    st.rerun()
+                if inactiva:
+                    detalle = f"Inactiva desde {_txt_xl(cuenta_fila.get('fecha_baja')) or '—'}"
+                    _motivo_baja = _txt_xl(cuenta_fila.get("motivo_baja"))
+                    if _motivo_baja:
+                        detalle += f" · {_motivo_baja}"
+                    st.caption(detalle)
+                else:
+                    st.caption("Activa")
             with c5:
-                if st.button("🗑️ Eliminar", key=f"eliminar_cuenta_{cuenta_fila['id']}"):
-                    st.session_state.cuenta_a_eliminar = int(cuenta_fila['id'])
+                if st.button("✏️ Editar", key=f"editar_cuenta_{cuenta_id_fila}"):
+                    st.session_state.cuenta_a_editar = cuenta_id_fila
+                    st.rerun()
+            with c6:
+                if rol_actual == "Administrador":
+                    if inactiva:
+                        if st.button("♻️ Reactivar", key=f"reactivar_cuenta_{cuenta_id_fila}"):
+                            ok, mensaje = reactivar_cuenta_db(cuenta_id_fila)
+                            st.session_state["_aviso_cuentas"] = ("ok" if ok else "error", mensaje)
+                            st.rerun()
+                    else:
+                        if st.button("🚫 Desactivar", key=f"desactivar_cuenta_{cuenta_id_fila}"):
+                            st.session_state.cuenta_a_desactivar = cuenta_id_fila
+                            st.session_state.pop("cuenta_a_eliminar", None)
+                            st.rerun()
+            with c7:
+                if st.button("🗑️ Eliminar", key=f"eliminar_cuenta_{cuenta_id_fila}"):
+                    st.session_state.cuenta_a_eliminar = cuenta_id_fila
+                    st.session_state.pop("cuenta_a_desactivar", None)
                     st.rerun()
 
-            if st.session_state.get("cuenta_a_eliminar") == int(cuenta_fila['id']):
+            if rol_actual == "Administrador" and not inactiva and st.session_state.get("cuenta_a_desactivar") == cuenta_id_fila:
+                _res_cta = resumen_cuenta_db(cuenta_id_fila)
+                st.warning(f"Vas a desactivar **{cuenta_fila['banco']} - {cuenta_fila['numero_cuenta']}**. Dejará de aparecer al crear conciliaciones, "
+                           "en las asignaciones y como pendiente en los meses siguientes. **Su historial se conserva** y puedes reactivarla cuando quieras.")
+                if _res_cta["sin_aprobar"]:
+                    st.info(f"Ten en cuenta: tiene {_res_cta['sin_aprobar']} conciliación(es) sin aprobar. Seguirán visibles para su revisión y corrección.")
+                motivo_baja = st.text_input("Motivo (opcional)", key=f"motivo_baja_{cuenta_id_fila}", placeholder="Ej.: Cuenta cerrada en septiembre")
+                d1, d2 = st.columns(2)
+                with d1:
+                    if st.button("✅ Sí, desactivar", key=f"confirmar_desactivar_cuenta_{cuenta_id_fila}", type="primary"):
+                        ok, mensaje = desactivar_cuenta_db(cuenta_id_fila, motivo_baja, usuario_actual["nombre"])
+                        st.session_state.pop("cuenta_a_desactivar", None)
+                        st.session_state["_aviso_cuentas"] = ("ok" if ok else "error", mensaje)
+                        st.rerun()
+                with d2:
+                    if st.button("❌ Cancelar", key=f"cancelar_desactivar_cuenta_{cuenta_id_fila}"):
+                        st.session_state.pop("cuenta_a_desactivar", None)
+                        st.rerun()
+
+            if st.session_state.get("cuenta_a_eliminar") == cuenta_id_fila:
                 st.warning(f"⚠️ Vas a eliminar **{cuenta_fila['banco']} - {cuenta_fila['numero_cuenta']}**. Esta acción no se puede deshacer.")
                 x1, x2 = st.columns(2)
                 with x1:
-                    if st.button("✅ Sí, eliminar", key=f"confirmar_eliminar_cuenta_{cuenta_fila['id']}", type="primary"):
-                        ok, mensaje = eliminar_cuenta_db(int(cuenta_fila['id']))
+                    if st.button("✅ Sí, eliminar", key=f"confirmar_eliminar_cuenta_{cuenta_id_fila}", type="primary"):
+                        ok, mensaje = eliminar_cuenta_db(cuenta_id_fila)
                         st.session_state.pop("cuenta_a_eliminar", None)
                         if ok:
                             st.success(mensaje)
@@ -4036,7 +4195,7 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
                         else:
                             st.error(mensaje)
                 with x2:
-                    if st.button("❌ Cancelar", key=f"cancelar_eliminar_cuenta_{cuenta_fila['id']}"):
+                    if st.button("❌ Cancelar", key=f"cancelar_eliminar_cuenta_{cuenta_id_fila}"):
                         st.session_state.pop("cuenta_a_eliminar", None)
                         st.rerun()
             st.divider()
