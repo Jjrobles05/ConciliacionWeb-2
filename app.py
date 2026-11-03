@@ -976,20 +976,57 @@ def preparar_excel_asignaciones(asignaciones_df, empresa, anio, mes_num):
     for col, ancho in enumerate([22, 24, 22, 28, 22], 1):
         ws.column_dimensions[chr(64+col)].width = ancho
     fila += 2
-    fila = escribir_seccion(ws, fila, "FIRMAS Y TRAZABILIDAD", 7)
-    sig = [("PREPARÓ", preparado_por or "Pendiente", "Fecha: Se registra al guardar"), ("REVISÓ", revisado_por or "Pendiente de revisión", "Fecha: Pendiente"), ("APROBÓ", "Pendiente de aprobación", "Fecha: Pendiente")]
-    for idx,(rol,nombre,fecha_txt) in enumerate(sig):
-        col=1+idx*2
-        ws.cell(fila,col).value=rol; ws.cell(fila,col).font=Font(bold=True)
-        ws.merge_cells(start_row=fila+1,start_column=col,end_row=fila+3,end_column=min(col+1,7))
-        ws.cell(fila+1,col).value=f"{nombre}\n{fecha_txt}\nFirma: ____________________"; ws.cell(fila+1,col).alignment=Alignment(wrap_text=True,vertical="top")
-    ws.merge_cells(start_row=fila+5,start_column=1,end_row=fila+5,end_column=7); ws.cell(fila+5,1).value="Estado: Pendiente de revisión"
+    ws.merge_cells(start_row=fila, start_column=1, end_row=fila, end_column=5)
+    ws.cell(fila, 1).value = "La asignación es aleatoria, queda fija para el periodo indicado y fue generada por el Administrador."
+    ws.cell(fila, 1).alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[fila].height = 32
+    ws.cell(fila + 1, 1).value = f"Generado el {datetime.now().strftime('%Y-%m-%d %H:%M')}"
 
     output = io.BytesIO()
     workbook.save(output)
     output.seek(0)
     nombre = f"ASIGNACION_{limpiar_nombre_archivo(empresa)}_{mes_nombre.upper()}_{anio}.xlsx"
     return output.getvalue(), nombre
+
+
+def preparar_excel_cuentas(cuentas_df, empresa_label="Todas las empresas"):
+    """Excel con las cuentas bancarias registradas (activas e inactivas)."""
+    workbook = Workbook()
+    ws = workbook.active
+    ws.title = "Cuentas registradas"
+    ws.merge_cells("A1:H1")
+    ws["A1"] = "CUENTAS BANCARIAS REGISTRADAS"
+    estilo_titulo(ws["A1"], 14)
+    ws["A2"] = "Empresa"
+    ws["A2"].font = Font(bold=True)
+    ws["B2"] = str(empresa_label)
+    ws["D2"] = "Generado"
+    ws["D2"].font = Font(bold=True)
+    ws["E2"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    encabezados = ["Empresa", "Banco / Entidad", "Cuenta / Tarjeta / Crédito", "Tipo",
+                   "Estado", "Fecha de baja", "Motivo de baja", "Desactivada por"]
+    fila = 4
+    for col, enc in enumerate(encabezados, 1):
+        c = ws.cell(row=fila, column=col, value=enc)
+        c.font = Font(bold=True)
+        c.fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    fila += 1
+    if cuentas_df is not None and not cuentas_df.empty:
+        for _, r in cuentas_df.iterrows():
+            activa = int(pd.to_numeric(r.get("activa"), errors="coerce") if pd.notna(r.get("activa")) else 1) == 1
+            valores = [r.get("empresa_nombre"), r.get("banco"), r.get("numero_cuenta"), r.get("tipo_cuenta"),
+                       "Activa" if activa else "Inactiva", r.get("fecha_baja"), r.get("motivo_baja"), r.get("baja_por")]
+            for col, v in enumerate(valores, 1):
+                ws.cell(row=fila, column=col, value="" if v is None or (not isinstance(v, str) and pd.isna(v)) else str(v))
+            fila += 1
+    for col, ancho in enumerate([28, 24, 28, 20, 12, 14, 30, 22], 1):
+        ws.column_dimensions[chr(64 + col)].width = ancho
+    ws.freeze_panes = "A5"
+    ws.auto_filter.ref = f"A4:H{max(fila - 1, 5)}"
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue(), f"CUENTAS_{limpiar_nombre_archivo(empresa_label)}_{datetime.now().strftime('%Y%m%d')}.xlsx"
 
 
 def generar_pdf_asignaciones(asignaciones_df, empresa, anio, mes_num):
@@ -4120,6 +4157,13 @@ elif menu_seleccionado == "🏦 Bancos y Cuentas":
         _inactivas_mask = pd.to_numeric(cuentas_reg["activa"], errors="coerce").fillna(1).astype(int) == 0
         n_inactivas_cta = int(_inactivas_mask.sum())
         st.caption(f"{len(cuentas_reg) - n_inactivas_cta} activa(s) · {n_inactivas_cta} inactiva(s)")
+        try:
+            _xl_cuentas, _nom_xl_cuentas = preparar_excel_cuentas(cuentas_reg, empresa_activa_nombre)
+            st.download_button("📊 Descargar cuentas registradas en Excel", data=_xl_cuentas, file_name=_nom_xl_cuentas,
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               key="dl_cuentas_excel")
+        except Exception as e:
+            st.error(f"No fue posible generar el Excel de cuentas: {type(e).__name__}: {e}")
         ver_inactivas = False
         if n_inactivas_cta:
             ver_inactivas = st.checkbox("Mostrar también las cuentas inactivas (que ya no existen o se cerraron)", key="ver_cuentas_inactivas")
