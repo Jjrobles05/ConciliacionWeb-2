@@ -1265,13 +1265,52 @@ def obtener_cuentas_rotadas_por_usuario(empresa_id, anio, mes_num, usuario_id):
         conn.close()
 
 
+def _numero_desde_texto(val):
+    """Convierte un valor copiado de Excel a float. Acepta 1.234.567,89 | 1,234,567.89 | 1234.56 | $ 1.500 | (500) | -500."""
+    s = str(val).strip()
+    if not s:
+        return 0.0
+    negativo = s.startswith("-") or s.endswith("-") or (s.startswith("(") and s.endswith(")"))
+    limpio = re.sub(r"[^\d.,]", "", s)
+    if not limpio:
+        return 0.0
+    if "," in limpio and "." in limpio:
+        decimal = "," if limpio.rfind(",") > limpio.rfind(".") else "."
+        miles = "." if decimal == "," else ","
+        limpio = limpio.replace(miles, "").replace(decimal, ".")
+    elif "," in limpio:
+        partes = limpio.split(",")
+        limpio = limpio.replace(",", "") if len(partes) > 2 else limpio.replace(",", ".")
+    elif "." in limpio:
+        partes = limpio.split(".")
+        # varios puntos, o un punto seguido de 3 dígitos => separador de miles (formato colombiano)
+        if len(partes) > 2 or len(partes[-1]) == 3:
+            limpio = limpio.replace(".", "")
+    try:
+        n = float(limpio)
+    except ValueError:
+        return 0.0
+    return -n if negativo else n
+
+
 def parsear_texto_pegado(texto, columnas_esperadas):
+    """Convierte el texto pegado desde Excel (varias líneas, columnas separadas por TAB) en un DataFrame."""
     if not texto or not texto.strip():
         return None
-    lines = [l.strip() for l in texto.strip().splitlines() if l.strip()]
+    texto = texto.replace("\r\n", "\n").replace("\r", "\n")
+    textos_cols = {"Fecha", "Beneficiario", "Documento", "Concepto"}
     rows = []
-    for line in lines:
-        parts = line.split('\t') if '\t' in line else line.split(',')
+    for line in texto.split("\n"):
+        if not line.strip():
+            continue
+        if "\t" in line:
+            parts = line.split("\t")
+        elif ";" in line:
+            parts = line.split(";")
+        elif re.search(r"\s{2,}", line.strip()):
+            parts = re.split(r"\s{2,}", line.strip())
+        else:
+            parts = line.split(",")
         parts = [p.strip() for p in parts]
         if len(parts) < len(columnas_esperadas):
             parts += [""] * (len(columnas_esperadas) - len(parts))
@@ -1280,16 +1319,48 @@ def parsear_texto_pegado(texto, columnas_esperadas):
         row_dict = {}
         for idx, col in enumerate(columnas_esperadas):
             val = parts[idx]
-            if col == "Valor" or col not in ["Fecha", "Beneficiario", "Documento", "Concepto"]:
-                val_limpio = val.replace("$", "").replace(".", "").replace(",", ".").replace(" ", "")
-                try:
-                    row_dict[col] = float(val_limpio)
-                except ValueError:
-                    row_dict[col] = 0.0
-            else:
-                row_dict[col] = val
+            row_dict[col] = val if col in textos_cols else _numero_desde_texto(val)
         rows.append(row_dict)
-    return pd.DataFrame(rows)
+    if not rows:
+        return None
+    # Si la primera fila son encabezados copiados de Excel (Fecha, Valor...), se descarta.
+    primera = " ".join(str(v).lower() for v in rows[0].values())
+    if any(k in primera for k in ("fecha", "valor", "concepto", "beneficiario", "documento")) \
+            and all(float(rows[0][c]) == 0.0 for c in columnas_esperadas if c not in textos_cols):
+        rows = rows[1:]
+    return pd.DataFrame(rows, columns=columnas_esperadas) if rows else None
+
+
+def bloque_pegado_excel(clave, etiqueta, columnas, tabla_key, df_editado, texto_boton, texto_limpiar):
+    """Cuadro MULTILÍNEA para pegar varias filas de Excel de una sola vez + botones Cargar / Limpiar."""
+    ver = st.session_state.get(f"_paste_ver_{clave}", 0)
+    key_txt = f"paste_{clave}_{ver}"
+    st.caption(f"📋 {etiqueta}")
+    st.text_area("Pegar ítems desde Excel", key=key_txt, height=110, label_visibility="collapsed",
+                 placeholder="Copia las filas en Excel (Ctrl+C) y pégalas aquí (Ctrl+V). Cada fila de Excel = un ítem.")
+    c_b, c_del, _ = st.columns([1.3, 1.3, 3])
+    with c_b:
+        if st.button(texto_boton, key=f"btn_parse_{clave}"):
+            df_p = parsear_texto_pegado(st.session_state.get(key_txt, ""), columnas)
+            if df_p is None or df_p.empty:
+                st.warning("No se encontraron filas para cargar. Pega primero los datos copiados de Excel.")
+            else:
+                # Se parte de lo que hay actualmente en la tabla (incluye ediciones manuales)
+                base = df_editado if isinstance(df_editado, pd.DataFrame) else st.session_state[tabla_key]
+                base = base.dropna(how="all").reindex(columns=columnas)
+                st.session_state[tabla_key] = pd.concat([base, df_p], ignore_index=True)
+                st.session_state.pop(f"editor_{tabla_key}", None)   # evita que el editor re-aplique cambios viejos
+                st.session_state[f"_paste_ver_{clave}"] = ver + 1   # nuevo cuadro vacío
+                st.session_state[f"_pegado_ok_{clave}"] = len(df_p)
+                st.rerun()
+    with c_del:
+        if st.button(texto_limpiar, key=f"btn_del_{clave}"):
+            st.session_state[tabla_key] = pd.DataFrame(columns=columnas)
+            st.session_state.pop(f"editor_{tabla_key}", None)
+            st.rerun()
+    n_ok = st.session_state.pop(f"_pegado_ok_{clave}", None)
+    if n_ok:
+        st.success(f"✅ Se cargaron {n_ok} ítem(s) de una sola vez.")
 
 
 def _json_datos_conciliacion(empresa, nit, mes, fecha_elaboracion, banco, cuenta, tipo,
@@ -4535,76 +4606,28 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
     salidas_extracto_df = formatear_columna_valor(st.session_state.tabla1)
     salidas_extracto = st.data_editor(salidas_extracto_df, num_rows="dynamic", use_container_width=True, key="editor_tabla1", column_config=config_monetaria(["Valor"]))
     cols_t1 = ["Fecha", "Beneficiario", "Documento", "Valor"]
-    c_p1, c_b1, c_del1 = st.columns([3, 1, 1])
-    with c_p1:
-        txt_t1 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Beneficiario | Documento | Valor):", key="paste_t1")
-    with c_b1:
-        if st.button("+ Cargar Ítems 1", key="btn_parse_t1"):
-            df_p1 = parsear_texto_pegado(txt_t1, cols_t1)
-            if df_p1 is not None:
-                st.session_state.tabla1 = pd.concat([st.session_state.tabla1, df_p1], ignore_index=True)
-                st.rerun()
-    with c_del1:
-        if st.button("🗑️ Limpiar Ítem 1", key="btn_del_t1"):
-            st.session_state.tabla1 = pd.DataFrame(columns=cols_t1)
-            st.rerun()
+    bloque_pegado_excel("t1", 'Fecha | Beneficiario | Documento | Valor', cols_t1, "tabla1", salidas_extracto, '+ Cargar Ítems 1', '🗑️ Limpiar Ítem 1')
 
     st.divider()
     st.subheader(f"2. {nombres_titulos['t2']}")
     salidas_libros_df = formatear_columna_valor(st.session_state.tabla2)
     salidas_libros = st.data_editor(salidas_libros_df, num_rows="dynamic", use_container_width=True, key="editor_tabla2", column_config=config_monetaria(["Valor"]))
     cols_t2 = ["Fecha", "Concepto", "Valor"]
-    c_p2, c_b2, c_del2 = st.columns([3, 1, 1])
-    with c_p2:
-        txt_t2 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t2")
-    with c_b2:
-        if st.button("+ Cargar Ítems 2", key="btn_parse_t2"):
-            df_p2 = parsear_texto_pegado(txt_t2, cols_t2)
-            if df_p2 is not None:
-                st.session_state.tabla2 = pd.concat([st.session_state.tabla2, df_p2], ignore_index=True)
-                st.rerun()
-    with c_del2:
-        if st.button("🗑️ Limpiar Ítem 2", key="btn_del_t2"):
-            st.session_state.tabla2 = pd.DataFrame(columns=cols_t2)
-            st.rerun()
+    bloque_pegado_excel("t2", 'Fecha | Concepto | Valor', cols_t2, "tabla2", salidas_libros, '+ Cargar Ítems 2', '🗑️ Limpiar Ítem 2')
 
     st.divider()
     st.subheader(f"3. {nombres_titulos['t3']}")
     entradas_libros_df = formatear_columna_valor(st.session_state.tabla3)
     entradas_libros = st.data_editor(entradas_libros_df, num_rows="dynamic", use_container_width=True, key="editor_tabla3", column_config=config_monetaria(["Valor"]))
     cols_t3 = ["Fecha", "Concepto", "Valor"]
-    c_p3, c_b3, c_del3 = st.columns([3, 1, 1])
-    with c_p3:
-        txt_t3 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t3")
-    with c_b3:
-        if st.button("+ Cargar Ítems 3", key="btn_parse_t3"):
-            df_p3 = parsear_texto_pegado(txt_t3, cols_t3)
-            if df_p3 is not None:
-                st.session_state.tabla3 = pd.concat([st.session_state.tabla3, df_p3], ignore_index=True)
-                st.rerun()
-    with c_del3:
-        if st.button("🗑️ Limpiar Ítem 3", key="btn_del_t3"):
-            st.session_state.tabla3 = pd.DataFrame(columns=cols_t3)
-            st.rerun()
+    bloque_pegado_excel("t3", 'Fecha | Concepto | Valor', cols_t3, "tabla3", entradas_libros, '+ Cargar Ítems 3', '🗑️ Limpiar Ítem 3')
 
     st.divider()
     st.subheader(f"4. {nombres_titulos['t4']}")
     entradas_extracto_df = formatear_columna_valor(st.session_state.tabla4)
     entradas_extracto = st.data_editor(entradas_extracto_df, num_rows="dynamic", use_container_width=True, key="editor_tabla4", column_config=config_monetaria(["Valor"]))
     cols_t4 = ["Fecha", "Concepto", "Valor"]
-    c_p4, c_b4, c_del4 = st.columns([3, 1, 1])
-    with c_p4:
-        txt_t4 = st.text_input("📋 Pegar ítems desde Excel (Fecha | Concepto | Valor):", key="paste_t4")
-    with c_b4:
-        if st.button("+ Cargar Ítems 4", key="btn_parse_t4"):
-            df_p4 = parsear_texto_pegado(txt_t4, cols_t4)
-            if df_p4 is not None:
-                st.session_state.tabla4 = pd.concat([st.session_state.tabla4, df_p4], ignore_index=True)
-                st.rerun()
-    with c_del4:
-        if st.button("🗑️ Limpiar Ítem 4", key="btn_del_t4"):
-            st.session_state.tabla4 = pd.DataFrame(columns=cols_t4)
-            st.rerun()
+    bloque_pegado_excel("t4", 'Fecha | Concepto | Valor', cols_t4, "tabla4", entradas_extracto, '+ Cargar Ítems 4', '🗑️ Limpiar Ítem 4')
 
     st.divider()
     st.subheader("Gastos Bancarios")
@@ -4613,19 +4636,7 @@ elif menu_seleccionado == "📝 Nueva Conciliación":
         gastos_bancarios_df = formatear_columna_valor(gastos_bancarios_df, _col_monetaria)
     gastos_bancarios = st.data_editor(gastos_bancarios_df, num_rows="dynamic", use_container_width=True, key="editor_tabla5", column_config=config_monetaria(["4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]))
     cols_t5 = ["Fecha", "4 x 1000", "Cuota de manejo", "IVA", "Rte. fuente", "Comisión", "Ing. x intereses"]
-    c_p5, c_b5, c_del5 = st.columns([3, 1, 1])
-    with c_p5:
-        txt_t5 = st.text_input("📋 Pegar ítems desde Excel para Gastos Bancarios:", key="paste_t5")
-    with c_b5:
-        if st.button("+ Cargar Ítems 5", key="btn_parse_t5"):
-            df_p5 = parsear_texto_pegado(txt_t5, cols_t5)
-            if df_p5 is not None:
-                st.session_state.tabla5 = pd.concat([st.session_state.tabla5, df_p5], ignore_index=True)
-                st.rerun()
-    with c_del5:
-        if st.button("🗑️ Limpiar Gastos", key="btn_del_t5"):
-            st.session_state.tabla5 = pd.DataFrame(columns=cols_t5)
-            st.rerun()
+    bloque_pegado_excel("t5", 'Fecha | 4 x 1000 | Cuota de manejo | IVA | Rte. fuente | Comisión | Ing. x intereses', cols_t5, "tabla5", gastos_bancarios, '+ Cargar Ítems 5', '🗑️ Limpiar Gastos')
 
     if es_tc:
         # En tarjeta de crédito el signo lo determina la categoría, no cómo
