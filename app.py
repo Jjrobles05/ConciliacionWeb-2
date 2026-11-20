@@ -2610,8 +2610,32 @@ def calcular_dias_espera(df, columna="fecha_guardado"):
     return (pd.Timestamp.now() - f).dt.days.fillna(0).clip(lower=0).astype(int)
 
 
-def filtrar_bandeja_auditoria(df, texto="", tipo="Todos", orden="Más antiguas primero"):
-    """Búsqueda, filtro por tipo y orden de la bandeja del auditor (no modifica datos)."""
+MES_TODOS = "Todos los meses"
+
+
+def opciones_meses_auditoria(df):
+    """Períodos (p. ej. 'Octubre 2026') presentes en el listado, del más reciente al más antiguo."""
+    if df is None or df.empty or "mes" not in df.columns:
+        return [MES_TODOS]
+    vistos = {}
+    for valor in df["mes"].dropna().astype(str):
+        v = valor.strip()
+        if not v:
+            continue
+        anio, mes_num = parsear_periodo(v)
+        etiqueta = f"{_MESES_ES[mes_num - 1]} {anio}" if anio else v
+        vistos[etiqueta] = (anio or 0, mes_num or 0)
+    ordenados = sorted(vistos, key=lambda e: vistos[e], reverse=True)
+    return [MES_TODOS] + ordenados
+
+
+def _clave_mes(valor):
+    anio, mes_num = parsear_periodo(valor)
+    return (anio, mes_num) if anio else str(valor or "").strip().lower()
+
+
+def filtrar_bandeja_auditoria(df, texto="", tipo="Todos", orden="Más antiguas primero", mes=MES_TODOS):
+    """Búsqueda, filtro por tipo, por mes y orden de la bandeja del auditor (no modifica datos)."""
     if df is None or df.empty:
         return df
     vista = df
@@ -2622,6 +2646,9 @@ def filtrar_bandeja_auditoria(df, texto="", tipo="Todos", orden="Más antiguas p
         vista = vista[base.str.lower().str.contains(q, regex=False)]
     if tipo and tipo != "Todos":
         vista = vista[vista["tipo"].astype(str) == tipo]
+    if mes and mes != MES_TODOS and "mes" in vista.columns:
+        objetivo = _clave_mes(mes)
+        vista = vista[vista["mes"].map(_clave_mes) == objetivo]
     antiguas = str(orden).startswith("Más antiguas")
     return vista.sort_values(["dias_espera", "id"], ascending=[not antiguas, antiguas])
 
@@ -3561,13 +3588,14 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
     if not _fuente.empty:
         _col_fecha = {_OPC_PEND: "fecha_guardado", _OPC_APR: "fecha_aprobacion", _OPC_DEV: "fecha_revision"}[vista_aud]
         _fuente["dias_espera"] = calcular_dias_espera(_fuente, _col_fecha)
-        fb1, fb2, fb3 = st.columns([2, 1, 1])
+        fb1, fb2, fb3, fb4 = st.columns([2, 1, 1, 1])
         _texto_aud = fb1.text_input("🔎 Buscar", placeholder="Consecutivo, empresa, banco, cuenta, mes o preparador", key="aud_buscar")
         _tipos_aud = ["Todos"] + sorted(_fuente["tipo"].dropna().astype(str).unique().tolist())
         _tipo_aud = fb2.selectbox("Tipo", _tipos_aud, key=f"aud_tipo_{vista_aud}")
-        _orden_aud = fb3.selectbox("Orden", ["Más antiguas primero", "Más recientes primero"],
+        _mes_aud = fb3.selectbox("📅 Mes", opciones_meses_auditoria(_fuente), key=f"aud_mes_{vista_aud}")
+        _orden_aud = fb4.selectbox("Orden", ["Más antiguas primero", "Más recientes primero"],
                                    index=0 if vista_aud == _OPC_PEND else 1, key=f"aud_orden_{vista_aud}")
-        vista_df = filtrar_bandeja_auditoria(_fuente, _texto_aud, _tipo_aud, _orden_aud)
+        vista_df = filtrar_bandeja_auditoria(_fuente, _texto_aud, _tipo_aud, _orden_aud, _mes_aud)
         if vista_df.empty:
             st.info("Ninguna conciliación coincide con la búsqueda o los filtros.")
         elif len(vista_df) != len(_fuente):
@@ -3586,7 +3614,7 @@ if menu_seleccionado == "🔍 Auditoría y Revisiones":
                                mime="text/csv", key=f"aud_csv_{vista_aud}")
             if vista_aud == _OPC_APR:
                 st.markdown("**🖨️ Impresión masiva**")
-                st.caption("Reúne en un solo PDF las conciliaciones aprobadas que estás viendo (se respetan la búsqueda y el filtro por tipo), "
+                st.caption("Reúne en un solo PDF las conciliaciones aprobadas que estás viendo (se respetan la búsqueda y los filtros de tipo y mes), "
                            "con una hoja de índice al inicio.")
                 _firma_imp = tuple((int(r_id), str(r_fa)) for r_id, r_fa in zip(vista_df["id"], vista_df.get("fecha_aprobacion", [""] * len(vista_df))))
                 if st.button(f"🖨️ Imprimir todas las aprobadas ({len(vista_df)})", key="aud_imprimir_todas", type="primary"):
